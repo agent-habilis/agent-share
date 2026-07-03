@@ -103,13 +103,7 @@ mod tests {
             "bare ⇒ Default (pinned)"
         );
         assert_eq!(
-            relay_of(&[
-                "ahmo",
-                "serve",
-                "./dir",
-                "--relay",
-                "https://relay.example"
-            ]),
+            relay_of(&["ahmo", "serve", "./dir", "--relay", "https://relay.example"]),
             RelaySelection::Custom("https://relay.example".parse().unwrap()),
             "valued ⇒ single-rung Custom ladder"
         );

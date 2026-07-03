@@ -39,10 +39,8 @@ impl TempDir {
     fn new(tag: &str) -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "ahmo-it-{}-{tag}-{unique}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ahmo-it-{}-{tag}-{unique}", std::process::id()));
         std::fs::create_dir_all(&path).expect("create temp dir");
         Self { path }
     }
@@ -111,8 +109,8 @@ fn spawn_producer(root: &Path, swarm: &str) -> (ChildGuard, String) {
     let (producer, producer_rx) = spawn_piped(producer_cmd);
     // json mode prints the bare `ahmo 🐝… <mountpoint-hint>` command;
     // the ticket is its second word.
-    let ticket_line = recv_line_containing(&producer_rx, "ahmo")
-        .expect("producer never printed a mount command");
+    let ticket_line =
+        recv_line_containing(&producer_rx, "ahmo").expect("producer never printed a mount command");
     let ticket = ticket_line
         .split_whitespace()
         .nth(1)

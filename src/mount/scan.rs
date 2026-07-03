@@ -105,8 +105,7 @@ mod tests {
 
     impl TempDir {
         fn new() -> Self {
-            let path =
-                std::env::temp_dir().join(format!("ahmo-test-{}", rand::rng().next_u64()));
+            let path = std::env::temp_dir().join(format!("ahmo-test-{}", rand::rng().next_u64()));
             std::fs::create_dir_all(&path).expect("create temp dir");
             Self { path }
         }

@@ -1,16 +1,8 @@
-//! `ahmo` — share a directory read-only over iroh QUIC, consumed
-//! locally through a loopback `NFSv3` mount. Extracted from
-//! agent-habilis/swarm's `ahsw mount`; tickets interoperate with it.
+//! Thin binary shim. All CLI logic lives in the library
+//! ([`ahmo::run_cli`]); `main` owns only process-level concerns the
+//! library must not: tracing init.
 
 use anyhow::Result;
-use clap::Parser;
-
-mod cli;
-mod file;
-mod lookup;
-mod mount;
-mod protocol;
-mod util;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,6 +11,5 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
-    let args = cli::args::Cli::parse();
-    cli::run(args).await
+    ahmo::run_cli().await
 }

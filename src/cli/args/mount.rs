@@ -75,23 +75,14 @@ mod tests {
 
     #[test]
     fn mount_serve_public_conflicts_with_granular_and_swarm() {
-        assert!(
-            Cli::try_parse_from(["ahmo", "serve", "./dir", "--public", "--dht"]).is_err()
-        );
+        assert!(Cli::try_parse_from(["ahmo", "serve", "./dir", "--public", "--dht"]).is_err());
         let id = crate::protocol::swarm::encode_test_swarm_id(
             "test",
             &crate::protocol::swarm::LookupOpts::loopback(),
         );
         assert!(
-            Cli::try_parse_from([
-                "ahmo",
-                "serve",
-                "./dir",
-                "--swarm",
-                id.as_str(),
-                "--public"
-            ])
-            .is_err()
+            Cli::try_parse_from(["ahmo", "serve", "./dir", "--swarm", id.as_str(), "--public"])
+                .is_err()
         );
     }
 
