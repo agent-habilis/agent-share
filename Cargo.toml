@@ -1,0 +1,119 @@
+[package]
+name = "ahsw-mount"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "share a directory read-only over iroh QUIC, mounted locally via NFS"
+license = "MIT"
+repository = "https://github.com/agent-habilis/swarm-mount"
+readme = "README.md"
+keywords = ["agents", "mount", "nfs", "p2p"]
+categories = ["network-programming", "filesystem"]
+
+# Note: there is NO `rust_2021_idioms` group. `rust_2018_idioms` is the only
+# idioms group and is still correct on edition 2021 (it bundles
+# bare_trait_objects, elided_lifetimes_in_paths, explicit_outlives_requirements,
+# unused_extern_crates, ellipsis_inclusive_range_patterns).
+[lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_code = "deny"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+missing_debug_implementations = "warn"
+# Reject non-ASCII identifiers (homoglyph / supply-chain hardening;
+# matches the project's ASCII-only protocol ethos).
+non_ascii_idents = "deny"
+# Require an explicit `unsafe {}` block inside any `unsafe fn`.
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Prevents holding a sync `std::sync::Mutex` (or RwLock) guard across an
+# `.await` point — a recipe for deadlocks.
+await_holding_lock = "deny"
+# Cargo.toml hygiene (metadata, wildcard deps, feature names, ...).
+cargo = { level = "warn", priority = -1 }
+# cherry-picked restriction lints that aid readability
+min_ident_chars = "warn"
+shadow_unrelated = "warn"
+semicolon_inside_block = "warn"
+allow_attributes_without_reason = "warn"
+# Force `#[expect(...)]` over `#[allow(...)]` where the lint still fires, so a
+# suppression that goes stale (lint no longer triggers) becomes a build error
+# instead of silently lingering.
+allow_attributes = "warn"
+# Forbid `_ =>` catch-all arms on enum matches: a new variant must be
+# handled explicitly rather than silently swallowed by a wildcard.
+wildcard_enum_match_arm = "warn"
+# documented opt-out (noise / not a readability win): keep CI signal useful
+module_name_repetitions = "allow"
+# Transitive duplicate crate versions are not controllable from a leaf
+# binary; the lint is noise here, not an actionable signal.
+multiple_crate_versions = "allow"
+
+[[bin]]
+name = "ahsw-mount"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
+clap = { version = "4", features = ["derive"] }
+anstyle = "1"
+anstream = "0.6"
+iroh = { version = "1.0.0-rc.0", features = ["tls-ring"] }
+# mDNS + mainline-DHT address-lookup providers were extracted from iroh core
+# in the 1.0 line; these companion crates restore the `--mdns` / `--dht` legs.
+iroh-mdns-address-lookup = "0.2"
+iroh-mainline-address-lookup = "0.2"
+anyhow = "1"
+sha2 = "0.10"
+bs58 = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+nfsserve = "0.11.0"
+async-trait = "0.1.89"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.release.build-override]
+opt-level = 3
+
+# Release-quality runtime perf with much faster build times — for CI and
+# anywhere local "full test" runs need crypto/network speed without
+# paying the fat-LTO + 1-codegen-unit price of `[profile.release]`.
+[profile.ci]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
+# Same fork pins as agent-habilis/swarm (behavior parity with the `ahsw` this
+# binary must interoperate with). Pinned by `rev`, not `branch`: a branch ref
+# is mutable, so a force-push on the fork would silently change what the next
+# `cargo update` builds.
+[patch.crates-io]
+# iroh#4294 mapped_addrs eviction, from the agent-habilis fork
+# (branch fix/mapped-addrs-eviction). iroh-base/iroh-dns are patched to the
+# SAME repo+rev as `iroh` because the forked `iroh` pulls its workspace-local
+# copies of them — without these the graph carries two `iroh_base`/`iroh_dns`
+# versions and types clash (E0308).
+iroh = { git = "https://github.com/agent-habilis/iroh", rev = "67cd78c96a8162b58c95306ab06e215bd250c893" }
+iroh-base = { git = "https://github.com/agent-habilis/iroh", rev = "67cd78c96a8162b58c95306ab06e215bd250c893" }
+iroh-dns = { git = "https://github.com/agent-habilis/iroh", rev = "67cd78c96a8162b58c95306ab06e215bd250c893" }
+# Branch fix/abandoned-path-leak: the abandoned_paths bound (#683) + the
+# Connecting-drop fix (#682). All three crates point at the same repo+rev
+# (cargo resolves the noq workspace as a unit).
+noq = { git = "https://github.com/agent-habilis/noq", rev = "7a02ed23af4d5da530b18517918c84f117346814" }
+noq-proto = { git = "https://github.com/agent-habilis/noq", rev = "7a02ed23af4d5da530b18517918c84f117346814" }
+noq-udp = { git = "https://github.com/agent-habilis/noq", rev = "7a02ed23af4d5da530b18517918c84f117346814" }
+# Branch fix/macos-corewlan-autorelease-leak: macOS CoreWLAN autorelease leak,
+# pulled in by netwatch → iroh.
+netdev = { git = "https://github.com/agent-habilis/netdev", rev = "c2561063f4ca3bab09070184842b1ee85efd90e8" }
