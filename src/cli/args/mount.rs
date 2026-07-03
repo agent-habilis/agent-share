@@ -6,12 +6,12 @@ use super::lookup::PublicLookupArgs;
 use super::output::OutputFormat;
 use crate::protocol::SwarmId;
 
-/// The `ahsw-mount serve` action. The consumer side is the bare
-/// `ahsw-mount <🐝…> <mountpoint>` form (positionals on the root command),
+/// The `ahmo serve` action. The consumer side is the bare
+/// `ahmo <🐝…> <mountpoint>` form (positionals on the root command),
 /// so a `🐝…` ticket can never collide with the `serve` literal.
 #[derive(Subcommand, Debug)]
 pub(crate) enum MountAction {
-    /// Share a folder read-only; prints the `ahsw-mount 🐝…` command on stdout.
+    /// Share a folder read-only; prints the `ahmo 🐝…` command on stdout.
     ///
     /// Lazy: the tree is scanned once at startup (a metadata-only snapshot —
     /// nothing is hashed or transferred up front); peers fetch file bytes on
@@ -31,7 +31,7 @@ pub(crate) enum MountAction {
         #[command(flatten)]
         lookups: PublicLookupArgs,
         /// Output format: human (default) — a cargo-style status + hint — or
-        /// json, a single direct `ahsw-mount 🐝…` line for machines.
+        /// json, a single direct `ahmo 🐝…` line for machines.
         #[arg(long, default_value = "human")]
         output: OutputFormat,
     },
@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn mount_serve_parses() {
-        let cli = Cli::parse_from(["ahsw-mount", "serve", "./dir"]);
+        let cli = Cli::parse_from(["ahmo", "serve", "./dir"]);
         let Some(super::MountAction::Serve { dir, swarm, .. }) = cli.action else {
             panic!("expected Serve");
         };
@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn mount_ticket_form_parses() {
-        let cli = Cli::parse_from(["ahsw-mount", "🐝abc", "./mnt", "--output", "json"]);
+        let cli = Cli::parse_from(["ahmo", "🐝abc", "./mnt", "--output", "json"]);
         assert!(cli.action.is_none());
         assert_eq!(cli.ticket.as_deref(), Some("🐝abc"));
         assert_eq!(cli.mountpoint, Some(std::path::PathBuf::from("./mnt")));
@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn mount_serve_parses_lookup_flags() {
-        let cli = Cli::parse_from(["ahsw-mount", "serve", "./dir", "--dht"]);
+        let cli = Cli::parse_from(["ahmo", "serve", "./dir", "--dht"]);
         let Some(super::MountAction::Serve { lookups, .. }) = cli.action else {
             panic!("expected Serve");
         };
@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn mount_serve_public_conflicts_with_granular_and_swarm() {
         assert!(
-            Cli::try_parse_from(["ahsw-mount", "serve", "./dir", "--public", "--dht"]).is_err()
+            Cli::try_parse_from(["ahmo", "serve", "./dir", "--public", "--dht"]).is_err()
         );
         let id = crate::protocol::swarm::encode_test_swarm_id(
             "test",
@@ -84,7 +84,7 @@ mod tests {
         );
         assert!(
             Cli::try_parse_from([
-                "ahsw-mount",
+                "ahmo",
                 "serve",
                 "./dir",
                 "--swarm",
@@ -99,7 +99,7 @@ mod tests {
     fn mount_without_args_is_rejected_at_dispatch_not_parse() {
         // Both positionals are optional at the clap layer (the serve
         // subcommand shares the slot); the handler errors with usage.
-        let cli = Cli::parse_from(["ahsw-mount"]);
+        let cli = Cli::parse_from(["ahmo"]);
         assert!(cli.action.is_none());
         assert!(cli.ticket.is_none());
     }

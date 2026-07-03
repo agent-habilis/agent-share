@@ -1,5 +1,5 @@
 [package]
-name = "ahsw-mount"
+name = "ahmo"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
@@ -53,7 +53,7 @@ module_name_repetitions = "allow"
 multiple_crate_versions = "allow"
 
 [[bin]]
-name = "ahsw-mount"
+name = "ahmo"
 path = "src/main.rs"
 
 [dependencies]

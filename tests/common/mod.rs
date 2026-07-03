@@ -22,7 +22,7 @@ pub(crate) const LOOPBACK_SWARM_ID: &str =
     "🐝2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2Msw3sco";
 
 fn bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_ahsw-mount"))
+    PathBuf::from(env!("CARGO_BIN_EXE_ahmo"))
 }
 
 pub(crate) fn test_cmd() -> Command {

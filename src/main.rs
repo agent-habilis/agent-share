@@ -1,4 +1,4 @@
-//! `ahsw-mount` — share a directory read-only over iroh QUIC, consumed
+//! `ahmo` — share a directory read-only over iroh QUIC, consumed
 //! locally through a loopback `NFSv3` mount. Extracted from
 //! agent-habilis/swarm's `ahsw mount`; tickets interoperate with it.
 

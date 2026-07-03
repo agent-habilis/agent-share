@@ -1,6 +1,6 @@
 # swarm-mount
 
-`ahsw-mount` — share a folder with peers, or mount a peer's folder locally.
+`ahmo` — share a folder with peers, or mount a peer's folder locally.
 Read-only, lazy, no daemon: the producer serves file bytes on demand over an
 [iroh](https://github.com/n0-computer/iroh) QUIC connection, and the consumer
 mounts them through a loopback `NFSv3` bridge — the OS's built-in NFS client,
@@ -8,14 +8,14 @@ no FUSE, no kernel extension.
 
 Extracted from [agent-habilis/swarm](https://github.com/agent-habilis/swarm)'s
 `ahsw mount`. Tickets interoperate: a `🐝…` ticket minted by `ahsw mount serve`
-mounts with `ahsw-mount`, and vice versa.
+mounts with `ahmo`, and vice versa.
 
 ## Usage
 
 Share a folder (producer):
 
 ```
-ahsw-mount serve <dir>
+ahmo serve <dir>
 ```
 
 This prints the consumer's ready-to-run command, carrying a `🐝…` bearer
@@ -26,7 +26,7 @@ interrupted.
 Mount it (consumer):
 
 ```
-ahsw-mount <🐝…> <mountpoint>
+ahmo <🐝…> <mountpoint>
 ```
 
 The mountpoint is created if missing (an existing directory must be empty) and

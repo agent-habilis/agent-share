@@ -1,4 +1,4 @@
-//! End-to-end subprocess test for `ahsw-mount serve` / `ahsw-mount`: a real
+//! End-to-end subprocess test for `ahmo serve` / `ahmo`: a real
 //! tree is served over a loopback swarm through the shipped binary, and the
 //! consumer redeems the ticket with `--no-mount` — proving the CLI wiring,
 //! ticket round-trip, manifest fetch, tree build, and the loopback NFS bridge
@@ -20,7 +20,7 @@ use std::time::Instant;
 mod common;
 use common::{CONNECT_TIMEOUT, LOOPBACK_SWARM_ID, POLL, test_cmd};
 
-/// A spawned `ahsw-mount` child killed when the test ends (or panics).
+/// A spawned `ahmo` child killed when the test ends (or panics).
 struct ChildGuard(Child);
 
 impl Drop for ChildGuard {
@@ -40,7 +40,7 @@ impl TempDir {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "ahsw-mount-it-{}-{tag}-{unique}",
+            "ahmo-it-{}-{tag}-{unique}",
             std::process::id()
         ));
         std::fs::create_dir_all(&path).expect("create temp dir");
@@ -65,7 +65,7 @@ fn spawn_piped(mut cmd: Command) -> (ChildGuard, Receiver<String>) {
     let mut child = cmd
         .stdout(Stdio::piped())
         .spawn()
-        .expect("failed to spawn ahsw-mount process");
+        .expect("failed to spawn ahmo process");
     let stdout = child.stdout.take().expect("child stdout handle");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -109,9 +109,9 @@ fn spawn_producer(root: &Path, swarm: &str) -> (ChildGuard, String) {
         "json",
     ]);
     let (producer, producer_rx) = spawn_piped(producer_cmd);
-    // json mode prints the bare `ahsw-mount 🐝… <mountpoint-hint>` command;
+    // json mode prints the bare `ahmo 🐝… <mountpoint-hint>` command;
     // the ticket is its second word.
-    let ticket_line = recv_line_containing(&producer_rx, "ahsw-mount")
+    let ticket_line = recv_line_containing(&producer_rx, "ahmo")
         .expect("producer never printed a mount command");
     let ticket = ticket_line
         .split_whitespace()
