@@ -1,5 +1,5 @@
 [workspace]
-members = ["tasks", "crates/proto"]
+members = ["tasks", "crates/proto", "crates/webrtc-transport"]
 
 # Shared package fields. Each crate opts in with `edition.workspace = true`
 # / `rust-version.workspace = true` so the workspace stays in lockstep
