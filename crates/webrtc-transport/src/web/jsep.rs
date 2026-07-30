@@ -25,8 +25,11 @@ use super::transport::{BrowserRtcTransport, IN_QUEUE};
 use iroh_base::EndpointId;
 
 /// How long to wait for the data channel after the answer is applied.
-const CHANNEL_OPEN_ATTEMPTS: u32 = 1200;
-/// Poll interval for the two readiness waits below.
+const CHANNEL_OPEN_DEADLINE_MS: f64 = 60_000.0;
+/// How long to let gathering run before settling for the candidates in hand.
+const ICE_GATHERING_DEADLINE_MS: f64 = 5_000.0;
+/// Poll interval for the readiness waits below — a floor, never a unit of
+/// measurement. See [`now_ms`].
 const POLL_MS: i32 = 50;
 /// Stop queueing into the channel above this much buffered data; QUIC above
 /// retransmits, and an unbounded buffer is worse than a dropped datagram.
@@ -241,29 +244,67 @@ fn any_err(context: &str, error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{context}: {error}"))
 }
 
+/// Wait for gathering, but not unconditionally.
+///
+/// `Complete` is the ideal: vanilla ICE means whatever sits in the SDP when
+/// this returns is every candidate the remote will ever see. It is not worth
+/// waiting *indefinitely* for, though. One STUN server whose lookup fails
+/// keeps the browser in `gathering` until its own internal timeout expires —
+/// measured at ~40s of spinner for a host and a server-reflexive candidate
+/// that were both in hand within two, with the peer's dial idling out
+/// meanwhile.
+///
+/// So: past the deadline, send what has been gathered. Only once there is
+/// something to send, though — an offer carrying no candidates at all is dead
+/// on arrival, and continuing to wait is then the only thing left to do.
 async fn wait_ice_complete(peer_connection: &RtcPeerConnection) {
-    // No timeout: gathering completes on its own once every server has
-    // answered or timed out internally, and cutting it short would drop
-    // candidates we cannot add later.
+    let deadline = now_ms() + ICE_GATHERING_DEADLINE_MS;
     loop {
         if peer_connection.ice_gathering_state() == RtcIceGatheringState::Complete {
+            return;
+        }
+        if now_ms() >= deadline && has_candidate(peer_connection) {
             return;
         }
         sleep_ms(POLL_MS).await;
     }
 }
 
+/// Wall-clock milliseconds — the unit both waits above and below measure in.
+///
+/// Never count polls. A page that is hidden, or merely occluded by another
+/// window, has its timers clamped by the browser to roughly one tick per
+/// second, so [`POLL_MS`] is a lower bound the browser is free to ignore. A
+/// wait written as "100 polls of 50ms" is five seconds on a focused tab and a
+/// hundred on a backgrounded one — which is exactly how the gathering deadline
+/// first shipped inoperative, losing every race with the 40s the browser
+/// itself takes to give up on an unreachable STUN server.
+fn now_ms() -> f64 {
+    js_sys::Date::now()
+}
+
+/// Whether the local description carries at least one ICE candidate.
+fn has_candidate(peer_connection: &RtcPeerConnection) -> bool {
+    peer_connection
+        .local_description()
+        .is_some_and(|description| description.sdp().contains("a=candidate"))
+}
+
 async fn wait_channel_open(data_channel: &RtcDataChannel) -> Result<(), JsValue> {
-    for _ in 0..CHANNEL_OPEN_ATTEMPTS {
+    let deadline = now_ms() + CHANNEL_OPEN_DEADLINE_MS;
+    loop {
         match data_channel.ready_state() {
             web_sys::RtcDataChannelState::Open => return Ok(()),
             web_sys::RtcDataChannelState::Closing | web_sys::RtcDataChannelState::Closed => {
                 return Err(JsValue::from_str("data channel closed during setup"));
             }
-            _ => sleep_ms(POLL_MS).await,
+            _ => {}
         }
+        if now_ms() >= deadline {
+            return Err(JsValue::from_str("timed out waiting for the data channel"));
+        }
+        sleep_ms(POLL_MS).await;
     }
-    Err(JsValue::from_str("timed out waiting for the data channel"))
 }
 
 async fn sleep_ms(millis: i32) {

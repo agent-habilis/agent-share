@@ -26,6 +26,65 @@ type State =
   | { phase: 'ready'; client: Client; manifest: Manifest }
   | { phase: 'failed'; reason: string }
 
+function importWasm() {
+  return import('../../crates/agent-share-wasm-client/dist/web/agent_share_wasm_client.js')
+}
+
+type WasmModule = Awaited<ReturnType<typeof importWasm>>
+
+/**
+ * The WASM module, instantiated at most once per page.
+ *
+ * Caching the *promise* is load-bearing, not an optimisation. `__wbg_init`
+ * guards itself with `if (wasm !== undefined) return wasm`, but it assigns
+ * that module-global only *after* its await — so two overlapping calls both
+ * miss the guard and each build a `WebAssembly.Instance`. The two instances
+ * then share one JS glue module, whose closure table and `wasm` binding now
+ * refer to the second: pointers minted by the first get read against the
+ * wrong linear memory, and the page dies in `FnOnce called more than once`,
+ * `function signature mismatch` and `memory access out of bounds`.
+ *
+ * StrictMode's mount/unmount/remount of every effect is enough to trigger it,
+ * which is how it was found — but any two concurrent callers would do.
+ */
+let wasmModule: Promise<WasmModule> | null = null
+
+function loadWasm(): Promise<WasmModule> {
+  if (!wasmModule) {
+    wasmModule = importWasm().then(async (module) => {
+      await module.default()
+      return module
+    })
+    // A failed load must not poison every later attempt.
+    wasmModule.catch(() => {
+      wasmModule = null
+    })
+  }
+  return wasmModule
+}
+
+/**
+ * One client per ticket, shared across effect runs.
+ *
+ * Same reasoning one level up: a second run for a ticket already being dialled
+ * would negotiate a *second* WebRTC session for the same share — two ICE runs,
+ * two data channels, one of them orphaned with no one left to close it.
+ */
+const clients = new Map<string, Promise<Client>>()
+
+function connect(ticket: string): Promise<Client> {
+  let client = clients.get(ticket)
+  if (!client) {
+    client = loadWasm().then(
+      (wasm) => wasm.ShareClient.connect(ticket) as unknown as Promise<Client>,
+    )
+    // Evict on failure so a retry (a re-entered hash, say) can dial again.
+    client.catch(() => clients.delete(ticket))
+    clients.set(ticket, client)
+  }
+  return client
+}
+
 export function App() {
   const [state, setState] = useState<State>({ phase: 'idle' })
   const [path, setPath] = useState<string[]>([])
@@ -39,9 +98,7 @@ export function App() {
     setState({ phase: 'connecting' })
     void (async () => {
       try {
-        const wasm = await import('../../crates/agent-share-wasm-client/dist/web/agent_share_wasm_client.js')
-        await wasm.default()
-        const client = (await wasm.ShareClient.connect(ticket)) as unknown as Client
+        const client = await connect(ticket)
         const manifest = await client.manifest()
         if (!cancelled) setState({ phase: 'ready', client, manifest })
       } catch (error) {
