@@ -28,7 +28,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     // The bare form: both positionals are optional at the clap layer (the
     // `serve` subcommand shares the slot), so require them here.
     let (Some(ticket), Some(mountpoint)) = (cli.ticket, cli.mountpoint) else {
-        anyhow::bail!("usage: ahmo <🐝…> <mountpoint>, or ahmo serve <dir>");
+        anyhow::bail!("usage: agent-share <🐝…> <mountpoint>, or agent-share serve <dir>");
     };
     crate::mount::attach(&ticket, &mountpoint, cli.no_mount, json).await
 }

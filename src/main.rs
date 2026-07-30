@@ -1,5 +1,5 @@
 //! Thin binary shim. All CLI logic lives in the library
-//! ([`ahmo::run_cli`]); `main` owns only process-level concerns the
+//! ([`agent_share::run_cli`]); `main` owns only process-level concerns the
 //! library must not: tracing init.
 
 use anyhow::Result;
@@ -11,5 +11,5 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
-    ahmo::run_cli().await
+    agent_share::run_cli().await
 }

@@ -15,10 +15,10 @@ xshell = "0.2"
 # `build` task calls `Build::execute()` directly, and `main`'s hidden `zig`
 # subcommand delegates to its `Zig` shim — see tasks/src/build.rs.
 cargo-zigbuild = "0.23"
-# `cargo task man` generates roff pages in-process: it walks the ahmo
+# `cargo task man` generates roff pages in-process: it walks the agent-share
 # crate's clap tree (`cli_command`) through `clap_mangen`. This makes the
-# ahmo lib a build dependency of the task runner.
-ahmo = { path = ".." }
+# agent-share lib a build dependency of the task runner.
+agent-share = { path = ".." }
 clap_mangen = "0.2"
 # Cargo-style status output, shared with the binary by `include!`ing its
 # canonical source (`../src/util/output.rs`) — see `src/util/output.rs`.

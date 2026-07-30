@@ -1,6 +1,6 @@
 //! The clap surface. The root command is what `ahsw mount` was in
 //! agent-habilis/swarm, hoisted to a standalone binary: the bare
-//! `ahmo <🐝…> <mountpoint>` consumer form plus the `serve`
+//! `agent-share <🐝…> <mountpoint>` consumer form plus the `serve`
 //! subcommand.
 
 use std::path::PathBuf;
@@ -17,18 +17,18 @@ pub(crate) use output::OutputFormat;
 /// Share a folder with peers, or mount a peer's folder locally
 /// (read-only, lazy, no daemon).
 ///
-/// `ahmo serve <dir>` shares a folder and prints the `ahmo 🐝…`
-/// command; `ahmo <🐝…> <mountpoint>` mounts it through a loopback `NFSv3`
+/// `agent-share serve <dir>` shares a folder and prints the `agent-share 🐝…`
+/// command; `agent-share <🐝…> <mountpoint>` mounts it through a loopback `NFSv3`
 /// bridge (the OS's built-in NFS client — no FUSE, no kernel extension).
 /// The directory tree is a snapshot from when `serve` started; file bytes
 /// are fetched on demand as they are read. Writes fail (read-only).
 #[derive(Parser, Debug)]
-#[command(name = "ahmo", version, args_conflicts_with_subcommands = true)]
+#[command(name = "agent-share", version, args_conflicts_with_subcommands = true)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub action: Option<MountAction>,
 
-    /// The `🐝…` ticket printed by `ahmo serve`.
+    /// The `🐝…` ticket printed by `agent-share serve`.
     pub ticket: Option<String>,
 
     /// Where to mount the shared folder (created if missing; an existing

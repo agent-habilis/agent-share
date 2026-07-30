@@ -1,21 +1,23 @@
-# swarm-mount
+# agent-share
 
-`ahmo` — share a folder with peers, or mount a peer's folder locally.
+`agent-share` — share a folder with peers, or mount a peer's folder locally.
 Read-only, lazy, no daemon: the producer serves file bytes on demand over an
 [iroh](https://github.com/n0-computer/iroh) QUIC connection, and the consumer
 mounts them through a loopback `NFSv3` bridge — the OS's built-in NFS client,
 no FUSE, no kernel extension.
 
 Extracted from [agent-habilis/swarm](https://github.com/agent-habilis/swarm)'s
-`ahsw mount`. Tickets interoperate: a `🐝…` ticket minted by `ahsw mount serve`
-mounts with `ahmo`, and vice versa.
+`ahsw mount`, and since forked: `agent-share` negotiates its own QUIC ALPN, so
+it no longer mounts against `ahsw mount` in either direction. Both ends must
+run `agent-share`. The `🐝…` ticket encoding itself is still shared with the
+rest of the agent-habilis tooling.
 
 ## Usage
 
 Share a folder (producer):
 
 ```
-ahmo serve <dir>
+agent-share serve <dir>
 ```
 
 This prints the consumer's ready-to-run command, carrying a `🐝…` bearer
@@ -26,7 +28,7 @@ interrupted.
 Mount it (consumer):
 
 ```
-ahmo <🐝…> <mountpoint>
+agent-share <🐝…> <mountpoint>
 ```
 
 The mountpoint is created if missing (an existing directory must be empty) and
@@ -55,7 +57,7 @@ cargo test                          # includes a subprocess bridge test, no OS m
 cargo test --test mount -- --ignored  # the real OS-mount round trip, run by hand
 ```
 
-Wire compatibility with `ahsw` is pinned by golden tests
-(`wire_constants_are_pinned`, `type_bytes_are_pinned_wire_format`,
-`swarm_id_wire_format_is_pinned`) — if one of those fails after a change,
-cross-tool interop broke.
+The wire format is pinned by golden tests (`wire_constants_are_pinned`,
+`type_bytes_are_pinned_wire_format`, `swarm_id_wire_format_is_pinned`) — if one
+of those fails after a change, you broke compatibility with already-issued
+tickets and with peers running an older build.

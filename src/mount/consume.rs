@@ -269,7 +269,7 @@ fn mountpoint_owner(mountpoint: &Path) -> Result<(u32, u32)> {
 
 #[cfg(not(unix))]
 fn mountpoint_owner(_mountpoint: &Path) -> Result<(u32, u32)> {
-    bail!("ahmo is only supported on macOS and Linux")
+    bail!("agent-share is only supported on macOS and Linux")
 }
 
 /// The OS mount invocation for the loopback bridge: the argv actually run

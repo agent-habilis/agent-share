@@ -80,7 +80,7 @@ mod tests {
     use crate::cli::args::{Cli, MountAction};
     use crate::protocol::swarm::RelaySelection;
 
-    /// Parse `ahmo serve …` and read the resolved relay selection —
+    /// Parse `agent-share serve …` and read the resolved relay selection —
     /// the `--relay` allowlist flag lives in [`super::LookupArgs`],
     /// exercised here through the serve subcommand.
     fn relay_of(args: &[&str]) -> RelaySelection {
@@ -93,23 +93,29 @@ mod tests {
     #[test]
     fn relay_flag_absent_bare_and_valued() {
         assert_eq!(
-            relay_of(&["ahmo", "serve", "./dir"]),
+            relay_of(&["agent-share", "serve", "./dir"]),
             RelaySelection::Unset,
             "absent ⇒ Unset"
         );
         assert_eq!(
-            relay_of(&["ahmo", "serve", "./dir", "--relay"]),
+            relay_of(&["agent-share", "serve", "./dir", "--relay"]),
             RelaySelection::Default,
             "bare ⇒ Default (pinned)"
         );
         assert_eq!(
-            relay_of(&["ahmo", "serve", "./dir", "--relay", "https://relay.example"]),
+            relay_of(&[
+                "agent-share",
+                "serve",
+                "./dir",
+                "--relay",
+                "https://relay.example"
+            ]),
             RelaySelection::Custom("https://relay.example".parse().unwrap()),
             "valued ⇒ single-rung Custom ladder"
         );
         assert_eq!(
             relay_of(&[
-                "ahmo",
+                "agent-share",
                 "serve",
                 "./dir",
                 "--relay",
@@ -123,7 +129,7 @@ mod tests {
     #[test]
     fn relay_flag_rejects_empty_ladder_entry() {
         let parsed = Cli::try_parse_from([
-            "ahmo",
+            "agent-share",
             "serve",
             "./dir",
             "--relay",

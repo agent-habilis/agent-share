@@ -34,7 +34,7 @@ struct Cli {
 enum Task {
     /// Run unit tests.
     Test,
-    /// Build the `ahmo` binary. Cross-compile with `--target <triple>` or the
+    /// Build the `agent-share` binary. Cross-compile with `--target <triple>` or the
     /// `--arch <arch>` shorthand (static-musl Linux) through a project-pinned
     /// zig + cargo-zigbuild toolchain — self-contained, never the global zig
     /// or a global `cargo install`.
@@ -58,7 +58,7 @@ enum Task {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Run the binary (`cargo run`). Extra args go to `ahmo`
+    /// Run the binary (`cargo run`). Extra args go to `agent-share`
     /// (e.g. `cargo task run serve ./dir`).
     Run {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

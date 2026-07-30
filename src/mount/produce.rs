@@ -27,7 +27,7 @@ pub(super) struct ServedFile {
 
 /// Producer: share `dir` read-only. Scans **once** at startup — a consistent
 /// snapshot with stable READ indices for every consumer and reconnect — then
-/// prints the consumer's `ahmo` command on stdout and serves manifest
+/// prints the consumer's `agent-share` command on stdout and serves manifest
 /// and ranged-read requests until interrupted.
 ///
 /// # Errors
@@ -88,7 +88,7 @@ pub(crate) async fn serve(
             root.display(),
             human_bytes(total_bytes)
         ),
-        &format!("ahmo {} {mount_hint}", ticket.encode()),
+        &format!("agent-share {} {mount_hint}", ticket.encode()),
     );
 
     while let Some(incoming) = endpoint.accept().await {

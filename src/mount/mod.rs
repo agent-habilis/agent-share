@@ -10,7 +10,12 @@ pub(crate) use produce::serve;
 
 /// ALPN for the mount protocol — request/response bi-streams with their own
 /// protocol identity, distinct from the one-shot file transfer's `FILE_ALPN`.
-pub(crate) const MOUNT_ALPN: &[u8] = b"agent-habilis-swarm/mount/1";
+///
+/// Forked from agent-habilis/swarm's `agent-habilis-swarm/mount/1` when this
+/// tool took the `agent-share` name. QUIC refuses a handshake on ALPN
+/// mismatch, so `ahsw mount` and `agent-share` no longer connect to each
+/// other — deliberate, not drift.
+pub(crate) const MOUNT_ALPN: &[u8] = b"agent-share/mount/1";
 
 /// Length of the bearer-capability secret carried in a mount ticket.
 pub(crate) const SECRET_LEN: usize = 32;
@@ -89,7 +94,8 @@ mod tests {
 
     impl TempDir {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("ahmo-test-{}", rand::rng().next_u64()));
+            let path =
+                std::env::temp_dir().join(format!("agent-share-test-{}", rand::rng().next_u64()));
             std::fs::create_dir_all(&path).expect("create temp dir");
             Self { path }
         }
@@ -151,9 +157,12 @@ mod tests {
 
     #[test]
     fn wire_constants_are_pinned() {
-        // Interop tripwire: these constants are shared with
-        // agent-habilis/swarm's `ahsw mount` and must never drift.
-        assert_eq!(super::MOUNT_ALPN, b"agent-habilis-swarm/mount/1");
+        // Wire-format pins for `agent-share`'s own mount protocol: a change
+        // here breaks every already-issued ticket and every peer running an
+        // older build, so it must be a deliberate edit, never a refactor's
+        // side effect. The op codes and secret length are still bit-identical
+        // to agent-habilis/swarm's `ahsw mount`; only the ALPN was forked.
+        assert_eq!(super::MOUNT_ALPN, b"agent-share/mount/1");
         assert_eq!(super::OP_MANIFEST, 1);
         assert_eq!(super::OP_READ, 2);
         assert_eq!(super::SECRET_LEN, 32);

@@ -9,14 +9,14 @@ edition = "2024"
 rust-version = "1.93"
 
 [package]
-name = "ahmo"
+name = "agent-share"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 authors = ["Caio Gondim <me@caiogondim.com>"]
 description = "share a directory read-only over iroh QUIC, mounted locally via NFS"
 license = "MIT"
-repository = "https://github.com/agent-habilis/swarm-mount"
+repository = "https://github.com/agent-habilis/agent-share"
 readme = "README.md"
 keywords = ["agents", "mount", "nfs", "p2p"]
 categories = ["network-programming", "filesystem"]
@@ -74,11 +74,11 @@ module_name_repetitions = "allow"
 multiple_crate_versions = "allow"
 
 [lib]
-name = "ahmo"
+name = "agent_share"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ahmo"
+name = "agent-share"
 path = "src/main.rs"
 
 [dependencies]
