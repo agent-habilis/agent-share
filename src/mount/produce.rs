@@ -12,8 +12,8 @@ use crate::file::human_bytes;
 use crate::lookup::build_endpoint;
 use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 
-use super::ticket::MountTicket;
-use super::wire::ReadStatus;
+use super::MountTicket;
+use super::ReadStatus;
 use super::{
     MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ, REQUEST_HEADER_LEN, SECRET_LEN, wait_online,
 };

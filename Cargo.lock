@@ -56,6 +56,7 @@ dependencies = [
 name = "agent-share"
 version = "0.1.0"
 dependencies = [
+ "agent-share-proto",
  "anstream 0.6.21",
  "anstyle",
  "anyhow",
@@ -73,6 +74,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "agent-share-proto"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bs58",
+ "iroh-base",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

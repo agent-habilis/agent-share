@@ -2,43 +2,21 @@ mod consume;
 mod nfs;
 mod produce;
 mod scan;
-mod ticket;
-mod wire;
 
 pub(crate) use consume::attach;
 pub(crate) use produce::serve;
 
-/// ALPN for the mount protocol — request/response bi-streams with their own
-/// protocol identity, distinct from the one-shot file transfer's `FILE_ALPN`.
-///
-/// Forked from agent-habilis/swarm's `agent-habilis-swarm/mount/1` when this
-/// tool took the `agent-share` name. QUIC refuses a handshake on ALPN
-/// mismatch, so `ahsw mount` and `agent-share` no longer connect to each
-/// other — deliberate, not drift.
-pub(crate) const MOUNT_ALPN: &[u8] = b"agent-share/mount/1";
-
-/// Length of the bearer-capability secret carried in a mount ticket.
-pub(crate) const SECRET_LEN: usize = 32;
-
-/// Per-request header: the 32-byte bearer secret followed by the 1-byte op.
-/// Read off every accepted bi-stream — a bad secret poisons the whole
-/// connection; an unknown op drops only that stream.
-const REQUEST_HEADER_LEN: usize = SECRET_LEN + 1;
-
-/// Request the manifest: the full dir + file listing with sizes and attrs.
-const OP_MANIFEST: u8 = 1;
-
-/// Request a byte range of one file, addressed by its manifest index.
-const OP_READ: u8 = 2;
-
-/// Ceiling on the encoded manifest, so a hostile producer can't force an
-/// unbounded allocation before the first decode error.
-const MAX_MANIFEST_BYTES: u32 = 64 * 1024 * 1024;
-
-/// Ceiling on a single READ. Sized to fit the NFS client's `rsize=131072`
-/// with headroom; the producer rejects anything larger without killing the
-/// connection.
-pub(crate) const MAX_READ_LEN: u32 = 256 * 1024;
+// The mount protocol's identity, op codes, caps, manifest types and ticket
+// codec live in `agent-share-proto` so the browser client links the very same
+// bytes rather than a second implementation that drifts. Re-exported here
+// under their long-standing names; the golden pin that guards them moved with
+// them (`agent_share_proto::framing` — `wire_constants_are_pinned`).
+pub(crate) use agent_share_proto::framing::{
+    MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ, REQUEST_HEADER_LEN,
+    SECRET_LEN,
+};
+pub(crate) use agent_share_proto::manifest::{MountManifest, ReadStatus};
+pub(crate) use agent_share_proto::ticket::MountTicket;
 
 // The pre-ticket online wait is identical for every direct off-gossip
 // command — reuse `file`'s rather than keeping a fourth copy.
@@ -78,8 +56,7 @@ fn announce(json: bool, serving: &str, command: &str) {
 #[cfg(test)]
 mod tests {
     use super::consume::RemoteClient;
-    use super::ticket::MountTicket;
-    use super::{MAX_READ_LEN, produce};
+    use super::{MAX_READ_LEN, MountTicket, SECRET_LEN, produce};
     use crate::lookup::{add_peer_addr, build_participant_endpoint};
     use crate::protocol::swarm::LookupOpts;
     use rand::RngCore;
@@ -155,19 +132,6 @@ mod tests {
         tmp
     }
 
-    #[test]
-    fn wire_constants_are_pinned() {
-        // Wire-format pins for `agent-share`'s own mount protocol: a change
-        // here breaks every already-issued ticket and every peer running an
-        // older build, so it must be a deliberate edit, never a refactor's
-        // side effect. The op codes and secret length are still bit-identical
-        // to agent-habilis/swarm's `ahsw mount`; only the ALPN was forked.
-        assert_eq!(super::MOUNT_ALPN, b"agent-share/mount/1");
-        assert_eq!(super::OP_MANIFEST, 1);
-        assert_eq!(super::OP_READ, 2);
-        assert_eq!(super::SECRET_LEN, 32);
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn manifest_and_ranged_reads_round_trip() {
         let tree = fixture_tree();
@@ -221,7 +185,7 @@ mod tests {
         // connection, so the request fails rather than answering.
         let bad_ticket = MountTicket {
             addr: client.producer_addr(),
-            secret: [0u8; super::SECRET_LEN],
+            secret: [0u8; SECRET_LEN],
             lookups: LookupOpts::loopback(),
         };
         let bad_endpoint = build_participant_endpoint(&bad_ticket.lookups)

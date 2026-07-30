@@ -1,18 +1,24 @@
+//! The mount ticket — the whole capability to read a share, in one string.
+
 use anyhow::{Context, Result, bail};
-use iroh::EndpointAddr;
+use iroh_base::EndpointAddr;
 
-use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
-use crate::protocol::swarm::LookupOpts;
-use crate::protocol::token::{self, TokenType};
+use crate::framing::SECRET_LEN;
+use crate::lookup::LookupOpts;
+use crate::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
+use crate::token::{self, TokenType};
 
-use super::SECRET_LEN;
-
-/// A decoded mount ticket — the bearer secret, the swarm's discovery config,
+/// A decoded mount ticket — the bearer secret, the share's discovery config,
 /// and the producer's address. Payload layout mirrors the file ticket:
 /// `secret(32) ‖ flags(1) ‖ lookups ‖ address-json` (lookups is
 /// self-delimiting, so the address occupies the remainder). `flags` is
 /// reserved for forward-compat and always 0 today.
-pub(crate) struct MountTicket {
+///
+/// The secret is a pure bearer capability: whoever holds this string can read
+/// the share. That is why the web client keeps it in the URL *fragment*,
+/// which is never sent to a server.
+#[derive(Debug, Clone)]
+pub struct MountTicket {
     pub addr: EndpointAddr,
     pub secret: [u8; SECRET_LEN],
     pub lookups: LookupOpts,
@@ -20,7 +26,12 @@ pub(crate) struct MountTicket {
 
 impl MountTicket {
     /// Encode as a `🐝` token (`type = mount`).
-    pub(crate) fn encode(&self) -> String {
+    ///
+    /// # Panics
+    /// If the embedded [`LookupOpts`] exceeds its wire bounds — see
+    /// [`LookupOpts::encode_into`]. The address JSON cannot fail.
+    #[must_use]
+    pub fn encode(&self) -> String {
         let mut payload = Vec::with_capacity(SECRET_LEN + 1 + 64);
         payload.extend_from_slice(&self.secret);
         payload.push(0); // reserved flags byte
@@ -35,7 +46,7 @@ impl MountTicket {
     ///
     /// # Errors
     /// Not a `🐝` token, the wrong token type, or a malformed payload.
-    pub(crate) fn decode(ticket: &str) -> Result<Self> {
+    pub fn decode(ticket: &str) -> Result<Self> {
         let (kind, payload) = token::decode(ticket.trim())?;
         if kind != TokenType::Mount {
             bail!("not a mount ticket: wrong token type");
@@ -64,30 +75,50 @@ impl MountTicket {
 #[cfg(test)]
 mod tests {
     use super::{MountTicket, SECRET_LEN};
-    use crate::protocol::swarm::LookupOpts;
-    use iroh::{EndpointAddr, SecretKey};
+    use crate::lookup::LookupOpts;
+    use crate::token::{self, TokenType};
+    use iroh_base::{EndpointAddr, SecretKey};
 
-    #[test]
-    fn ticket_round_trips() {
+    fn sample() -> MountTicket {
         let id = SecretKey::from_bytes(&[7u8; 32]).public();
-        let addr = EndpointAddr::new(id).with_ip_addr("127.0.0.1:4242".parse().unwrap());
-        let ticket = MountTicket {
-            addr: addr.clone(),
+        MountTicket {
+            addr: EndpointAddr::new(id).with_ip_addr("127.0.0.1:4242".parse().expect("addr")),
             secret: [5u8; SECRET_LEN],
             lookups: LookupOpts::public_preset(),
-        };
-        let encoded = ticket.encode();
-        assert!(encoded.starts_with("🐝"));
-        let decoded = MountTicket::decode(&encoded).expect("decode");
-        assert_eq!(decoded.addr.id, addr.id);
-        assert_eq!(decoded.secret, [5u8; SECRET_LEN]);
-        assert_eq!(decoded.lookups, LookupOpts::public_preset());
+        }
     }
 
     #[test]
-    fn rejects_a_swarm_token() {
-        // A `🐝` swarm id is a valid token but the wrong type for a mount ticket.
-        let swarm = crate::protocol::swarm::encode_test_swarm_id("t", &LookupOpts::loopback());
+    fn ticket_round_trips() {
+        let ticket = sample();
+        let encoded = ticket.encode();
+        assert!(encoded.starts_with("🐝"));
+        let decoded = MountTicket::decode(&encoded).expect("decode");
+        assert_eq!(decoded.addr.id, ticket.addr.id);
+        assert_eq!(decoded.secret, ticket.secret);
+        assert_eq!(decoded.lookups, ticket.lookups);
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_tolerated() {
+        // Tickets get copy-pasted out of terminals and URLs; a stray newline
+        // must not be the difference between mounting and a cryptic error.
+        let encoded = sample().encode();
+        let padded = format!("  {encoded}\n");
+        assert!(MountTicket::decode(&padded).is_ok());
+    }
+
+    #[test]
+    fn rejects_another_token_type() {
+        // A `🐝` token of the wrong kind is valid framing but must not decode
+        // as a mount ticket — that is what the type byte is for.
+        let swarm = token::encode(TokenType::Swarm, &[0u8; 64]);
         assert!(MountTicket::decode(&swarm).is_err());
+    }
+
+    #[test]
+    fn rejects_a_truncated_payload() {
+        let mount = token::encode(TokenType::Mount, &[0u8; SECRET_LEN - 1]);
+        assert!(MountTicket::decode(&mount).is_err());
     }
 }

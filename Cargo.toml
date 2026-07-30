@@ -1,5 +1,5 @@
 [workspace]
-members = ["tasks"]
+members = ["tasks", "crates/proto"]
 
 # Shared package fields. Each crate opts in with `edition.workspace = true`
 # / `rust-version.workspace = true` so the workspace stays in lockstep
@@ -82,6 +82,9 @@ name = "agent-share"
 path = "src/main.rs"
 
 [dependencies]
+# The wire format, shared verbatim with the browser client. Anything both
+# ends must agree on lives there, not here.
+agent-share-proto = { path = "crates/proto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 clap = { version = "4", features = ["derive"] }
 anstyle = "1"

@@ -9,10 +9,10 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use iroh::{EndpointAddr, EndpointId, RelayUrl};
+use iroh_base::{EndpointAddr, EndpointId, RelayUrl};
 
 /// Serialize an `EndpointAddr` to a JSON value for `PeerInfo` messages.
-pub(crate) fn endpoint_addr_to_json(addr: &EndpointAddr) -> serde_json::Value {
+pub fn endpoint_addr_to_json(addr: &EndpointAddr) -> serde_json::Value {
     let ips: Vec<String> = addr.ip_addrs().map(ToString::to_string).collect();
     let relay: Option<String> = addr.relay_urls().next().map(ToString::to_string);
     serde_json::json!({
@@ -23,9 +23,15 @@ pub(crate) fn endpoint_addr_to_json(addr: &EndpointAddr) -> serde_json::Value {
 }
 
 /// Deserialize an `EndpointAddr` from a JSON value produced by `endpoint_addr_to_json`.
-pub(crate) fn endpoint_addr_from_json(
-    json: &serde_json::Value,
-) -> Result<(EndpointId, EndpointAddr)> {
+///
+/// Unparseable IPs and relay URLs are skipped rather than fatal: a peer that
+/// gained an address type this build does not understand should still be
+/// dialable on the ones it does.
+///
+/// # Errors
+/// The `id` field is missing or is not a valid `EndpointId` — without it
+/// there is nothing to dial.
+pub fn endpoint_addr_from_json(json: &serde_json::Value) -> Result<(EndpointId, EndpointAddr)> {
     let id_str = json["id"].as_str().context("missing id")?;
     let endpoint_id: EndpointId = id_str.parse().context("invalid EndpointId")?;
     let mut addr = EndpointAddr::new(endpoint_id);

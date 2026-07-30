@@ -1,9 +1,12 @@
+//! The mount manifest: the complete tree listing a consumer turns into a
+//! filesystem, plus the status byte leading every response.
+
 use anyhow::{Context, Result, bail};
 
 /// One directory in the shared tree (every directory, not just empty ones —
 /// the consumer builds its tree directly from this list).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct DirEntry {
+pub struct DirEntry {
     /// `/`-separated path relative to the shared root.
     pub rel_path: String,
     pub mode: u32,
@@ -15,7 +18,7 @@ pub(super) struct DirEntry {
 /// the index READ requests address it by — no hash: bytes are fetched lazily,
 /// so hashing the tree up-front would defeat the point.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct FileEntry {
+pub struct FileEntry {
     /// `/`-separated path relative to the shared root.
     pub rel_path: String,
     pub size: u64,
@@ -32,13 +35,18 @@ pub(super) struct FileEntry {
 /// `dir_count(u32) [path_len(u16) ‖ path ‖ mode(u32) ‖ mtime(i64)]…`
 /// `file_count(u32) [path_len(u16) ‖ path ‖ size(u64) ‖ mode(u32) ‖ mtime(i64)]…`
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(super) struct MountManifest {
+pub struct MountManifest {
     pub dirs: Vec<DirEntry>,
     pub files: Vec<FileEntry>,
 }
 
 impl MountManifest {
-    pub(super) fn encode(&self) -> Vec<u8> {
+    /// # Panics
+    /// If the tree holds more than `u32::MAX` directories or files, or a path
+    /// longer than `u16::MAX` bytes. `scan` bounds both well below these, so
+    /// only a hand-built manifest can trip it.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(
             &u32::try_from(self.dirs.len())
@@ -70,7 +78,7 @@ impl MountManifest {
     ///
     /// # Errors
     /// Truncated input, a non-UTF-8 path, or trailing garbage.
-    pub(super) fn decode(bytes: &[u8]) -> Result<Self> {
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
         let mut cursor = Cursor { bytes, pos: 0 };
         let dir_count = cursor.take_u32()?;
         let mut dirs = Vec::new();
@@ -113,7 +121,7 @@ fn encode_path(out: &mut Vec<u8>, path: &str) {
 
 /// The result byte leading every READ response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ReadStatus {
+pub enum ReadStatus {
     Ok,
     BadIndex,
     Io,
@@ -121,7 +129,8 @@ pub(super) enum ReadStatus {
 }
 
 impl ReadStatus {
-    pub(super) fn to_byte(self) -> u8 {
+    #[must_use]
+    pub fn to_byte(self) -> u8 {
         match self {
             ReadStatus::Ok => 0,
             ReadStatus::BadIndex => 1,
@@ -130,7 +139,9 @@ impl ReadStatus {
         }
     }
 
-    pub(super) fn from_byte(byte: u8) -> Result<Self> {
+    /// # Errors
+    /// The byte is not a known status.
+    pub fn from_byte(byte: u8) -> Result<Self> {
         match byte {
             0 => Ok(ReadStatus::Ok),
             1 => Ok(ReadStatus::BadIndex),

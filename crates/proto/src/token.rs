@@ -1,5 +1,5 @@
 //! The branded `🐝` token codec shared by every agent-habilis token — here
-//! the mount ticket ([`crate::mount`]); in agent-habilis/swarm also the
+//! the mount ticket ([`crate::ticket`]); in agent-habilis/swarm also the
 //! swarm id and the pipe/port/file/sh tickets. One wire shape for every
 //! token, so a `🐝…` string self-describes its kind via a 1-byte type tag
 //! and the namespaces never collide. The full [`TokenType`] enum is kept
@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 /// Branding prefix on every token — a single emoji (4 UTF-8 bytes); the
 /// remainder of the string is ASCII Base58Check.
-pub(crate) const PREFIX: &str = "🐝";
+pub const PREFIX: &str = "🐝";
 
 /// Token framing version. Bumped only on a breaking framing change; an
 /// unknown version is rejected on decode.
@@ -25,7 +25,7 @@ const VERSION: u8 = 1;
 /// Which kind of token this is — the byte that lets one `🐝…` namespace
 /// carry both swarm ids and pipe tickets without ambiguity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TokenType {
+pub enum TokenType {
     Swarm,
     Pipe,
     Port,
@@ -62,7 +62,8 @@ impl TokenType {
 }
 
 /// Encode `payload` as a `🐝` token of the given `kind`.
-pub(crate) fn encode(kind: TokenType, payload: &[u8]) -> String {
+#[must_use]
+pub fn encode(kind: TokenType, payload: &[u8]) -> String {
     let mut framed = Vec::with_capacity(2 + payload.len());
     framed.push(VERSION);
     framed.push(kind.to_byte());
@@ -76,7 +77,7 @@ pub(crate) fn encode(kind: TokenType, payload: &[u8]) -> String {
 /// # Errors
 /// A missing/wrong `🐝` prefix, invalid Base58, a bad checksum, an unknown
 /// version, or an unknown type byte.
-pub(crate) fn decode(token: &str) -> Result<(TokenType, Vec<u8>)> {
+pub fn decode(token: &str) -> Result<(TokenType, Vec<u8>)> {
     let body = token
         .strip_prefix(PREFIX)
         .context("token must start with 🐝")?;

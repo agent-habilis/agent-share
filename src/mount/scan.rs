@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::wire::{DirEntry, FileEntry, MountManifest};
+use agent_share_proto::manifest::{DirEntry, FileEntry, MountManifest};
 
 /// The relative path is length-prefixed with a `u16` on the wire; refuse to
 /// serve anything longer so the count can never disagree with the bytes.

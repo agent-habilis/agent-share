@@ -11,10 +11,10 @@ use tokio::sync::Mutex;
 use crate::file::wire::read_u32;
 use crate::lookup::{add_peer_addr, build_participant_endpoint};
 
+use super::MountTicket;
 use super::nfs::{ByteSource, RemoteFs, build_tree};
-use super::ticket::MountTicket;
-use super::wire::{MountManifest, ReadStatus};
 use super::{MAX_MANIFEST_BYTES, MOUNT_ALPN, OP_MANIFEST, OP_READ};
+use super::{MountManifest, ReadStatus};
 
 /// How long to keep retrying the dial while the producer's address propagates
 /// (mDNS is instant on a LAN; the DHT fallback can take tens of seconds).
