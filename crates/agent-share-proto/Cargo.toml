@@ -1,0 +1,35 @@
+[package]
+name = "agent-share-proto"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "wire format for agent-share: the 🐝 ticket codec, the mount manifest, and the request framing"
+license = "MIT"
+repository = "https://github.com/agent-habilis/agent-share"
+readme = "README.md"
+keywords = ["p2p", "wire-format", "iroh", "share"]
+categories = ["network-programming", "encoding", "wasm"]
+# Not published: the wire format is pinned to this repo's golden tests, and
+# `agent-share` itself is unpublished.
+publish = false
+
+[lints]
+workspace = true
+
+# Every dependency here must build for `wasm32-unknown-unknown`: this crate is
+# linked by the CLI producer, the CLI consumer, AND the browser client, and it
+# is the only thing guaranteeing all three agree on the bytes. `tokio`,
+# `nfsserve`, and anything else host-only belong in the root crate, not here.
+# CI enforces this with
+# `cargo check --target wasm32-unknown-unknown -p agent-share-proto`.
+[dependencies]
+# `iroh-base` rather than `iroh`: the ticket carries an `EndpointAddr` and the
+# lookup allowlist carries `RelayUrl`s, but nothing here opens a connection.
+# iroh-base is wasm-clean; the full `iroh` crate would drag in the endpoint.
+iroh-base = { version = "1.0.1", default-features = false, features = ["key", "relay"] }
+anyhow = "1"
+sha2 = "0.10"
+bs58 = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

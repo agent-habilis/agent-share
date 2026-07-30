@@ -10,6 +10,9 @@ repository = "https://github.com/agent-habilis/agent-share"
 readme = "README.md"
 keywords = ["iroh", "webrtc", "transport", "p2p", "wasm"]
 categories = ["network-programming", "wasm"]
+# Not published: it targets an unstable iroh API (`unstable-custom-transports`)
+# behind a fork pin, so a crates.io release could not be built by anyone else.
+publish = false
 
 [lints]
 workspace = true

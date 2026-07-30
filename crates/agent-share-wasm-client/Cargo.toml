@@ -1,0 +1,53 @@
+# Standalone workspace on purpose: `[patch.crates-io]` is not inherited across
+# workspace boundaries, so the iroh fork pins are duplicated below and must be
+# bumped in lockstep with the root manifest. Keeping this out of the root
+# workspace also keeps `web-sys` out of the host lockfile and out of
+# `cargo task ci`'s default build.
+#
+# Path deps DO cross the boundary, so this still links the very same
+# `agent-share-proto` and `webrtc-transport` the CLI does.
+[package]
+name = "agent-share-wasm-client"
+version = "0.1.0"
+edition = "2024"
+description = "Browser client for agent-share: the mount protocol over a WebRTC data channel"
+license = "MIT"
+repository = "https://github.com/agent-habilis/agent-share"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+agent-share-proto = { path = "../agent-share-proto" }
+webrtc-transport = { path = "../webrtc-transport", features = ["web"] }
+iroh = { version = "1.0.1", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
+iroh-base = { version = "1.0.1", default-features = false, features = ["key"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+futures = "0.3"
+web-sys = { version = "0.3", features = ["Window"] }
+# Both generations that reach wasm need their browser backend switched on.
+# 0.3+ additionally needs the `getrandom_backend` rustflag — see
+# `.cargo/config.toml`, and note the feature alone is NOT enough.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+# Same fork/rev pins as the root workspace. Patches are not inherited across
+# workspace boundaries, so they are duplicated here and must move together.
+[patch.crates-io]
+iroh = { git = "https://github.com/agent-habilis/iroh", rev = "195cb98d16969da48743e88a0dbb395d118316ed" }
+iroh-base = { git = "https://github.com/agent-habilis/iroh", rev = "195cb98d16969da48743e88a0dbb395d118316ed" }
+iroh-dns = { git = "https://github.com/agent-habilis/iroh", rev = "195cb98d16969da48743e88a0dbb395d118316ed" }
+
+[profile.release]
+opt-level = "s"
+lto = true

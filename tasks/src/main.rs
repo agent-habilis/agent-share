@@ -16,6 +16,7 @@ mod release;
 mod run;
 mod test;
 mod util;
+mod web_wasm;
 
 /// Task result; any `Err` is printed and turns into a non-zero exit.
 pub(crate) type TaskOutcome = Result<(), Box<dyn std::error::Error>>;
@@ -80,6 +81,8 @@ enum Task {
     Man,
     /// Run property-based tests.
     Proptest,
+    /// Build the browser/Node wasm client into its `dist/{web,nodejs}`.
+    WebWasm,
     /// Internal: cargo-zigbuild's `zig cc`/`c++`/`ar` shim. cargo-zigbuild's
     /// cross-link wrapper re-execs THIS binary as `<exe> zig …` (it resolves
     /// itself via `current_exe()`), so the cross build in `build` can only link
@@ -124,6 +127,7 @@ fn main() -> ExitCode {
         Task::Clean => clean::run(&sh),
         Task::Man => man::run(),
         Task::Proptest => proptest::run(&sh),
+        Task::WebWasm => web_wasm::run(&sh),
         Task::Zig(zig) => zig
             .execute()
             .map_err(|err| -> Box<dyn std::error::Error> { err.into() }),

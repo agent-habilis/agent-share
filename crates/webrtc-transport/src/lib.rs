@@ -65,3 +65,64 @@ pub use web::{
     BrowserRtcTransport, BrowserSession, IceServers, PendingOffer as BrowserPendingOffer,
     offer as browser_offer,
 };
+
+/// A registered `WebRTC` transport, ready to hand to an iroh endpoint builder.
+///
+/// The same name on both targets so a consumer's wiring code is written once:
+/// which backend it wraps is decided by the feature, not by the caller. Cheap
+/// to clone — it is a handle, and every clone shares one session registry.
+#[cfg(any(feature = "host", feature = "web"))]
+#[derive(Debug, Clone)]
+pub struct WebRtcHandle {
+    #[cfg(feature = "host")]
+    inner: std::sync::Arc<WebRtcTransport>,
+    #[cfg(all(feature = "web", not(feature = "host")))]
+    inner: std::sync::Arc<BrowserRtcTransport>,
+}
+
+#[cfg(feature = "host")]
+impl WebRtcHandle {
+    /// Wrap a host transport.
+    #[must_use]
+    pub fn new(transport: std::sync::Arc<WebRtcTransport>) -> Self {
+        Self { inner: transport }
+    }
+
+    /// The transport to register with `Builder::add_custom_transport`.
+    ///
+    /// Registration is deliberately additive rather than a `Preset`: a preset
+    /// would make `WebRTC` the endpoint's *only* transport, which is right for a
+    /// browser and wrong for a native peer that should still prefer iroh's own
+    /// hole-punched paths.
+    #[must_use]
+    pub fn transport(&self) -> std::sync::Arc<WebRtcTransport> {
+        std::sync::Arc::clone(&self.inner)
+    }
+
+    /// Attach a negotiated session for `remote`.
+    ///
+    /// # Errors
+    /// The registry rejects the session (already attached).
+    pub fn attach(
+        &self,
+        remote: iroh_base::EndpointId,
+        session: NegotiatedSession,
+    ) -> anyhow::Result<()> {
+        self.inner.attach(remote, session)
+    }
+}
+
+#[cfg(all(feature = "web", not(feature = "host")))]
+impl WebRtcHandle {
+    /// Wrap a browser transport.
+    #[must_use]
+    pub fn new(transport: std::sync::Arc<BrowserRtcTransport>) -> Self {
+        Self { inner: transport }
+    }
+
+    /// The transport to register with `Builder::add_custom_transport`.
+    #[must_use]
+    pub fn transport(&self) -> std::sync::Arc<BrowserRtcTransport> {
+        std::sync::Arc::clone(&self.inner)
+    }
+}

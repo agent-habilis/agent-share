@@ -68,19 +68,31 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         // proto check above still guards the wire format.
         match wasm_clang(sh) {
             Some(clang) => {
-                cmd!(
-                    sh,
-                    "cargo check --target wasm32-unknown-unknown -p webrtc-transport --features web"
-                )
+                for args in [
+                    "check --target wasm32-unknown-unknown -p webrtc-transport --features web",
+                    // The engine itself must reach the browser, not merely be
+                    // avoidable from it. Without this gate the wasm target rots
+                    // on the next edit that reaches for a file or a socket.
+                    "check --target wasm32-unknown-unknown -p agent-habilis-mesh --no-default-features",
+                ] {
+                    let args = args.split(' ');
+                    cmd!(sh, "cargo {args...}")
+                        .env("CC", &clang)
+                        .env("CC_wasm32_unknown_unknown", &clang)
+                        .quiet()
+                        .run()?;
+                }
+            }
+            None => output::status("Skipping", "wasm32 crate checks (no wasm-capable clang)"),
+        }
+        // The wasm client is excluded from the workspace, so nothing above reaches it.
+        if let Some(clang) = wasm_clang(sh) {
+            let _guard = sh.push_dir("crates/agent-share-wasm-client");
+            cmd!(sh, "cargo check --target wasm32-unknown-unknown")
                 .env("CC", &clang)
                 .env("CC_wasm32_unknown_unknown", &clang)
                 .quiet()
                 .run()?;
-            }
-            None => output::status(
-                "Skipping",
-                "webrtc-transport wasm32 (no wasm-capable clang)",
-            ),
         }
     } else {
         output::status(
@@ -99,7 +111,7 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
 /// the default `cc` on macOS. Homebrew LLVM does have one. Returns `None`
 /// rather than guessing so the caller can skip with a message instead of
 /// failing a run on an unrelated host.
-fn wasm_clang(sh: &Shell) -> Option<String> {
+pub(crate) fn wasm_clang(sh: &Shell) -> Option<String> {
     for candidate in [
         "/opt/homebrew/opt/llvm/bin/clang",
         "/usr/local/opt/llvm/bin/clang",

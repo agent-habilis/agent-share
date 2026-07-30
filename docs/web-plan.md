@@ -134,20 +134,42 @@ close. The UI must say so plainly instead of hanging.
 
 ## Workspace layout
 
+As built. The root is a **virtual workspace**; every folder name is its crate name.
+
 ```
-Cargo.toml            members = ["tasks", "crates/proto", "crates/webrtc-core",
-                                 "crates/webrtc-native"]
-crates/proto/         agent-share-proto          wire, ticket, framing (wasm-safe)
-crates/webrtc-core/   agent-share-webrtc-core    signal envelope + addr (wasm-safe)
-crates/webrtc-native/ agent-share-webrtc-native  str0m/tokio backend (host only)
-web-client/           agent-share-web            wasm cdylib, own [workspace]
-src/ui/               React + Vite + Bun SPA
+Cargo.toml    members = ["crates/*", "tasks"]
+              resolver = "3"                          ← see note below
+              default-members = ["crates/agent-share"]
+              exclude = ["crates/agent-share-wasm-client"]
+
+crates/agent-share/               the CLI: producer, NFS consumer, WebRTC lane
+crates/agent-share-proto/         wire format — ticket, manifest, framing (wasm-safe)
+crates/agent-share-wasm-client/   wasm cdylib, own [workspace], NOT a member
+crates/agent-habilis-mesh/        vendored gossip engine, `host` feature gates wasm
+crates/webrtc-transport/          one crate: core + `host` (str0m) + `web` (web-sys)
+crates/iroh-multihop-transport/   vendored with mesh
+tasks/                            cargo task runner
+ui/                               React + Vite + Bun SPA
+node/                             npx agent-share <🐝…> receiver
 ```
 
-`web-client/` stays a standalone workspace because `[patch.crates-io]` isn't inherited
-across workspace boundaries and wasm-only deps should stay out of the host lockfile — the
-pattern agent-gossip proved. Path deps *do* cross, so it still links `proto` and
-`webrtc-core`.
+Two keys on the root manifest are load-bearing and easy to lose:
+
+- **`resolver = "3"`** — a root package on edition 2024 implies it, but a *virtual*
+  workspace inherits nothing from its members and silently falls back to the edition-2015
+  resolver 1, changing feature unification across the whole graph.
+- **`exclude`** — `crates/agent-share-wasm-client` matches the `crates/*` glob but must
+  not be a member: it is a wasm32-only cdylib (`web_sys::window()` does not exist off
+  wasm32), so `cargo clippy --workspace --all-targets` and `cargo test --workspace`,
+  which `cargo task ci` runs, would fail on it.
+
+Being excluded, it keeps its own `[workspace]` and therefore its own duplicated
+`[patch.crates-io]` — patches are not inherited across a workspace boundary. Path deps
+*do* cross, so it still links the very same `agent-share-proto` and `webrtc-transport`
+the CLI does.
+
+The single `.wasm` it produces feeds both front ends, differing only in wasm-bindgen glue:
+`dist/web/` for `ui/`, `dist/nodejs/` for `node/`.
 
 ### What can honestly be shared, and what cannot
 
@@ -155,7 +177,7 @@ pattern agent-gossip proved. Path deps *do* cross, so it still links `proto` and
 first `cargo build`. str0m and tokio don't target `wasm32`; `web-sys` doesn't exist off
 browser. Both researchers reached this independently.
 
-**Shared** (`webrtc-core`, deps: `iroh-base` + serde only):
+**Shared** (the crate root of `webrtc-transport`, always compiled, deps: `iroh-base` + serde only):
 `WEBRTC_TRANSPORT_ID` / `custom_addr()`, `SignalEnvelope` / `SIGNAL_VERSION` /
 `MAX_ENVELOPE_BYTES`, `DATA_CHANNEL_LABEL`, the signal ALPN and one-envelope-each-way
 contract, and the offer/answer sequencing state machine.
@@ -172,11 +194,11 @@ bound would force two signatures and defeat the sharing.
 
 | | CLI producer | CLI consumer | Browser |
 |---|---|---|---|
-| Signal envelope + addr | `webrtc-core` | `webrtc-core` | `webrtc-core` |
+| Signal envelope + addr | `webrtc-transport` root | `webrtc-transport` root | `webrtc-transport` root |
 | Mount wire format | `proto` | `proto` | `proto` |
-| WebRTC backend | `webrtc-native` | `webrtc-native` | `web-sys` in `web-client` |
+| WebRTC backend | `webrtc-transport` (`host`) | `webrtc-transport` (`host`) | `webrtc-transport` (`web`) |
 
-`agent-share <🐝…> <mnt>` gains WebRTC by linking the same `webrtc-native` the producer
+`agent-share <🐝…> <mnt>` gains WebRTC by linking the same `webrtc-transport` (`host`) the producer
 does. Since `ByteSource` is already the seam, neither the NFS layer nor the mount logic
 changes.
 
@@ -205,7 +227,7 @@ opportunistic upgrade, not a replacement.
 
 ### Phase 1 — extract shared crates
 
-`crates/proto` (`agent-share-proto`), moving not rewriting: `src/mount/wire.rs`,
+`crates/agent-share-proto`, moving not rewriting: `src/mount/wire.rs`,
 `src/mount/ticket.rs`, `src/protocol/{token,peer_addr}.rs`, `src/protocol/swarm/lookup.rs`,
 and the ALPN/op constants from `src/mount/mod.rs:18-41`. Everything is `pub(crate)` /
 `pub(super)` today, so this is a visibility-and-move exercise.
@@ -229,9 +251,9 @@ against someone re-adding a host-only dep.
 ### Phase 2 — split the WebRTC crates and add NAT traversal
 
 Split `agent-gossip/webrtc/webrtc-transport/`: `addr.rs` + `signaling.rs` →
-`crates/webrtc-core`; the rest → `crates/webrtc-native`. Delete the duplicated
+the crate root; the backends behind `host`/`web` features. Delete the duplicated
 `SignalEnvelope` and `WEBRTC_TRANSPORT_ID` from the browser crate and depend on
-`webrtc-core` instead — requirement 8 paying for itself immediately.
+the shared root instead — requirement 8 paying for itself immediately.
 
 Then close the LAN-only gap:
 
@@ -267,7 +289,7 @@ Then close the LAN-only gap:
 
 ### Phase 4 — browser wasm client
 
-`web-client/` (`agent-share-web`), from `webrtc-browser/` but with a real API:
+`crates/agent-share-wasm-client/`, from `webrtc-browser/` but with a real API:
 
 ```rust
 #[wasm_bindgen]
@@ -283,10 +305,10 @@ impl ShareClient {
 }
 ```
 
-**One library, two consumers.** `web-client/` is the single shared wasm target:
+**One library, two consumers.** `crates/agent-share-wasm-client/` is the single shared wasm target:
 the browser UI and the `npx agent-share` CLI link the same `.wasm`, differing
 only in wasm-bindgen glue. `cargo task web-wasm` emits both from one build —
-`dist/web/` (`--target web`, for `src/ui/`) and `dist/nodejs/`
+`dist/web/` (`--target web`, for `ui/`) and `dist/nodejs/`
 (`--target nodejs`, for the npm package). Same crate, same exports.
 
 Deliberately **not** on the surface, agreed with the npx work: no progress
@@ -307,13 +329,13 @@ already configured.
 
 ### Phase 5 — the React app
 
-`src/ui/` — Bun + Vite + React 19 + TypeScript, `"moonspace-ui": "file:../../../../personal/moonspace-ui"`.
+`ui/` — Bun + Vite + React 19 + TypeScript, `"moonspace-ui": "file:../../../../personal/moonspace-ui"`.
 Vite transpiles its raw `.ts` directly (`moduleResolution: "bundler"`,
 `allowImportingTsExtensions`). Wrap in `<ThemeProvider theme={theme}><GlobalStyle/>` per
 `.storybook/preview.tsx`. Read the ticket from `location.hash`; empty hash → a landing page
 showing the `agent-share serve` command.
 
-**Column view** (`src/ui/ColumnView.tsx`) — Finder-style Miller columns from `Box`,
+**Column view** (`ui/ColumnView.tsx`) — Finder-style Miller columns from `Box`,
 `Stack direction="row"`, `Text`, `MiddleTruncate`:
 
 - Build the tree once from the manifest, reusing the shape of `nfs::build_tree`
@@ -346,12 +368,11 @@ The relay does rendezvous; the ticket never leaves the client. Deploy `web/dist`
 | Action | Path |
 |---|---|
 | commit | the 21 staged files (rename + ALPN fork) |
-| new | `crates/proto/` (from `src/mount/{wire,ticket}.rs`, `src/protocol/**`) |
-| new | `crates/webrtc-core/` (from `webrtc-transport/{addr,signaling}.rs`) |
-| new | `crates/webrtc-native/` (from the rest of `webrtc-transport/`) |
-| new | `web-client/` (from `webrtc-browser/`, minus the duplicated types) |
-| new | `src/ui/` React app |
-| edit | `Cargo.toml` — members, iroh bump, `unstable-custom-transports`, `exclude` `src/ui/` |
+| new | `crates/agent-share-proto/` (from `src/mount/{wire,ticket}.rs`, `src/protocol/**`) |
+| new | `crates/webrtc-transport/` (protocol at the root, `host`/`web` backends) |
+| new | `crates/agent-share-wasm-client/` (from `webrtc-browser/`, minus the duplicated types) |
+| new | `ui/` React app |
+| edit | `Cargo.toml` — members, iroh bump, `unstable-custom-transports`, `exclude` `ui/` |
 | edit | `src/mount/produce.rs` — second ALPN, signal handler, WebRTC transport |
 | edit | `src/mount/mod.rs` — `announce()` URL; consts move to proto |
 | edit | `src/mount/consume.rs` — WebRTC as a third dial path; else `use` lines |
@@ -370,14 +391,13 @@ cargo check --target wasm32-unknown-unknown -p agent-share-proto
 
 **The constant is shared, not copied:**
 ```
-grep -rn "0x5752_5443" crates/ web-client/     # exactly one hit, in webrtc-core
-grep -rn "enum SignalEnvelope" crates/ web-client/   # exactly one hit
+grep -rn --include=*.rs "0x5752_5443" crates/   # exactly one hit, in webrtc-transport/src/addr.rs
+grep -rn --include=*.rs "enum SignalEnvelope" crates/  # exactly one hit
 ```
 
 **Transport:**
 ```
-cargo test -p agent-share-webrtc-core     # envelope round trip, addr convention
-cargo test -p agent-share-webrtc-native   # quic_echo_over_webrtc, detach_then_reattach,
+cargo test -p webrtc-transport --features host  # quic_echo_over_webrtc, detach_then_reattach,
                                           # plus a new srflx-in-SDP assertion
 ```
 
@@ -393,7 +413,7 @@ mounting successfully — proving one crate serves both consumers.
 
 **End to end, same machine:**
 ```
-cargo task web-wasm && cd src/ui && bun run dev
+cargo task web-wasm && cd ui && bun run dev
 agent-share serve ./fixture      # open the printed URL against the dev server
 ```
 Confirm the column view lists the fixture tree, a ranged read returns correct bytes, and

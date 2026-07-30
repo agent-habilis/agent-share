@@ -16,7 +16,6 @@
 //! mount ALPN over the iroh relay, which gives the same reachability without a
 //! second relay protocol to implement and operate.
 
-use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
@@ -27,8 +26,8 @@ use tokio::net::UdpSocket;
 const BINDING_REQUEST: u16 = 0x0001;
 /// STUN message type for a Binding Success Response.
 const BINDING_SUCCESS: u16 = 0x0101;
-/// The fixed cookie every RFC 5389 message carries at bytes 4..8. Also the
-/// XOR mask for the port and (IPv4) address in `XOR-MAPPED-ADDRESS`.
+/// The fixed cookie every RFC 5389 message carries at bytes `4..8`. Also the
+/// XOR mask for the port and (`IPv4`) address in `XOR-MAPPED-ADDRESS`.
 const MAGIC_COOKIE: u32 = 0x2112_A442;
 /// Attribute type `XOR-MAPPED-ADDRESS`.
 const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
@@ -278,7 +277,7 @@ pub async fn reflexive_address(
             // Someone else's datagram on a shared socket: ignore and keep waiting.
             Ok(Ok(_)) => continue,
             Ok(Err(error)) => {
-                return Err(io::Error::from(error)).context("reading a STUN response");
+                return Err(error).context("reading a STUN response");
             }
             Err(_elapsed) => bail!("no STUN response from {server} within {timeout:?}"),
         };
@@ -323,7 +322,7 @@ mod tests {
     fn xor_ipv4_value() -> Vec<u8> {
         let mask = MAGIC_COOKIE.to_be_bytes();
         let addr = [203u8, 0, 113, 7];
-        let port = 41234u16 ^ u16::try_from(MAGIC_COOKIE >> 16).expect("fits");
+        let port = 0xA112u16 ^ u16::try_from(MAGIC_COOKIE >> 16).expect("fits"); // 41234
         let mut value = vec![0, FAMILY_IPV4];
         value.extend_from_slice(&port.to_be_bytes());
         value.extend(addr.iter().zip(mask).map(|(byte, mask)| byte ^ mask));
@@ -376,7 +375,7 @@ mod tests {
         mask[..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
         mask[4..].copy_from_slice(&TXID);
         let addr: std::net::Ipv6Addr = "2001:db8::1".parse().expect("addr");
-        let port = 5000u16 ^ u16::try_from(MAGIC_COOKIE >> 16).expect("fits");
+        let port = 0x1388u16 ^ u16::try_from(MAGIC_COOKIE >> 16).expect("fits"); // 5000
         let mut value = vec![0, FAMILY_IPV6];
         value.extend_from_slice(&port.to_be_bytes());
         value.extend(

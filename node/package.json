@@ -1,0 +1,19 @@
+{
+  "name": "agent-share",
+  "version": "0.1.0",
+  "description": "Receive an agent-share folder over a direct peer-to-peer connection",
+  "type": "module",
+  "bin": { "agent-share": "./src/cli.js" },
+  "files": ["src", "dist"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "optionalDependencies": {
+    "node-datachannel": "^0.31.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}

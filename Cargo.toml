@@ -1,5 +1,24 @@
 [workspace]
-members = ["tasks", "crates/proto", "crates/webrtc-transport"]
+members = ["crates/*", "tasks"]
+# Load-bearing on a *virtual* manifest: a root package on edition 2024 implies
+# `resolver = "3"`, but a virtual workspace inherits nothing from its members
+# and silently defaults to the edition-2015 `resolver = "1"`. Left implicit,
+# the split from root-package to virtual would quietly change feature
+# unification across the whole graph — surfacing as a mysterious build failure
+# with nothing pointing back at the move.
+resolver = "3"
+# Also load-bearing on a virtual manifest: with no root package, an unscoped
+# `cargo build`/`test`/`clippy`/`run` defaults to *every* member — which now
+# includes the 25k-line vendored mesh. This pins the pre-split meaning.
+# Widening coverage to the whole workspace is a deliberate follow-up (drop this
+# key), not a side effect of a move.
+default-members = ["crates/agent-share"]
+# A member by glob, but it must not be one in fact: this is a wasm32-only
+# cdylib (`web_sys::window()` does not exist off wasm32), so a `--workspace`
+# build — which `cargo task ci` runs — would fail on it. It keeps its own
+# `[workspace]`, and therefore its own duplicated `[patch.crates-io]`, because
+# patches are not inherited across a workspace boundary.
+exclude = ["crates/agent-share-wasm-client"]
 
 # Shared package fields. Each crate opts in with `edition.workspace = true`
 # / `rust-version.workspace = true` so the workspace stays in lockstep
@@ -8,34 +27,33 @@ members = ["tasks", "crates/proto", "crates/webrtc-transport"]
 edition = "2024"
 rust-version = "1.93"
 
-[package]
-name = "agent-share"
-version = "0.1.0"
-edition.workspace = true
-rust-version.workspace = true
-authors = ["Caio Gondim <me@caiogondim.com>"]
-description = "share a directory read-only over iroh QUIC, mounted locally via NFS"
-license = "MIT"
-repository = "https://github.com/agent-habilis/agent-share"
-readme = "README.md"
-keywords = ["agents", "mount", "nfs", "p2p"]
-categories = ["network-programming", "filesystem"]
-exclude = [".cargo/", "tasks/"]
+# Declared for the vendored `agent-habilis-mesh`, which takes most of its
+# dependencies as `workspace = true`. Kept byte-compatible with the manifest it
+# was copied from so re-syncing is a diff rather than a reconciliation — see
+# `crates/agent-habilis-mesh/README.md` for the provenance.
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+anyhow = "1"
+bytes = "1"
+anstyle = "1"
+anstream = "0.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
+async-trait = "0.1.89"
+uuid = { version = "1", features = ["v4"] }
+iroh = { version = "1.0.1", features = ["tls-ring", "unstable-net-report", "unstable-custom-transports"] }
+iroh-gossip = { version = "0.101", features = ["net"] }
+bs58 = "0.5"
+automerge = "0.10"
+sha2 = "0.10"
+rand = "0.9"
+libc = "0.2"
+proptest = "1.6"
+insta = "1"
+divan = "0.1"
 
-[lints]
-workspace = true
-
-[package.metadata.release]
-publish = false
-push = false
-tag-name = "v{{version}}"
-pre-release-commit-message = "chore: release v{{version}}"
-allow-branch = ["main"]
-
-# Note: there is NO `rust_2021_idioms` group. `rust_2018_idioms` is the only
-# idioms group and is still correct on edition 2021 (it bundles
-# bare_trait_objects, elided_lifetimes_in_paths, explicit_outlives_requirements,
-# unused_extern_crates, ellipsis_inclusive_range_patterns).
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
 unsafe_code = "deny"
@@ -72,41 +90,6 @@ module_name_repetitions = "allow"
 # Transitive duplicate crate versions are not controllable from a leaf
 # binary; the lint is noise here, not an actionable signal.
 multiple_crate_versions = "allow"
-
-[lib]
-name = "agent_share"
-path = "src/lib.rs"
-
-[[bin]]
-name = "agent-share"
-path = "src/main.rs"
-
-[dependencies]
-# The wire format, shared verbatim with the browser client. Anything both
-# ends must agree on lives there, not here.
-agent-share-proto = { path = "crates/proto" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
-clap = { version = "4", features = ["derive"] }
-anstyle = "1"
-anstream = "0.6"
-# `unstable-custom-transports` gates the CustomTransport/CustomEndpoint/
-# CustomSender traits the WebRTC lane implements. Unstable by iroh's own
-# labelling and expected to stay that way past 1.0.
-iroh = { version = "1.0.1", features = ["tls-ring", "unstable-custom-transports"] }
-# mDNS + mainline-DHT address-lookup providers were extracted from iroh core
-# in the 1.0 line; these companion crates restore the `--mdns` / `--dht` legs.
-iroh-mdns-address-lookup = "0.4"
-iroh-mainline-address-lookup = "0.4"
-anyhow = "1"
-sha2 = "0.10"
-bs58 = "0.5"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-rand = "0.9"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-nfsserve = "0.11.0"
-async-trait = "0.1.89"
 
 [profile.release]
 opt-level = 3

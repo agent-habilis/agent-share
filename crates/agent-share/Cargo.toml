@@ -1,0 +1,65 @@
+[package]
+name = "agent-share"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "share a directory read-only over iroh QUIC, mounted locally via NFS"
+license = "MIT"
+repository = "https://github.com/agent-habilis/agent-share"
+readme = "README.md"
+keywords = ["agents", "mount", "nfs", "p2p"]
+categories = ["network-programming", "filesystem"]
+exclude = [".cargo/", "tasks/"]
+
+[lints]
+workspace = true
+
+[package.metadata.release]
+publish = false
+push = false
+tag-name = "v{{version}}"
+pre-release-commit-message = "chore: release v{{version}}"
+allow-branch = ["main"]
+
+# Note: there is NO `rust_2021_idioms` group. `rust_2018_idioms` is the only
+# idioms group and is still correct on edition 2021 (it bundles
+# bare_trait_objects, elided_lifetimes_in_paths, explicit_outlives_requirements,
+# unused_extern_crates, ellipsis_inclusive_range_patterns).
+[lib]
+name = "agent_share"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-share"
+path = "src/main.rs"
+
+[dependencies]
+# The wire format, shared verbatim with the browser client. Anything both
+# ends must agree on lives there, not here.
+agent-share-proto = { path = "../agent-share-proto" }
+# The WebRTC lane. `host` here — the browser client takes the same crate with
+# `web` instead.
+webrtc-transport = { path = "../webrtc-transport", features = ["host"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
+clap = { version = "4", features = ["derive"] }
+anstyle = "1"
+anstream = "0.6"
+# `unstable-custom-transports` gates the CustomTransport/CustomEndpoint/
+# CustomSender traits the WebRTC lane implements. Unstable by iroh's own
+# labelling and expected to stay that way past 1.0.
+iroh = { version = "1.0.1", features = ["tls-ring", "unstable-custom-transports"] }
+# mDNS + mainline-DHT address-lookup providers were extracted from iroh core
+# in the 1.0 line; these companion crates restore the `--mdns` / `--dht` legs.
+iroh-mdns-address-lookup = "0.4"
+iroh-mainline-address-lookup = "0.4"
+anyhow = "1"
+sha2 = "0.10"
+bs58 = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+nfsserve = "0.11.0"
+async-trait = "0.1.89"

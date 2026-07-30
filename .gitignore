@@ -1,2 +1,18 @@
 /target
 .claude/
+
+# The wasm client is excluded from the workspace, so the anchored `/target`
+# above does not reach its build directory.
+crates/agent-share-wasm-client/target/
+
+# Front-end dependencies and build output. `ui/node_modules/moonspace-ui` is a
+# `file:` symlink into a sibling repo, which git cannot follow — staging it
+# fails with "too many levels of symbolic links" rather than anything
+# describing the real problem.
+node_modules/
+ui/dist/
+
+# wasm-bindgen output, rebuilt by `cargo task web-wasm`. Checked-in build
+# artifacts drift from the source they were generated from, and this one is
+# 2.8 MB per target.
+crates/agent-share-wasm-client/dist/

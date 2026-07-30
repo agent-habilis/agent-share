@@ -61,3 +61,46 @@ The wire format is pinned by golden tests (`wire_constants_are_pinned`,
 `type_bytes_are_pinned_wire_format`, `swarm_id_wire_format_is_pinned`) — if one
 of those fails after a change, you broke compatibility with already-issued
 tickets and with peers running an older build.
+
+## The web client
+
+`share.agent-habilis.com` is a **pure static site**: no backend, no signalling
+server, no database. Open `share.agent-habilis.com/#<🐝ticket>` and the browser
+connects straight to the producer.
+
+The ticket rides in the URL **fragment**, never the path. It is a bearer
+capability granting full read access, and a path would send it to the server on
+every request — into logs, proxies and referrers. A fragment never leaves the
+browser, which is exactly what lets the site be static.
+
+### How a browser reaches a peer behind NAT
+
+Two connections, and the split is load-bearing:
+
+1. The browser dials `agent-share/webrtc-signal/1` **over the iroh relay** and
+   swaps one JSEP envelope each way.
+2. It then opens a **fresh** connection to `agent-share/mount/1` against an
+   address carrying only the WebRTC custom addr.
+
+It has to be two, because iroh only fans a connect's Initial out to candidate
+paths while the remote has no selected path — a live connection cannot be
+upgraded onto a newly attached transport.
+
+**The relay is a rendezvous, not a transport.** It carries the SDP exchange and
+never a byte of file data. The cost is that there is no data fallback: when ICE
+fails the transfer fails, and a symmetric-NAT-to-symmetric-NAT pair cannot
+connect at all. That is the price of the guarantee.
+
+### Building
+
+```
+cargo task web-wasm          # crates/agent-share-wasm-client/dist/{web,nodejs}
+cd ui && bun install && bun run dev
+```
+
+`ui/` is the browser app, `node/` the `npx agent-share <🐝…>` receiver.
+Both consume the same `.wasm`; only the wasm-bindgen glue differs.
+
+Note `npx` needs a native WebRTC addon (`node-datachannel`), because Node has
+no `RTCPeerConnection` and the relay will not carry data. The native binary
+needs no addon and can mount the share as a filesystem.

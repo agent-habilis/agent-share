@@ -19,8 +19,13 @@ pub(crate) fn run(sh: &Shell, args: &[String]) -> TaskOutcome {
         {
             release_args.push("--no-confirm".to_owned());
         }
+        // Scoped to the app. The workspace root is virtual, so an unscoped
+        // `cargo release` bumps and tags *every* member — including
+        // `iroh-multihop-transport`, which is vendored from another repo. Only
+        // `agent-share` carries `[package.metadata.release]`, and only its
+        // version means anything to a user.
         output::status("Releasing", &format!("{level} {}", release_args.join(" ")));
-        cmd!(sh, "cargo release {level} {release_args...}")
+        cmd!(sh, "cargo release -p agent-share {level} {release_args...}")
             .quiet()
             .run()?;
         return Ok(());

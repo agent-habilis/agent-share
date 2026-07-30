@@ -1,2 +1,13 @@
 [alias]
 task = "run --package tasks --"
+
+# `getrandom` refuses to build for wasm32-unknown-unknown unless it is told
+# which entropy source to use, because the target has no OS to ask. Enabling
+# the crate's `wasm_js` *feature* alone is not enough — it also gates on this
+# cfg, so a build that sets only the feature fails with the same message.
+#
+# Three generations of `getrandom` are in this graph at once (0.2, 0.3, 0.4),
+# pulled by different layers of the iroh stack. Only 0.3+ reads this flag; 0.2
+# is switched by its `js` feature where it is depended on directly.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", 'getrandom_backend="wasm_js"']
