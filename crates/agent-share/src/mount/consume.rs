@@ -1,6 +1,9 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use agent_share_proto::framing::decode_response_header;
+use agent_share_proto::manifest::ManifestDelta;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use iroh::Endpoint;
@@ -12,9 +15,11 @@ use crate::file::wire::read_u32;
 use crate::lookup::{add_peer_addr, build_endpoint};
 
 use super::MountTicket;
-use super::nfs::{ByteSource, RemoteFs, build_tree};
-use super::{MAX_MANIFEST_BYTES, MOUNT_ALPN, OP_MANIFEST, OP_READ};
+use super::nfs;
+use super::nfs::{ByteSource, RemoteFs, TreeIds, build_tree};
+use super::{MAX_MANIFEST_BYTES, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH};
 use super::{MountManifest, ReadStatus};
+use super::{WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
 use webrtc_transport::{IceConfig, WebRtcHandle};
 
 /// How long to keep retrying the dial while the producer's address propagates
@@ -54,13 +59,19 @@ pub(crate) async fn attach(
     add_peer_addr(&endpoint, ticket.addr.clone())?;
     let client = RemoteClient::new(endpoint.clone(), ticket).with_webrtc(webrtc);
 
+    let client = Arc::new(client);
     let manifest = client.fetch_manifest().await?;
     let file_count = manifest.files.len();
-    let nodes = build_tree(&manifest)?;
+    let mut ids = TreeIds::default();
+    let nodes = build_tree(&mut ids, &manifest)?;
 
     prepare_mountpoint(mountpoint)?;
     let (uid, gid) = mountpoint_owner(mountpoint)?;
-    let remote_fs = RemoteFs::new(nodes, client, uid, gid);
+    let remote_fs = RemoteFs::new(nodes, Arc::clone(&client), uid, gid);
+    // Taken before the server consumes the filesystem: this is the watch
+    // task's only way back to the tree.
+    let shared_nodes = remote_fs.nodes();
+    tokio::spawn(watch_tree(Arc::clone(&client), shared_nodes, ids, manifest));
 
     let listener = NFSTcpListener::bind("127.0.0.1:0", remote_fs)
         .await
@@ -112,6 +123,78 @@ pub(crate) async fn attach(
     }
     endpoint.close().await;
     Ok(())
+}
+
+/// Keep the mounted tree in step with the producer's, for as long as the
+/// mount lives.
+///
+/// Rebuilds the whole inode table per frame rather than patching it. The
+/// rebuild is cheap next to a network round-trip and, more to the point, it
+/// reuses exactly one code path — a second, incremental tree builder is a
+/// second chance to disagree with the first about what the share holds. What
+/// must survive the rebuild is fileids, and [`TreeIds`] carries those across.
+///
+/// Never fatal: a producer too old to know [`OP_WATCH`] drops the stream, and
+/// the mount simply stays on the tree it already has.
+async fn watch_tree(
+    client: Arc<RemoteClient>,
+    nodes: nfs::SharedNodes,
+    mut ids: TreeIds,
+    mut manifest: MountManifest,
+) {
+    loop {
+        match follow_watch_stream(&client, &nodes, &mut ids, &mut manifest).await {
+            Ok(()) => {
+                tracing::debug!("the producer closed the watch stream");
+                return;
+            }
+            Err(error) => {
+                tracing::debug!(%error, "watch stream ended; retrying");
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+        }
+    }
+}
+
+/// Read watch frames until the stream ends, applying each to the tree.
+async fn follow_watch_stream(
+    client: &RemoteClient,
+    nodes: &nfs::SharedNodes,
+    ids: &mut TreeIds,
+    manifest: &mut MountManifest,
+) -> Result<()> {
+    let (mut send, mut recv) = client.request(OP_WATCH).await?;
+    // Nothing more to say on this stream; the producer answers until it or we
+    // go away.
+    send.finish().ok();
+    loop {
+        let mut prefix = [0u8; 5];
+        if recv.read_exact(&mut prefix).await.is_err() {
+            // A clean end: either the producer is done, or it predates
+            // OP_WATCH and dropped the stream. Both mean "no more updates".
+            return Ok(());
+        }
+        let len = decode_response_header(&prefix, MAX_MANIFEST_BYTES)?;
+        let mut body = vec![0u8; usize::try_from(len).expect("u32 fits usize")];
+        recv.read_exact(&mut body)
+            .await
+            .context("reading a watch frame")?;
+        let (kind, payload) = body.split_first().context("empty watch frame")?;
+        match *kind {
+            WATCH_FRAME_MANIFEST => *manifest = MountManifest::decode(payload)?,
+            WATCH_FRAME_DELTA => manifest.apply(&ManifestDelta::decode(payload)?),
+            other => bail!("unknown watch frame kind: {other}"),
+        }
+        // A hostile manifest fails the build; keep the tree we had rather than
+        // tearing the mount down over one bad frame.
+        match build_tree(ids, manifest) {
+            Ok(rebuilt) => {
+                tracing::debug!(files = manifest.files.len(), "tree updated");
+                nfs::replace_nodes(nodes, rebuilt);
+            }
+            Err(error) => tracing::warn!(%error, "rejecting a bad tree update"),
+        }
+    }
 }
 
 /// The wire client the NFS layer reads through: one shared QUIC connection,
@@ -342,6 +425,14 @@ fn mountpoint_owner(_mountpoint: &Path) -> Result<(u32, u32)> {
 /// shell-quoted display string printed for the user. `ro` is client-side
 /// enforcement on top of the server's ROFS answers; `nolocks`/`nolock`
 /// (the spelling differs per OS) because the bridge serves no lock manager.
+///
+/// `actimeo` bounds how long the kernel trusts a cached attribute, and so how
+/// stale the mount can look after the producer's tree changes. It was 120s,
+/// from when the share was a startup snapshot and nothing could change under
+/// it — with a watch stream running, that would have hidden every update for
+/// two minutes. 10s is the compromise: attributes here are answered from the
+/// in-memory tree over loopback, never from the remote peer, so revalidating
+/// costs local RPCs rather than round-trips over the share's connection.
 struct MountCommand {
     program: &'static str,
     args: Vec<std::ffi::OsString>,
@@ -353,14 +444,14 @@ fn mount_command(nfs_port: u16, mountpoint: &Path) -> MountCommand {
         (
             "mount_nfs",
             format!(
-                "ro,nolocks,vers=3,tcp,rsize=131072,actimeo=120,port={nfs_port},mountport={nfs_port}"
+                "ro,nolocks,vers=3,tcp,rsize=131072,actimeo=10,port={nfs_port},mountport={nfs_port}"
             ),
         )
     } else {
         (
             "mount",
             format!(
-                "ro,noacl,nolock,vers=3,tcp,rsize=131072,actimeo=120,port={nfs_port},mountport={nfs_port}"
+                "ro,noacl,nolock,vers=3,tcp,rsize=131072,actimeo=10,port={nfs_port},mountport={nfs_port}"
             ),
         )
     };

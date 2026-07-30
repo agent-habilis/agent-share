@@ -1,4 +1,5 @@
 mod consume;
+mod live;
 mod nfs;
 mod produce;
 mod scan;
@@ -17,25 +18,20 @@ pub mod test_support {
     use agent_share_proto::manifest::MountManifest;
     use anyhow::Result;
 
+    pub use super::live::LiveTree;
     pub use super::produce::serve_established as serve_mount;
     pub use super::scan::scan;
 
-    /// Pair the scanned absolute paths with their manifest entries, in the
-    /// order the manifest fixed — a file's index in `files` *is* its READ
-    /// address, so a different order would silently corrupt every read.
+    /// Build the producer's tree from a scan, for tests that stand a producer
+    /// up by hand. `paths` must stay in the order [`scan`] returned them: a
+    /// file's index in the manifest *is* its READ address, so a different
+    /// order would silently corrupt every read.
+    ///
+    /// No watcher is attached — these trees are as static as the old snapshot
+    /// was, which is what a test wants.
     #[must_use]
-    pub fn served_files(
-        paths: Vec<PathBuf>,
-        manifest: &MountManifest,
-    ) -> Vec<super::produce::ServedFile> {
-        paths
-            .into_iter()
-            .zip(&manifest.files)
-            .map(|(abs, entry)| super::produce::ServedFile {
-                abs,
-                size: entry.size,
-            })
-            .collect()
+    pub fn live_tree(root: PathBuf, manifest: MountManifest, paths: Vec<PathBuf>) -> Arc<LiveTree> {
+        Arc::new(LiveTree::new(root, manifest, paths))
     }
 
     /// Keeps `Result` in scope for the re-exported server signature.
@@ -55,8 +51,8 @@ pub(crate) use produce::serve;
 // under their long-standing names; the golden pin that guards them moved with
 // them (`agent_share_proto::framing` — `wire_constants_are_pinned`).
 pub(crate) use agent_share_proto::framing::{
-    MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ, REQUEST_HEADER_LEN,
-    SECRET_LEN,
+    MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH,
+    REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST,
 };
 pub(crate) use agent_share_proto::manifest::{MountManifest, ReadStatus};
 pub(crate) use agent_share_proto::ticket::MountTicket;
@@ -134,28 +130,21 @@ mod tests {
         root: &std::path::Path,
     ) -> (iroh::Endpoint, RemoteClient, tokio::task::JoinHandle<()>) {
         let (manifest, paths) = super::scan::scan(root).expect("scan");
-        let files: Arc<Vec<produce::ServedFile>> = Arc::new(
-            paths
-                .into_iter()
-                .zip(&manifest.files)
-                .map(|(abs, entry)| produce::ServedFile {
-                    abs,
-                    size: entry.size,
-                })
-                .collect(),
-        );
-        let manifest_bytes = Arc::new(manifest.encode());
+        let tree = Arc::new(super::live::LiveTree::new(
+            root.to_path_buf(),
+            manifest,
+            paths,
+        ));
         let (endpoint, ticket, secret, _webrtc) = produce::bind(LookupOpts::loopback())
             .await
             .expect("bind producer");
         let accept_endpoint = endpoint.clone();
         let producer = tokio::spawn(async move {
             while let Some(incoming) = accept_endpoint.accept().await {
-                let manifest_bytes = Arc::clone(&manifest_bytes);
-                let files = Arc::clone(&files);
+                let tree = Arc::clone(&tree);
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
-                    let _ = produce::serve_established(conn, secret, manifest_bytes, files).await;
+                    let _ = produce::serve_established(conn, secret, tree).await;
                 });
             }
         });

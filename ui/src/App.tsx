@@ -18,6 +18,8 @@ interface Client {
   readonly transport: string
   manifest(): Promise<Manifest>
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
+  /** Subscribe to tree changes. Each call delivers the whole manifest. */
+  watch(onManifest: (manifest: Manifest) => void): Promise<void>
 }
 
 type State =
@@ -100,7 +102,14 @@ export function App() {
       try {
         const client = await connect(ticket)
         const manifest = await client.manifest()
-        if (!cancelled) setState({ phase: 'ready', client, manifest })
+        if (cancelled) return
+        setState({ phase: 'ready', client, manifest })
+        // The producer watches the folder and pushes the tree as it changes.
+        // Failing to subscribe is not failing to connect: the share is
+        // already usable, it just stops updating itself.
+        await client.watch((next) => {
+          if (!cancelled) setState({ phase: 'ready', client, manifest: next })
+        })
       } catch (error) {
         if (!cancelled) setState({ phase: 'failed', reason: String(error) })
       }
@@ -109,6 +118,19 @@ export function App() {
       cancelled = true
     }
   }, [ticket])
+
+  // A directory the column view is standing in can be deleted out from under
+  // it. Fall back to the deepest prefix that still exists rather than
+  // rendering an empty column for a path that is gone.
+  useEffect(() => {
+    if (state.phase !== 'ready') return
+    const dirs = new Set(state.manifest.dirs.map((dir) => dir.rel_path))
+    setPath((current) => {
+      let depth = current.length
+      while (depth > 0 && !dirs.has(current.slice(0, depth).join('/'))) depth -= 1
+      return depth === current.length ? current : current.slice(0, depth)
+    })
+  }, [state])
 
   const tree = useMemo(
     () => (state.phase === 'ready' ? buildTree(state.manifest) : null),

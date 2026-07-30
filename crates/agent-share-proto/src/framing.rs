@@ -39,6 +39,15 @@ pub const OP_MANIFEST: u8 = 1;
 /// Request a byte range of one file, addressed by its manifest index.
 pub const OP_READ: u8 = 2;
 
+/// Subscribe to tree changes: one long-lived stream carrying the current
+/// manifest, then a [`crate::manifest::ManifestDelta`] per change.
+///
+/// Additive on purpose, rather than a new ALPN. A producer that predates this
+/// op drops the stream and keeps the connection (its `other =>` arm), so a
+/// new consumer sees a clean end-of-stream and can fall back to the snapshot
+/// it already has instead of failing the mount.
+pub const OP_WATCH: u8 = 3;
+
 /// Ceiling on the encoded manifest, so a hostile producer can't force an
 /// unbounded allocation before the first decode error.
 pub const MAX_MANIFEST_BYTES: u32 = 64 * 1024 * 1024;
@@ -47,6 +56,25 @@ pub const MAX_MANIFEST_BYTES: u32 = 64 * 1024 * 1024;
 /// with headroom; the producer rejects anything larger without killing the
 /// connection.
 pub const MAX_READ_LEN: u32 = 256 * 1024;
+
+/// First byte of a watch frame's body: the whole manifest follows.
+///
+/// Sent as the opening frame, and again whenever the producer cannot express
+/// what happened as a delta the consumer could apply — a consumer that fell
+/// too far behind, or a change too large for [`MAX_DELTA_BYTES`]. Receiving
+/// one means "discard what you have and take this instead".
+pub const WATCH_FRAME_MANIFEST: u8 = 0;
+
+/// First byte of a watch frame's body: a [`crate::manifest::ManifestDelta`]
+/// follows, to be applied to the state built from every frame before it.
+pub const WATCH_FRAME_DELTA: u8 = 1;
+
+/// Ceiling on one watch frame's delta. Far below [`MAX_MANIFEST_BYTES`]
+/// because a delta describes a change, not a tree — a producer that wants to
+/// say more than this has effectively rescanned, and the consumer is better
+/// off being cut off than allocating for it. The producer splits oversized
+/// batches rather than emitting a frame this large.
+pub const MAX_DELTA_BYTES: u32 = 8 * 1024 * 1024;
 
 /// Body length of an [`OP_READ`] request: `index(u32) ‖ offset(u64) ‖ len(u32)`.
 pub const READ_REQUEST_LEN: usize = 16;
@@ -58,6 +86,16 @@ pub fn encode_manifest_request(secret: &[u8; SECRET_LEN]) -> Vec<u8> {
     let mut out = Vec::with_capacity(REQUEST_HEADER_LEN);
     out.extend_from_slice(secret);
     out.push(OP_MANIFEST);
+    out
+}
+
+/// Build the header for an [`OP_WATCH`] request. Like the manifest op it has
+/// no body; unlike it, the response never ends until the share does.
+#[must_use]
+pub fn encode_watch_request(secret: &[u8; SECRET_LEN]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(REQUEST_HEADER_LEN);
+    out.extend_from_slice(secret);
+    out.push(OP_WATCH);
     out
 }
 
@@ -136,9 +174,9 @@ pub fn decode_response_header(prefix: &[u8], requested: u32) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ, SECRET_LEN,
-        WEBRTC_SIGNAL_ALPN, decode_read_request, decode_response_header, encode_manifest_request,
-        encode_read_request,
+        MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ,
+        OP_WATCH, SECRET_LEN, WEBRTC_SIGNAL_ALPN, decode_read_request, decode_response_header,
+        encode_manifest_request, encode_read_request,
     };
     use crate::manifest::ReadStatus;
 
@@ -153,9 +191,14 @@ mod tests {
         assert_eq!(WEBRTC_SIGNAL_ALPN, b"agent-share/webrtc-signal/1");
         assert_eq!(OP_MANIFEST, 1);
         assert_eq!(OP_READ, 2);
+        // Added after the fork. Additive: an op an older producer does not
+        // know costs that one stream, not the connection, so a new consumer
+        // degrades to snapshot semantics instead of failing outright.
+        assert_eq!(OP_WATCH, 3);
         assert_eq!(SECRET_LEN, 32);
         assert_eq!(MAX_MANIFEST_BYTES, 64 * 1024 * 1024);
         assert_eq!(MAX_READ_LEN, 256 * 1024);
+        assert_eq!(MAX_DELTA_BYTES, 8 * 1024 * 1024);
     }
 
     #[test]

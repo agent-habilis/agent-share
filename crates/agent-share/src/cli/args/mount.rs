@@ -13,10 +13,11 @@ use crate::protocol::SwarmId;
 pub(crate) enum MountAction {
     /// Share a folder read-only; prints the `agent-share 🐝…` command on stdout.
     ///
-    /// Lazy: the tree is scanned once at startup (a metadata-only snapshot —
-    /// nothing is hashed or transferred up front); peers fetch file bytes on
-    /// demand as they read them. Changes after startup are not visible until
-    /// you restart `serve` and peers remount. Keeps serving until interrupted.
+    /// Lazy: the tree is scanned for metadata only (nothing is hashed or
+    /// transferred up front) and peers fetch file bytes on demand as they read
+    /// them. Live: the folder is watched, and edits, additions and deletions
+    /// reach connected peers without a remount. Keeps serving until
+    /// interrupted.
     Serve {
         /// The directory to share.
         dir: PathBuf,

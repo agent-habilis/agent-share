@@ -24,7 +24,7 @@ use std::sync::Arc;
 use agent_share_proto::framing::{
     self, MAX_MANIFEST_BYTES, MOUNT_ALPN, SECRET_LEN, WEBRTC_SIGNAL_ALPN,
 };
-use agent_share_proto::manifest::MountManifest;
+use agent_share_proto::manifest::{ManifestDelta, MountManifest};
 use agent_share_proto::ticket::MountTicket;
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
@@ -140,6 +140,69 @@ impl ShareClient {
         let manifest =
             MountManifest::decode(&bytes).map_err(|error| err("decode manifest", &error))?;
         serde_wasm(&manifest)
+    }
+
+    /// Follow the share as it changes, calling `on_manifest` with the whole
+    /// tree every time it does.
+    ///
+    /// The callback receives a complete manifest rather than a difference:
+    /// deltas are how the *wire* stays small, but a UI wants the current
+    /// state, and reassembling it here means the browser cannot drift from
+    /// what the producer thinks it sent. Fire-and-forget — it runs until the
+    /// connection ends, and a producer too old for the op simply never calls
+    /// back.
+    ///
+    /// # Errors
+    /// Opening the stream fails. Failures *after* that end the subscription
+    /// quietly, since there is no caller left to return them to.
+    pub async fn watch(&self, on_manifest: js_sys::Function) -> Result<(), JsValue> {
+        let (mut send, mut recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|error| err("open watch stream", &error))?;
+        send.write_all(&framing::encode_watch_request(&self.secret))
+            .await
+            .map_err(|error| err("send watch request", &error))?;
+        send.finish().map_err(|error| err("finish", &error))?;
+
+        wasm_bindgen_futures::spawn_local(async move {
+            let mut manifest = MountManifest::default();
+            loop {
+                // A clean end is the normal way out: the share went away, or
+                // the producer predates the op and dropped the stream.
+                let Ok(len) = read_header(&mut recv, MAX_MANIFEST_BYTES).await else {
+                    return;
+                };
+                let mut body = vec![0u8; len as usize];
+                if recv.read_exact(&mut body).await.is_err() {
+                    return;
+                }
+                let Some((kind, payload)) = body.split_first() else {
+                    return;
+                };
+                let applied = match *kind {
+                    framing::WATCH_FRAME_MANIFEST => {
+                        MountManifest::decode(payload).map(|fresh| manifest = fresh)
+                    }
+                    framing::WATCH_FRAME_DELTA => {
+                        ManifestDelta::decode(payload).map(|delta| manifest.apply(&delta))
+                    }
+                    _ => return,
+                };
+                if applied.is_err() {
+                    return;
+                }
+                let Ok(value) = serde_wasm(&manifest) else {
+                    return;
+                };
+                if on_manifest.call1(&JsValue::NULL, &value).is_err() {
+                    // The subscriber threw; stop rather than loop on it.
+                    return;
+                }
+            }
+        });
+        Ok(())
     }
 
     /// One byte range of one file, addressed by its index in the manifest.

@@ -21,9 +21,17 @@ agent-share serve <dir>
 ```
 
 This prints the consumer's ready-to-run command, carrying a `🐝…` bearer
-ticket. The tree is scanned once at startup (a metadata-only snapshot); peers
-fetch file bytes on demand as they read them. Serve keeps running until
+ticket. The scan is metadata-only; peers fetch file bytes on demand as they
+read them. The folder is watched, so edits, new files and deletions reach
+connected peers without anyone remounting. Serve keeps running until
 interrupted.
+
+A file's position in the manifest is the address reads use, so those positions
+are append-only for the life of a `serve`: a deleted file leaves its slot
+behind rather than renumbering everything after it. Reusing slots would let a
+peer holding an older listing read one file's bytes under another file's name,
+with no error to notice — the same reason mounted filehandles keep their ids
+across an update.
 
 Mount it (consumer):
 

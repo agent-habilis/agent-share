@@ -65,8 +65,7 @@ async fn a_share_is_readable_over_a_webrtc_data_channel() {
 
     // ── producer ─────────────────────────────────────────────────────────
     let (manifest, paths) = agent_share::test_support::scan(&tree).expect("scan");
-    let manifest_bytes = Arc::new(manifest.encode());
-    let files = Arc::new(agent_share::test_support::served_files(paths, &manifest));
+    let shared_tree = agent_share::test_support::live_tree(tree.clone(), manifest, paths);
     let secret = [7u8; SECRET_LEN];
 
     let (producer, producer_webrtc) =
@@ -78,8 +77,7 @@ async fn a_share_is_readable_over_a_webrtc_data_channel() {
     let accept_webrtc = producer_webrtc.clone();
     let server = tokio::spawn(async move {
         while let Some(incoming) = accept_endpoint.accept().await {
-            let manifest_bytes = Arc::clone(&manifest_bytes);
-            let files = Arc::clone(&files);
+            let shared_tree = Arc::clone(&shared_tree);
             let webrtc = accept_webrtc.clone();
             tokio::spawn(async move {
                 let Ok(conn) = incoming.await else { return };
@@ -102,9 +100,7 @@ async fn a_share_is_readable_over_a_webrtc_data_channel() {
                         .expect("complete answer");
                     webrtc.attach(conn.remote_id(), session).expect("attach");
                 } else {
-                    let _ =
-                        agent_share::test_support::serve_mount(conn, secret, manifest_bytes, files)
-                            .await;
+                    let _ = agent_share::test_support::serve_mount(conn, secret, shared_tree).await;
                 }
             });
         }

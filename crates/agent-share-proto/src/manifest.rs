@@ -28,9 +28,39 @@ pub struct FileEntry {
     pub mtime: i64,
 }
 
+impl FileEntry {
+    /// Whether this slot is a tombstone: reserved, but holding no file.
+    ///
+    /// A file's position is its READ address, so removing one cannot compact
+    /// the list — every index after it would shift, and a consumer still
+    /// holding an old index would silently read a different file. Removal
+    /// leaves the slot behind instead. An empty `rel_path` is the marker,
+    /// which no live entry can collide with: every real path is built from a
+    /// directory entry's name and is therefore non-empty.
+    #[must_use]
+    pub fn is_tombstone(&self) -> bool {
+        self.rel_path.is_empty()
+    }
+
+    /// The placeholder left in place of a file that is gone.
+    #[must_use]
+    pub fn tombstone() -> Self {
+        Self {
+            rel_path: String::new(),
+            size: 0,
+            mode: 0,
+            mtime: 0,
+        }
+    }
+}
+
 /// The mount manifest: the complete tree listing a consumer turns into a
 /// filesystem. Distinct from the file-transfer manifest — mount needs
 /// mode/mtime and explicit dirs, and deliberately carries no content hashes.
+///
+/// `files` may contain tombstones once the producer has been watching a tree
+/// that changed; see [`FileEntry::is_tombstone`]. Consumers skip them rather
+/// than treating them as malformed, since the position must survive.
 ///
 /// Wire layout (little-endian):
 /// `dir_count(u32) [path_len(u16) ‖ path ‖ mode(u32) ‖ mtime(i64)]…`
@@ -71,6 +101,67 @@ impl MountManifest {
             out.extend_from_slice(&file.mtime.to_le_bytes());
         }
         out
+    }
+
+    /// Fold a watch delta into this manifest.
+    ///
+    /// Every consumer needs exactly this, so it lives here rather than once in
+    /// the mount client and again in the browser's, where the two could drift
+    /// into disagreeing about what a share contains.
+    ///
+    /// Upserts are placed at the index the producer assigned, growing the list
+    /// with tombstones if a frame was somehow skipped — the position is the
+    /// READ address, so it is placed, never appended-wherever.
+    ///
+    /// # Panics
+    /// On a target where a `u32` index does not fit a `usize`, which is none
+    /// this is built for.
+    pub fn apply(&mut self, delta: &ManifestDelta) {
+        if !delta.dirs_removed.is_empty() {
+            let removed: std::collections::HashSet<&str> =
+                delta.dirs_removed.iter().map(String::as_str).collect();
+            self.dirs
+                .retain(|dir| !removed.contains(dir.rel_path.as_str()));
+        }
+        if !delta.dirs_upserted.is_empty() {
+            // Decide first, mutate second: the lookup index borrows `dirs`,
+            // and rewriting entries under it would invalidate the positions
+            // it holds.
+            let (updates, appended) = {
+                let at: std::collections::HashMap<&str, usize> = self
+                    .dirs
+                    .iter()
+                    .enumerate()
+                    .map(|(position, dir)| (dir.rel_path.as_str(), position))
+                    .collect();
+                let mut updates: Vec<(usize, DirEntry)> = Vec::new();
+                let mut appended: Vec<DirEntry> = Vec::new();
+                for dir in &delta.dirs_upserted {
+                    match at.get(dir.rel_path.as_str()) {
+                        Some(&position) => updates.push((position, dir.clone())),
+                        None => appended.push(dir.clone()),
+                    }
+                }
+                (updates, appended)
+            };
+            for (position, dir) in updates {
+                self.dirs[position] = dir;
+            }
+            self.dirs.extend(appended);
+        }
+        for (index, file) in &delta.files_upserted {
+            let slot = usize::try_from(*index).expect("u32 fits usize");
+            if slot >= self.files.len() {
+                self.files.resize(slot + 1, FileEntry::tombstone());
+            }
+            self.files[slot] = file.clone();
+        }
+        for index in &delta.files_removed {
+            let slot = usize::try_from(*index).expect("u32 fits usize");
+            if let Some(entry) = self.files.get_mut(slot) {
+                *entry = FileEntry::tombstone();
+            }
+        }
     }
 
     /// Decode a manifest received from the producer. Incremental: every read
@@ -118,6 +209,159 @@ fn encode_path(out: &mut Vec<u8>, path: &str) {
     let len = u16::try_from(path.len()).expect("scan rejects paths over MAX_REL_PATH");
     out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(path.as_bytes());
+}
+
+/// What changed in the shared tree since the last frame on a watch stream.
+///
+/// Deltas rather than whole manifests because the tree can be enormous: a
+/// 74k-file share encodes to several MB, and re-sending that on every `touch`
+/// would cost more than the file bytes ever do.
+///
+/// # The index invariant
+///
+/// A file's index is its READ address, so an index that changed meaning
+/// between two frames would silently serve the wrong file's bytes to any
+/// consumer still holding the old number — a corrupt download, not an error.
+/// The producer therefore assigns indices **append-only** for the life of a
+/// `serve`: [`files_upserted`](Self::files_upserted) either updates a slot
+/// in place (same path, new size/mtime) or appends a fresh one, and
+/// [`files_removed`](Self::files_removed) tombstones a slot that is never
+/// reused. Applying a delta out of order, or skipping one, breaks this — which
+/// is why watch frames ride a single ordered QUIC stream and carry no
+/// generation number to resynchronise against.
+///
+/// Directories are keyed by path instead, since nothing addresses them by
+/// position.
+///
+/// Wire layout (little-endian):
+/// `dirs_upserted(u32) [path_len(u16) ‖ path ‖ mode(u32) ‖ mtime(i64)]…`
+/// `dirs_removed(u32) [path_len(u16) ‖ path]…`
+/// `files_upserted(u32) [index(u32) ‖ path_len(u16) ‖ path ‖ size(u64) ‖ mode(u32) ‖ mtime(i64)]…`
+/// `files_removed(u32) [index(u32)]…`
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct ManifestDelta {
+    /// Directories added, or whose mode/mtime changed.
+    pub dirs_upserted: Vec<DirEntry>,
+    /// Directories that are gone, by path.
+    pub dirs_removed: Vec<String>,
+    /// Files added or changed, each with the index it occupies.
+    pub files_upserted: Vec<(u32, FileEntry)>,
+    /// Indices whose file is gone. The slot stays allocated forever.
+    pub files_removed: Vec<u32>,
+}
+
+impl ManifestDelta {
+    /// Whether this delta would change anything, so the producer can skip
+    /// waking every watcher for a rescan that found nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.dirs_upserted.is_empty()
+            && self.dirs_removed.is_empty()
+            && self.files_upserted.is_empty()
+            && self.files_removed.is_empty()
+    }
+
+    /// # Panics
+    /// If a list is longer than `u32::MAX`, or a path longer than
+    /// `u16::MAX` bytes — the same bounds [`MountManifest::encode`] assumes.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(
+            &u32::try_from(self.dirs_upserted.len())
+                .expect("dir count fits u32")
+                .to_le_bytes(),
+        );
+        for dir in &self.dirs_upserted {
+            encode_path(&mut out, &dir.rel_path);
+            out.extend_from_slice(&dir.mode.to_le_bytes());
+            out.extend_from_slice(&dir.mtime.to_le_bytes());
+        }
+        out.extend_from_slice(
+            &u32::try_from(self.dirs_removed.len())
+                .expect("dir count fits u32")
+                .to_le_bytes(),
+        );
+        for path in &self.dirs_removed {
+            encode_path(&mut out, path);
+        }
+        out.extend_from_slice(
+            &u32::try_from(self.files_upserted.len())
+                .expect("file count fits u32")
+                .to_le_bytes(),
+        );
+        for (index, file) in &self.files_upserted {
+            out.extend_from_slice(&index.to_le_bytes());
+            encode_path(&mut out, &file.rel_path);
+            out.extend_from_slice(&file.size.to_le_bytes());
+            out.extend_from_slice(&file.mode.to_le_bytes());
+            out.extend_from_slice(&file.mtime.to_le_bytes());
+        }
+        out.extend_from_slice(
+            &u32::try_from(self.files_removed.len())
+                .expect("file count fits u32")
+                .to_le_bytes(),
+        );
+        for index in &self.files_removed {
+            out.extend_from_slice(&index.to_le_bytes());
+        }
+        out
+    }
+
+    /// Decode a delta received from the producer. Bounds-checked the same way
+    /// [`MountManifest::decode`] is, for the same reason: the counts are
+    /// attacker-controlled.
+    ///
+    /// # Errors
+    /// Truncated input, a non-UTF-8 path, or trailing garbage.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let mut cursor = Cursor { bytes, pos: 0 };
+        let mut dirs_upserted = Vec::new();
+        for _ in 0..cursor.take_u32()? {
+            let rel_path = cursor.take_path()?;
+            let mode = cursor.take_u32()?;
+            let mtime = cursor.take_i64()?;
+            dirs_upserted.push(DirEntry {
+                rel_path,
+                mode,
+                mtime,
+            });
+        }
+        let mut dirs_removed = Vec::new();
+        for _ in 0..cursor.take_u32()? {
+            dirs_removed.push(cursor.take_path()?);
+        }
+        let mut files_upserted = Vec::new();
+        for _ in 0..cursor.take_u32()? {
+            let index = cursor.take_u32()?;
+            let rel_path = cursor.take_path()?;
+            let size = cursor.take_u64()?;
+            let mode = cursor.take_u32()?;
+            let mtime = cursor.take_i64()?;
+            files_upserted.push((
+                index,
+                FileEntry {
+                    rel_path,
+                    size,
+                    mode,
+                    mtime,
+                },
+            ));
+        }
+        let mut files_removed = Vec::new();
+        for _ in 0..cursor.take_u32()? {
+            files_removed.push(cursor.take_u32()?);
+        }
+        if cursor.pos != bytes.len() {
+            bail!("trailing bytes after the delta");
+        }
+        Ok(Self {
+            dirs_upserted,
+            dirs_removed,
+            files_upserted,
+            files_removed,
+        })
+    }
 }
 
 /// The result byte leading every READ response.
@@ -204,7 +448,136 @@ impl Cursor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DirEntry, FileEntry, MountManifest, ReadStatus};
+    use super::{DirEntry, FileEntry, ManifestDelta, MountManifest, ReadStatus};
+
+    fn sample_delta() -> ManifestDelta {
+        ManifestDelta {
+            dirs_upserted: vec![DirEntry {
+                rel_path: "docs/new".to_owned(),
+                mode: 0o755,
+                mtime: 1_700_000_002,
+            }],
+            dirs_removed: vec!["docs/empty".to_owned()],
+            files_upserted: vec![
+                (
+                    0,
+                    FileEntry {
+                        rel_path: "README.md".to_owned(),
+                        size: 99,
+                        mode: 0o644,
+                        mtime: 1_700_000_003,
+                    },
+                ),
+                (
+                    2,
+                    FileEntry {
+                        rel_path: "docs/new/added.md".to_owned(),
+                        size: 7,
+                        mode: 0o600,
+                        mtime: -1,
+                    },
+                ),
+            ],
+            files_removed: vec![1, u32::MAX],
+        }
+    }
+
+    #[test]
+    fn applying_a_delta_keeps_indices_put() {
+        let mut manifest = sample();
+        // Drop file 0, change file 1, add a new one at slot 2.
+        manifest.apply(&ManifestDelta {
+            dirs_upserted: Vec::new(),
+            dirs_removed: vec!["docs/empty".to_owned()],
+            files_upserted: vec![
+                (
+                    1,
+                    FileEntry {
+                        rel_path: "docs/guide.md".to_owned(),
+                        size: 500,
+                        mode: 0o600,
+                        mtime: 9,
+                    },
+                ),
+                (
+                    2,
+                    FileEntry {
+                        rel_path: "new.txt".to_owned(),
+                        size: 3,
+                        mode: 0o644,
+                        mtime: 9,
+                    },
+                ),
+            ],
+            files_removed: vec![0],
+        });
+        assert!(
+            manifest.files[0].is_tombstone(),
+            "the removed slot survives"
+        );
+        assert_eq!(manifest.files[1].size, 500);
+        assert_eq!(manifest.files[2].rel_path, "new.txt");
+        assert_eq!(manifest.dirs.len(), 1, "docs/empty is gone");
+        assert_eq!(manifest.dirs[0].rel_path, "docs");
+    }
+
+    #[test]
+    fn an_upsert_past_the_end_pads_with_tombstones() {
+        let mut manifest = sample();
+        manifest.apply(&ManifestDelta {
+            files_upserted: vec![(
+                5,
+                FileEntry {
+                    rel_path: "far.txt".to_owned(),
+                    size: 1,
+                    mode: 0o644,
+                    mtime: 0,
+                },
+            )],
+            ..ManifestDelta::default()
+        });
+        assert_eq!(manifest.files.len(), 6);
+        assert!(manifest.files[3].is_tombstone());
+        assert_eq!(manifest.files[5].rel_path, "far.txt");
+    }
+
+    #[test]
+    fn delta_round_trips() {
+        let delta = sample_delta();
+        assert_eq!(
+            ManifestDelta::decode(&delta.encode()).expect("decode"),
+            delta
+        );
+    }
+
+    #[test]
+    fn empty_delta_round_trips_and_reports_empty() {
+        let delta = ManifestDelta::default();
+        assert!(delta.is_empty());
+        assert_eq!(
+            ManifestDelta::decode(&delta.encode()).expect("decode"),
+            delta
+        );
+        assert!(!sample_delta().is_empty());
+    }
+
+    #[test]
+    fn truncated_delta_is_rejected() {
+        let encoded = sample_delta().encode();
+        for len in 0..encoded.len() {
+            assert!(
+                ManifestDelta::decode(&encoded[..len]).is_err(),
+                "prefix of {len} bytes must not decode"
+            );
+        }
+    }
+
+    #[test]
+    fn delta_with_trailing_bytes_is_rejected() {
+        let mut encoded = sample_delta().encode();
+        encoded.push(0);
+        assert!(ManifestDelta::decode(&encoded).is_err());
+    }
 
     fn sample() -> MountManifest {
         MountManifest {

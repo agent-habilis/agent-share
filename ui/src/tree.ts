@@ -104,6 +104,10 @@ export function buildTree(manifest: Manifest): { root: DirNode; skipped: number 
   }
 
   manifest.files.forEach((file, index) => {
+    // A tombstone: the file at this index is gone, but the slot stays so
+    // every later index keeps addressing the file it always did. Not a
+    // hostile path, so it must not be counted as one.
+    if (file.rel_path === '') return
     const parts = safeSplit(file.rel_path)
     if (!parts || parts.length === 0) {
       skipped += 1

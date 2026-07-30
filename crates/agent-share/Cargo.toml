@@ -63,3 +63,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 nfsserve = "0.11.0"
 async-trait = "0.1.89"
+# Filesystem change notification behind `serve`'s live tree. Default features
+# on purpose: they select the platform's native backend (FSEvents, inotify,
+# ReadDirectoryChangesW) instead of the portable poll-every-N-seconds
+# fallback, which on a 70k-file share would cost a full stat sweep per tick.
+notify = "8"

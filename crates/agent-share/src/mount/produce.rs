@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,6 +7,7 @@ use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId, SecretKey};
 use rand::RngCore;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::broadcast;
 
 use crate::file::human_bytes;
 use crate::lookup::build_endpoint;
@@ -14,24 +15,21 @@ use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 
 use super::MountTicket;
 use super::ReadStatus;
+use super::live::LiveTree;
 use super::{
-    MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ, REQUEST_HEADER_LEN, SECRET_LEN, wait_online,
+    MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN,
+    wait_online,
 };
 use super::{WEBRTC_SIGNAL_ALPN, serve_signal};
 use webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 
-/// One servable file: the absolute path READs open, and the size the scan
-/// recorded (offsets are clamped against it — snapshot semantics).
-#[derive(Debug)]
-pub struct ServedFile {
-    pub abs: PathBuf,
-    pub size: u64,
-}
-
-/// Producer: share `dir` read-only. Scans **once** at startup — a consistent
-/// snapshot with stable READ indices for every consumer and reconnect — then
-/// prints the consumer's `agent-share` command on stdout and serves manifest
-/// and ranged-read requests until interrupted.
+/// Producer: share `dir` read-only. Scans at startup, then rescans whenever
+/// the tree changes and publishes the difference to anyone watching, so a
+/// consumer sees edits without remounting. Prints the consumer's
+/// `agent-share` command on stdout and serves until interrupted.
+///
+/// READ indices stay stable across those rescans by construction — see
+/// [`super::live`], where the reason that matters is spelled out.
 ///
 /// # Errors
 /// `dir` is not a readable directory, discovery-config resolution fails, or
@@ -51,28 +49,24 @@ pub(crate) async fn serve(
     let (manifest, paths) = super::scan::scan(&root)?;
     let file_count = manifest.files.len();
     let total_bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
-    let files: Arc<Vec<ServedFile>> = Arc::new(
-        paths
-            .into_iter()
-            .zip(&manifest.files)
-            .map(|(abs, entry)| ServedFile {
-                abs,
-                size: entry.size,
-            })
-            .collect(),
-    );
-    let encoded = manifest.encode();
+    let encoded_len = manifest.encode().len();
     // Enforce the consumer-side cap here too: past it, every redeem would
     // abort with "manifest too large" — fail at serve time with a reason
     // instead of minting a ticket nobody can use.
-    if encoded.len() > usize::try_from(super::MAX_MANIFEST_BYTES).expect("u32 fits usize") {
+    if encoded_len > usize::try_from(super::MAX_MANIFEST_BYTES).expect("u32 fits usize") {
         bail!(
             "tree too large to serve: the manifest is {} for {file_count} files (cap {})",
-            human_bytes(u64::try_from(encoded.len()).expect("usize fits u64")),
+            human_bytes(u64::try_from(encoded_len).expect("usize fits u64")),
             human_bytes(u64::from(super::MAX_MANIFEST_BYTES))
         );
     }
-    let manifest_bytes = Arc::new(encoded);
+    let tree = Arc::new(LiveTree::new(root.clone(), manifest, paths));
+    // A watcher that cannot start is not fatal: the share still serves, it
+    // just serves the startup snapshot. Losing the whole share over it would
+    // be a worse trade than losing liveness.
+    if let Err(error) = super::live::spawn_watcher(Arc::clone(&tree)) {
+        tracing::warn!(%error, "watching the tree failed; serving a fixed snapshot");
+    }
 
     let lookups = resolve_transfer_lookups(swarm, flags)?;
     let (endpoint, ticket, secret, webrtc) = bind(lookups).await?;
@@ -97,22 +91,11 @@ pub(crate) async fn serve(
     let local_id = endpoint.id();
     let ice = IceConfig::default();
     while let Some(incoming) = endpoint.accept().await {
-        let manifest_bytes = Arc::clone(&manifest_bytes);
-        let files = Arc::clone(&files);
+        let tree = Arc::clone(&tree);
         let webrtc = webrtc.clone();
         let ice = ice.clone();
         tokio::spawn(async move {
-            if let Err(error) = accept_one(
-                incoming,
-                secret,
-                manifest_bytes,
-                files,
-                local_id,
-                &webrtc,
-                &ice,
-            )
-            .await
-            {
+            if let Err(error) = accept_one(incoming, secret, tree, local_id, &webrtc, &ice).await {
                 tracing::debug!(%error, "mount connection ended");
             }
         });
@@ -175,8 +158,7 @@ pub(super) async fn bind(
 async fn accept_one(
     incoming: Incoming,
     secret: [u8; SECRET_LEN],
-    manifest_bytes: Arc<Vec<u8>>,
-    files: Arc<Vec<ServedFile>>,
+    tree: Arc<LiveTree>,
     local_id: EndpointId,
     webrtc: &WebRtcHandle,
     ice: &IceConfig,
@@ -185,7 +167,7 @@ async fn accept_one(
     if conn.alpn() == WEBRTC_SIGNAL_ALPN {
         return serve_signal(&conn, local_id, webrtc, ice).await;
     }
-    serve_established(conn, secret, manifest_bytes, files).await
+    serve_established(conn, secret, tree).await
 }
 
 /// Serve every bi-stream on an established mount connection as an
@@ -197,19 +179,15 @@ async fn accept_one(
 pub async fn serve_established(
     conn: Connection,
     secret: [u8; SECRET_LEN],
-    manifest_bytes: Arc<Vec<u8>>,
-    files: Arc<Vec<ServedFile>>,
+    tree: Arc<LiveTree>,
 ) -> Result<()> {
     // `accept_bi` errors once the connection is gone (peer closed, or a bad
     // secret closed it from within a stream task) — that ends the loop.
     while let Ok((send, recv)) = conn.accept_bi().await {
         let conn = conn.clone();
-        let manifest_bytes = Arc::clone(&manifest_bytes);
-        let files = Arc::clone(&files);
+        let tree = Arc::clone(&tree);
         tokio::spawn(async move {
-            if let Err(error) =
-                serve_stream(&conn, send, recv, &secret, &manifest_bytes, &files).await
-            {
+            if let Err(error) = serve_stream(&conn, send, recv, &secret, &tree).await {
                 tracing::debug!(%error, "mount stream ended");
             }
         });
@@ -225,8 +203,7 @@ async fn serve_stream(
     mut send: SendStream,
     mut recv: RecvStream,
     secret: &[u8; SECRET_LEN],
-    manifest_bytes: &[u8],
-    files: &[ServedFile],
+    tree: &LiveTree,
 ) -> Result<()> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
     if recv.read_exact(&mut header).await.is_err() {
@@ -239,10 +216,16 @@ async fn serve_stream(
     }
     match header[SECRET_LEN] {
         OP_MANIFEST => {
+            let manifest_bytes = tree.manifest_bytes();
             send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
             let len = u32::try_from(manifest_bytes.len()).context("manifest too large")?;
             send.write_all(&len.to_le_bytes()).await?;
-            send.write_all(manifest_bytes).await?;
+            send.write_all(&manifest_bytes).await?;
+        }
+        OP_WATCH => {
+            // Long-lived, unlike every other op: it returns when the consumer
+            // goes away, so it must not fall through to the `finish` below.
+            return serve_watch(send, tree).await;
         }
         OP_READ => {
             let mut request = [0u8; 16];
@@ -252,7 +235,7 @@ async fn serve_stream(
             let index = u32::from_le_bytes(request[..4].try_into().expect("4 bytes"));
             let offset = u64::from_le_bytes(request[4..12].try_into().expect("8 bytes"));
             let len = u32::from_le_bytes(request[12..].try_into().expect("4 bytes"));
-            let (status, data) = answer_read(files, index, offset, len).await;
+            let (status, data) = answer_read(tree, index, offset, len).await;
             send.write_all(&[status.to_byte()]).await?;
             let data_len = u32::try_from(data.len()).expect("bounded by MAX_READ_LEN");
             send.write_all(&data_len.to_le_bytes()).await?;
@@ -272,45 +255,86 @@ async fn serve_stream(
     Ok(())
 }
 
+/// Stream tree changes until the consumer hangs up.
+///
+/// The opening frame is the whole manifest, so a consumer needs no separate
+/// [`OP_MANIFEST`] round-trip and cannot race a change into the gap between
+/// the two. Everything after it is a delta, applied in order — which is why
+/// this rides one QUIC stream and why falling behind is answered with a fresh
+/// manifest rather than by skipping ahead.
+async fn serve_watch(mut send: SendStream, tree: &LiveTree) -> Result<()> {
+    // Subscribe *before* snapshotting the manifest: the other order would drop
+    // any change landing in between, and the consumer would never hear of it.
+    let mut updates = tree.subscribe();
+    let mut frame = tree.opening_frame();
+    loop {
+        let len = u32::try_from(frame.len()).context("watch frame too large")?;
+        send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
+        send.write_all(&len.to_le_bytes()).await?;
+        send.write_all(&frame).await?;
+        frame = match updates.recv().await {
+            Ok(next) => next.as_ref().clone(),
+            Err(broadcast::error::RecvError::Lagged(missed)) => {
+                // Deltas only mean anything applied in order and in full, so a
+                // consumer that missed some cannot be caught up with the next
+                // one. Resend the whole tree instead.
+                tracing::debug!(missed, "watcher fell behind; resending the manifest");
+                tree.opening_frame()
+            }
+            Err(broadcast::error::RecvError::Closed) => return Ok(()),
+        };
+    }
+}
+
 /// Serve one ranged read. Opens the file per request — simple, correct, and
 /// no fd table held hostage by however many files a consumer touches; the OS
 /// dentry/page cache makes the reopen cheap.
-async fn answer_read(
-    files: &[ServedFile],
-    index: u32,
-    offset: u64,
-    len: u32,
-) -> (ReadStatus, Vec<u8>) {
+async fn answer_read(tree: &LiveTree, index: u32, offset: u64, len: u32) -> (ReadStatus, Vec<u8>) {
     if len > MAX_READ_LEN {
         return (ReadStatus::LenOverCap, Vec::new());
     }
-    let Some(file) = usize::try_from(index)
-        .ok()
-        .and_then(|index| files.get(index))
-    else {
+    // Resolved through the live tree, so a tombstoned slot answers `BadIndex`
+    // rather than serving whatever used to live there.
+    let Some(abs) = tree.path_of(index) else {
         return (ReadStatus::BadIndex, Vec::new());
     };
-    if offset >= file.size {
-        // Past the snapshot's EOF is a valid empty read, not an error.
-        return (ReadStatus::Ok, Vec::new());
-    }
-    let want = usize::try_from(u64::from(len).min(file.size - offset)).expect("bounded by len");
-    match read_range(&file.abs, offset, want).await {
+    // Deliberately not clamped to the manifest's size. That size is a scan's,
+    // and between rescans a file being appended to is larger than it says —
+    // the clamp used to truncate every read of a growing file to its length at
+    // scan time. `read_range` bounds itself against the open fd instead, so
+    // the answer comes from the file as it is now.
+    let want = usize::try_from(len).expect("u32 fits usize");
+    match read_range(&abs, offset, want).await {
         Ok(data) => (ReadStatus::Ok, data),
         Err(error) => {
-            tracing::warn!(%error, path = %file.abs.display(), "read failed");
+            tracing::warn!(%error, path = %abs.display(), "read failed");
             (ReadStatus::Io, Vec::new())
         }
     }
 }
 
+/// Read up to `want` bytes at `offset`, bounded by the file's live length.
+///
+/// The bound comes from an `fstat` on the already-open fd rather than from the
+/// manifest, which serves two ends at once: a file appended to since the scan
+/// reads past its recorded size, and a consumer asking for the full
+/// [`MAX_READ_LEN`] of a ten-byte file still only allocates ten bytes. Reading
+/// the length off the same fd we then read from also keeps the two consistent
+/// under a concurrent truncate.
 async fn read_range(path: &Path, offset: u64, want: usize) -> Result<Vec<u8>> {
     let mut file = tokio::fs::File::open(path).await?;
+    let live = file.metadata().await?.len();
+    let want = want.min(usize::try_from(live.saturating_sub(offset)).unwrap_or(want));
+    if want == 0 {
+        // Past the end is a valid empty read, not an error — a consumer
+        // treats it as EOF.
+        return Ok(Vec::new());
+    }
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     let mut data = vec![0u8; want];
     let mut filled = 0;
-    // A plain read loop instead of `read_exact`: a file that shrank since the
-    // scan yields a short (not failed) read — snapshot semantics.
+    // A plain read loop instead of `read_exact`: a file truncated between the
+    // stat above and the read below yields a short (not failed) read.
     while filled < want {
         let read = file.read(&mut data[filled..]).await?;
         if read == 0 {
