@@ -6,15 +6,14 @@
  * contract, and it's what makes a browser render map 1:1 onto terminal columns
  * and rows.
  *
- * `rowPx / fontSizePx` is 1.2. That ratio is not arbitrary: box-drawing glyphs
- * stop connecting vertically much above 120% line-height in most monospace fonts,
- * which would leave visible gaps in every border we draw.
+ * Upstream moonspace keeps `rowPx / fontSizePx` at 1.2 for box-drawing joins.
+ * This vendor copy runs 25% taller (1.5) for the share browser's readability.
  */
 export const grid = {
   /** The one and only font size. There is no type scale. */
   fontSizePx: 15,
-  /** Row height in pixels. 15 × 1.2 = 18, an integer — avoids sub-pixel drift when stacked. */
-  rowPx: 18,
+  /** Row height in pixels. 15 × 1.5 = 22.5 (25% above the upstream 18px row). */
+  rowPx: 22.5,
   /** Default content measure. 80 columns, the classic terminal width. */
   measureCh: 80,
   /** Reference terminal viewport, used by the TerminalFrame story decorator. */

@@ -125,36 +125,40 @@ function prunePath(current: string[], manifest: Manifest): string[] {
 
 function Landing() {
   return (
-    <Box border="line" padX={2} padY={1}>
-      <Stack direction="column" gap={1}>
-        <Text weight="bold">agent-share</Text>
-        <Text color="fgMuted">Share a folder peer-to-peer. Open a link to browse one.</Text>
-        <Text>agent-share serve ./some-folder</Text>
-        <Text color="fgSubtle">
-          The link it prints carries the whole capability in its fragment, so this site never
-          sees it.
-        </Text>
-      </Stack>
-    </Box>
+    <div style={{ padding: '1ch 2ch' }}>
+      <Box border="line" padX={2} padY={1}>
+        <Stack direction="column" gap={1}>
+          <Text weight="bold">agent-share</Text>
+          <Text color="fgMuted">Share a folder peer-to-peer. Open a link to browse one.</Text>
+          <Text>agent-share serve ./some-folder</Text>
+          <Text color="fgSubtle">
+            The link it prints carries the whole capability in its fragment, so this site never
+            sees it.
+          </Text>
+        </Stack>
+      </Box>
+    </div>
   )
 }
 
 function Failed({ reason }: { reason: string }) {
   return (
-    <Box border="line" padX={2} padY={1}>
-      <Stack direction="column" gap={1}>
-        <Text weight="bold" color="danger">
-          Could not connect
-        </Text>
-        {/* No relayed data path exists by design, so a failed negotiation is
-            the end of the road rather than a slower route. Say so. */}
-        <Text color="fgMuted">
-          A direct connection to this peer could not be established. Both ends may be behind
-          restrictive NATs.
-        </Text>
-        <Text color="fgSubtle">{reason}</Text>
-      </Stack>
-    </Box>
+    <div style={{ padding: '1ch 2ch' }}>
+      <Box border="line" padX={2} padY={1}>
+        <Stack direction="column" gap={1}>
+          <Text weight="bold" color="danger">
+            Could not connect
+          </Text>
+          {/* No relayed data path exists by design, so a failed negotiation is
+              the end of the road rather than a slower route. Say so. */}
+          <Text color="fgMuted">
+            A direct connection to this peer could not be established. Both ends may be behind
+            restrictive NATs.
+          </Text>
+          <Text color="fgSubtle">{reason}</Text>
+        </Stack>
+      </Box>
+    </div>
   )
 }
 
@@ -327,7 +331,7 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            minHeight: 'calc(100vh - 2ch)',
+            minHeight: '100vh',
             width: '100%',
           }}
         >
@@ -350,66 +354,75 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     const err = mountError.value
     const hasSelection = nodeAtPath(built.root, path.value) !== undefined
 
-    // Fill the viewport under #root's vertical padding so ColumnView can take
-    // the leftover height rather than stopping at a fixed 70vh.
+    // Header keeps its own inset; the file explorer fills the rest of the
+    // viewport flush to the edges — no gap, no page padding around it.
     return (
       <div
         style={{
           display: 'flex',
           flexDirection: 'column',
-          gap: 'calc(1 * var(--ms-row))',
-          height: 'calc(100vh - 2ch)',
+          height: '100vh',
           minHeight: 0,
         }}
       >
-        <Stack direction="row" gap={2} justify="between">
-          <Stack direction="row" gap={1}>
-            <Text weight="bold">agent-share</Text>
-            <Badge tone="success" variant="outline">
-              {current.client.transport}
-            </Badge>
-            <Text color="fgMuted">
-              {files.length} files · {humanBytes(total)}
+        <div
+          style={{
+            flexShrink: 0,
+            padding: 'var(--ms-row) 2ch',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 'calc(1 * var(--ms-row))',
+          }}
+        >
+          <Stack direction="row" gap={2} justify="between">
+            <Stack direction="row" gap={1}>
+              <Text weight="bold">agent-share</Text>
+              <Badge tone="success" variant="outline">
+                {current.client.transport}
+              </Badge>
+              <Text color="fgMuted">
+                {files.length} files · {humanBytes(total)}
+              </Text>
+            </Stack>
+            <Stack direction="row" gap={1}>
+              <Button variant="secondary" onclick={() => void mount()} disabled={busy}>
+                {mounted ? 'Unmount' : 'Mount'}
+              </Button>
+              <Button
+                variant="primary"
+                onclick={() => void downloadSelected()}
+                disabled={busy || !hasSelection}
+              >
+                Download
+              </Button>
+              <Button variant="secondary" onclick={() => void downloadAll()} disabled={busy}>
+                Download all
+              </Button>
+            </Stack>
+          </Stack>
+
+          {active ? (
+            <ProgressBar
+              value={active.progress.total === 0 ? 0 : active.progress.done / active.progress.total}
+              label={
+                active.kind === 'download'
+                  ? 'downloading'
+                  : active.kind === 'mounting'
+                    ? 'mounting'
+                    : 'syncing'
+              }
+              showValue
+            />
+          ) : null}
+
+          {err ? <Text color="danger">{err}</Text> : null}
+
+          {built.skipped > 0 ? (
+            <Text color="warning">
+              {built.skipped} entries hidden — unsafe paths in the peer&apos;s manifest
             </Text>
-          </Stack>
-          <Stack direction="row" gap={1}>
-            <Button variant="secondary" onclick={() => void mount()} disabled={busy}>
-              {mounted ? 'Unmount' : 'Mount'}
-            </Button>
-            <Button
-              variant="primary"
-              onclick={() => void downloadSelected()}
-              disabled={busy || !hasSelection}
-            >
-              Download
-            </Button>
-            <Button variant="secondary" onclick={() => void downloadAll()} disabled={busy}>
-              Download all
-            </Button>
-          </Stack>
-        </Stack>
-
-        {active ? (
-          <ProgressBar
-            value={active.progress.total === 0 ? 0 : active.progress.done / active.progress.total}
-            label={
-              active.kind === 'download'
-                ? 'downloading'
-                : active.kind === 'mounting'
-                  ? 'mounting'
-                  : 'syncing'
-            }
-            showValue
-          />
-        ) : null}
-
-        {err ? <Text color="danger">{err}</Text> : null}
-
-        {built.skipped > 0 ? (
-          <Text color="warning">
-            {built.skipped} entries hidden — unsafe paths in the peer&apos;s manifest
-          </Text>
-        ) : null}
+          ) : null}
+        </div>
 
         <ColumnView
           root={built.root}

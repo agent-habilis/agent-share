@@ -1,3 +1,9 @@
+/* Page chrome sits darker than the file browser surface. */
+body {
+  background: var(--ms-bg-sunken);
+}
+
 #root {
-  padding: 1ch 2ch;
+  margin: 0;
+  min-height: 100vh;
 }

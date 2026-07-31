@@ -1,10 +1,10 @@
 /**
  * A macOS Finder column browser.
  *
- * One pane per level of the selected path, panes side by side, scrolling right
- * as you descend. Column widths are drag-resizable on the right border;
- * double-clicking a border snaps that pane to the width of its longest name —
- * the same gestures Finder uses.
+ * One pane per level of the selected path, panes side by side on a single
+ * raised surface, scrolling right as you descend. Column widths are
+ * drag-resizable on the right border; double-clicking a border snaps that pane
+ * to the width of its longest name — the same gestures Finder uses.
  *
  * Built from moonspace-ui primitives — the design system has no column
  * component, and adding one there would mean designing for its eventual TUI
@@ -15,7 +15,7 @@
  * requirement rather than a limitation to work around.
  */
 
-import { Box, Stack, Text, MiddleTruncate, glyphs, theme } from 'moonspace-ui'
+import { Stack, Text, MiddleTruncate, glyphs, roleVar, theme } from 'moonspace-ui'
 import { component, keyed, signal } from 'visage-dom'
 
 import { humanBytes, type DirNode, type Node } from './tree.ts'
@@ -24,6 +24,11 @@ const DEFAULT_WIDTH = 28
 const MIN_WIDTH = 12
 /** Trailing chrome inside a row: chevron + nbsp. */
 const ROW_CHROME = 2
+/**
+ * Darker than the raised surface so rules stay quiet. Semantic `border` reads
+ * too bright against `bg`.
+ */
+const SURFACE_BORDER = roleVar.bgSunken
 
 interface ColumnViewProps {
   root: DirNode
@@ -165,6 +170,8 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
       writePath(path.slice(0, depth))
     }
 
+    // One raised surface for the whole browser — columns share it and only
+    // draw a vertical rule between panes, rather than each boxing itself.
     return (
       <div
         ref={(el) => {
@@ -180,23 +187,25 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
           alignItems: 'stretch',
           flex: 1,
           minHeight: 0,
+          background: roleVar.bg,
+          outline: `1px solid ${SURFACE_BORDER}`,
+          outlineOffset: 0,
         }}
       >
         {keyed(columns, (column) => column.path || '/', (column, depth) => {
-          const padX = depth === 0 ? 0 : 1
           const width = widthList[depth] ?? DEFAULT_WIDTH
           return (
             <Column
               dir={column}
               selected={path[depth]}
               width={width}
-              padX={padX}
+              padX={1}
               onSelect={(node) => select(depth, node)}
               onClear={() => clearTo(depth)}
               onResizeStart={(event) =>
                 beginResize(event, widthAt(depth), (next) => setWidth(depth, next))
               }
-              onFit={() => setWidth(depth, fitColumnWidth(column, padX))}
+              onFit={() => setWidth(depth, fitColumnWidth(column, 1))}
             />
           )
         })}
@@ -280,25 +289,24 @@ function Column({
         flexShrink: 0,
         display: 'flex',
         flexDirection: 'column',
+        boxSizing: 'border-box',
         width: `${width}ch`,
+        padding: `0 ${padX}ch`,
+        borderRight: `1px solid ${SURFACE_BORDER}`,
       }}
     >
-      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <Box border="line" padX={padX} padY={0} width={width}>
-          <div style={{ overflowY: 'auto', height: '100%' }}>
-            {dir.children.length === 0 ? (
-              <Text color="fgSubtle">(empty)</Text>
-            ) : (
-              keyed(dir.children, (child) => child.path, (child) => (
-                <Row
-                  node={child}
-                  active={child.name === selected}
-                  onSelect={() => onSelect(child)}
-                />
-              ))
-            )}
-          </div>
-        </Box>
+      <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
+        {dir.children.length === 0 ? (
+          <Text color="fgSubtle">(empty)</Text>
+        ) : (
+          keyed(dir.children, (child) => child.path, (child) => (
+            <Row
+              node={child}
+              active={child.name === selected}
+              onSelect={() => onSelect(child)}
+            />
+          ))
+        )}
       </div>
       <ResizeHandle onResizeStart={onResizeStart} onFit={onFit} />
     </div>
@@ -335,7 +343,9 @@ function Row({
     >
       <Stack direction="row" gap={0} justify="between">
         <div style={{ minWidth: 0, flex: 1, overflow: 'hidden' }}>
-          <MiddleTruncate value={node.name} />
+          <Text weight={node.kind === 'dir' ? 'bold' : 'regular'}>
+            <MiddleTruncate value={node.name} />
+          </Text>
         </div>
         <Text color={active ? 'fg' : 'fgSubtle'}>
           {node.kind === 'dir' ? `${glyphs.chevron.right}\u00a0` : '\u00a0\u00a0'}
@@ -367,25 +377,24 @@ function Detail({
         flexShrink: 0,
         display: 'flex',
         flexDirection: 'column',
+        boxSizing: 'border-box',
         width: `${width}ch`,
+        padding: '0 1ch',
+        borderRight: `1px solid ${SURFACE_BORDER}`,
       }}
     >
-      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <Box border="line" padX={1} padY={0} width={width}>
-          <div style={{ overflowY: 'auto', height: '100%' }}>
-            <Stack direction="column" gap={1}>
-              <Text weight="bold">
-                <MiddleTruncate value={node.name} />
-              </Text>
-              <Text color="fgMuted">{humanBytes(node.size)}</Text>
-              {node.mtime > 0 ? (
-                <Text color="fgSubtle">
-                  {new Date(node.mtime * 1000).toISOString().slice(0, 10)}
-                </Text>
-              ) : null}
-            </Stack>
-          </div>
-        </Box>
+      <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
+        <Stack direction="column" gap={1}>
+          <Text weight="bold">
+            <MiddleTruncate value={node.name} />
+          </Text>
+          <Text color="fgMuted">{humanBytes(node.size)}</Text>
+          {node.mtime > 0 ? (
+            <Text color="fgSubtle">
+              {new Date(node.mtime * 1000).toISOString().slice(0, 10)}
+            </Text>
+          ) : null}
+        </Stack>
       </div>
       <ResizeHandle onResizeStart={onResizeStart} onFit={() => onFit(node)} />
     </div>
