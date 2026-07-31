@@ -12,7 +12,7 @@
  */
 
 import { Box, Stack, Text, MiddleTruncate, glyphs, theme } from 'moonspace-ui'
-import { useCallback, useEffect, useRef } from 'react'
+import { keyed } from 'visage-dom'
 
 import { humanBytes, type DirNode, type Node } from './tree.ts'
 
@@ -40,33 +40,45 @@ function columnsFor(root: DirNode, path: string[]): DirNode[] {
   return columns
 }
 
+/** The node the last path segment names, if it is a file. */
+function selectedNode(columns: DirNode[], path: string[]): Node | undefined {
+  const last = path[path.length - 1]
+  if (last === undefined) return undefined
+  const parent = columns[path.length - 1]
+  return parent?.children.find((child) => child.name === last)
+}
+
+function scrollFollowRight(scroller: HTMLElement | null): void {
+  requestAnimationFrame(() => {
+    if (scroller) scroller.scrollLeft = scroller.scrollWidth
+  })
+}
+
 export function ColumnView({ root, path, onPathChange }: ColumnViewProps) {
   const columns = columnsFor(root, path)
-  const scroller = useRef<HTMLDivElement>(null)
+  let scroller: HTMLDivElement | null = null
 
-  // Follow the selection rightwards, the way Finder does.
-  useEffect(() => {
-    const element = scroller.current
-    if (element) element.scrollLeft = element.scrollWidth
-  }, [path.length])
+  const writePath = (next: string[]) => {
+    onPathChange(next)
+    scrollFollowRight(scroller)
+  }
 
-  const select = useCallback(
-    (depth: number, node: Node) => {
-      // Selecting in a column truncates everything to its right — the panes
-      // past it described a path that is no longer current.
-      onPathChange([...path.slice(0, depth), node.name])
-    },
-    [path, onPathChange],
-  )
+  const select = (depth: number, node: Node) => {
+    // Selecting in a column truncates everything to its right — the panes
+    // past it described a path that is no longer current.
+    writePath([...path.slice(0, depth), node.name])
+  }
 
   return (
     <div
-      ref={scroller}
+      ref={(el) => {
+        scroller = el as HTMLDivElement
+        scrollFollowRight(scroller)
+      }}
       style={{ display: 'flex', overflowX: 'auto', alignItems: 'stretch', flex: 1 }}
     >
-      {columns.map((column, depth) => (
+      {keyed(columns, (column) => column.path || '/', (column, depth) => (
         <Column
-          key={column.path || '/'}
           dir={column}
           selected={path[depth]}
           onSelect={(node) => select(depth, node)}
@@ -75,14 +87,6 @@ export function ColumnView({ root, path, onPathChange }: ColumnViewProps) {
       <Detail node={selectedNode(columns, path)} />
     </div>
   )
-}
-
-/** The node the last path segment names, if it is a file. */
-function selectedNode(columns: DirNode[], path: string[]): Node | undefined {
-  const last = path[path.length - 1]
-  if (last === undefined) return undefined
-  const parent = columns[path.length - 1]
-  return parent?.children.find((child) => child.name === last)
 }
 
 function Column({
@@ -100,9 +104,8 @@ function Column({
         {dir.children.length === 0 ? (
           <Text color="fgSubtle">(empty)</Text>
         ) : (
-          dir.children.map((child) => (
+          keyed(dir.children, (child) => child.path, (child) => (
             <Row
-              key={child.path}
               node={child}
               active={child.name === selected}
               onSelect={() => onSelect(child)}
@@ -127,8 +130,8 @@ function Row({
     <div
       role="button"
       tabIndex={0}
-      onClick={onSelect}
-      onKeyDown={(event) => {
+      onclick={onSelect}
+      onkeydown={(event: KeyboardEvent) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault()
           onSelect()
@@ -159,9 +162,9 @@ function Detail({ node }: { node: Node | undefined }) {
           <MiddleTruncate value={node.name} budget={COLUMN_WIDTH - 2} />
         </Text>
         <Text color="fgMuted">{humanBytes(node.size)}</Text>
-        {node.mtime > 0 && (
+        {node.mtime > 0 ? (
           <Text color="fgSubtle">{new Date(node.mtime * 1000).toISOString().slice(0, 10)}</Text>
-        )}
+        ) : null}
       </Stack>
     </Box>
   )

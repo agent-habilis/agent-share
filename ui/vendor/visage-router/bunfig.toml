@@ -1,0 +1,4 @@
+# Bun does not walk up for a bunfig, so `cd vendor/<name> && bun test` would
+# otherwise run with no DOM registered. The ui/ root run picks up ui/bunfig.toml.
+[test]
+preload = ["../../test-setup.ts"]

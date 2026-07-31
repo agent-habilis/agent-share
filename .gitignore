@@ -5,10 +5,7 @@
 # above does not reach its build directory.
 crates/agent-share-wasm-client/target/
 
-# Front-end dependencies and build output. `ui/node_modules/moonspace-ui` is a
-# `file:` symlink into a sibling repo, which git cannot follow — staging it
-# fails with "too many levels of symbolic links" rather than anything
-# describing the real problem.
+# Front-end dependencies and build output.
 node_modules/
 ui/dist/
 

@@ -1,18 +1,21 @@
-import { GlobalStyle, theme } from 'moonspace-ui'
-import { StrictMode } from 'react'
-import { createRoot } from 'react-dom/client'
-import { ThemeProvider } from 'styled-components'
+import { T, Theme } from 'moonspace-ui'
+import { component, render } from 'visage-dom'
+
+import 'moonspace-ui/src/global.css'
+import './app.css'
 
 import { App } from './App.tsx'
 
 const root = document.getElementById('root')
 if (!root) throw new Error('#root is missing from index.html')
 
-createRoot(root).render(
-  <StrictMode>
-    <ThemeProvider theme={theme}>
-      <GlobalStyle />
+const Root = component(function* () {
+  yield () => (
+    <>
+      {Theme(T)}
       <App />
-    </ThemeProvider>
-  </StrictMode>,
-)
+    </>
+  )
+})
+
+render(<Root />, root)

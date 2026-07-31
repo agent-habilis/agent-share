@@ -1,0 +1,66 @@
+/*
+ * TX-02 (Berkeley Mono) is proprietary and cannot be redistributed, so no font
+ * files ship with this package. If you own a license, drop the .woff2 files in
+ * and uncomment this block — everything else already names the family.
+ *
+ * @font-face {
+ *   font-family: 'TX-02';
+ *   src: url('/fonts/TX-02-Variable.woff2') format('woff2-variations');
+ *   font-weight: 100 900;
+ *   font-stretch: 60% 100%;
+ *   font-style: oblique -16deg 0deg;
+ *   font-display: swap;
+ * }
+ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: var(--ms-font-size);
+  /*
+   * Pin the grid to CSS pixels. Without this, a user's browser zoom or default
+   * font size would rescale the cell and every ch measurement with it — fine
+   * for a normal site, but here it desynchronises components that were sized
+   * against a fixed row height.
+   */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ms-bg);
+  color: var(--ms-fg);
+  font-family: 'TX-02', 'TX-02 Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: var(--ms-font-size);
+  font-weight: 400;
+  line-height: var(--ms-row);
+  font-feature-settings: 'calt' 1, 'ss01' 1;
+  /*
+   * Ligatures are enabled for TX-02's contextual set but kerning is off: any
+   * kerning at all would make advance widths non-uniform and break the ch unit.
+   */
+  font-kerning: none;
+  font-variant-ligatures: contextual;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Controls inherit the one font and the one size. There are no exceptions. */
+button, input, select, textarea {
+  font: inherit;
+  font-feature-settings: inherit;
+  color: inherit;
+}
+
+::selection {
+  background: var(--ms-bg-selected);
+  color: var(--ms-fg);
+}
+
+/* Scrollbars, rendered as narrow as the platform allows so they cost ~1 cell. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ms-border) transparent;
+}
