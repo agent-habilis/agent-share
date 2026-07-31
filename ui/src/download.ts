@@ -1,10 +1,10 @@
 /**
- * Download a whole folder as a ZIP, streamed.
+ * Download a selection, streamed: a single file as itself, a folder as a ZIP.
  *
  * Never buffered: a share can be far larger than memory, and the protocol caps
  * a single read at 256 KiB anyway, so files arrive in chunks and go straight
- * out. Where the File System Access API exists the ZIP is written directly to
- * disk; otherwise it falls back to a Blob, which *is* memory-bound — so the
+ * out. Where the File System Access API exists the bytes are written directly
+ * to disk; otherwise it falls back to a Blob, which *is* memory-bound — so the
  * fallback is a real limitation, not a footnote.
  */
 
@@ -64,16 +64,7 @@ export function zipStream(
   onProgress?: (progress: Progress) => void,
 ): ReadableStream<Uint8Array> {
   const total = files.reduce((sum, file) => sum + file.size, 0)
-  let done = 0
-
-  const counted: Reader = {
-    async read(index, offset, len) {
-      const chunk = await reader.read(index, offset, len)
-      done += chunk.length
-      onProgress?.({ done, total })
-      return chunk
-    },
-  }
+  const counted = countingReader(reader, total, onProgress)
 
   return downloadZip(
     files.map((file) => ({
@@ -87,12 +78,44 @@ export function zipStream(
 }
 
 /**
- * Save the ZIP, preferring a direct-to-disk stream.
+ * Stream a single file's bytes as-is — no archive around them.
+ *
+ * A one-file download wrapped in a ZIP is pure friction: the receiver wants
+ * the file, not an unpacking step. Same chunked reads and progress as the ZIP
+ * path, minus the container.
+ */
+export function singleFileStream(
+  reader: Reader,
+  file: FileNode,
+  onProgress?: (progress: Progress) => void,
+): ReadableStream<Uint8Array> {
+  return fileStream(countingReader(reader, file.size, onProgress), file)
+}
+
+/** Wrap `reader` so every chunk advances a shared progress counter. */
+function countingReader(
+  reader: Reader,
+  total: number,
+  onProgress?: (progress: Progress) => void,
+): Reader {
+  let done = 0
+  return {
+    async read(index, offset, len) {
+      const chunk = await reader.read(index, offset, len)
+      done += chunk.length
+      onProgress?.({ done, total })
+      return chunk
+    },
+  }
+}
+
+/**
+ * Save the stream, preferring a direct-to-disk pipe.
  *
  * @returns `true` when it streamed to disk, `false` when it fell back to a
- * Blob (and therefore held the whole archive in memory).
+ * Blob (and therefore held the whole download in memory).
  */
-export async function saveZip(
+export async function saveStream(
   stream: ReadableStream<Uint8Array>,
   suggestedName: string,
 ): Promise<boolean> {

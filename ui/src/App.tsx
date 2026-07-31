@@ -20,7 +20,7 @@ import { component, computed, listen, signal } from 'visage-dom'
 import type { Child, Ctx } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
-import { saveZip, zipStream, type Progress } from './download.ts'
+import { saveStream, singleFileStream, zipStream, type Progress } from './download.ts'
 import {
   canMount,
   emptySyncedState,
@@ -454,7 +454,7 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     return current.phase === 'ready' ? buildTree(current.manifest) : null
   })
 
-  async function downloadFiles(files: FileNode[], suggestedName: string): Promise<void> {
+  async function downloadFiles(files: FileNode[], baseName: string): Promise<void> {
     const current = state.peek()
     if (current.phase !== 'ready' || transfer.peek() || files.length === 0) return
     transfer.value = {
@@ -465,10 +465,15 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
       },
     }
     try {
-      const stream = zipStream(current.client, files, (progress) => {
+      const onProgress = (progress: Progress) => {
         transfer.value = { kind: 'download', progress }
-      })
-      await saveZip(stream, suggestedName)
+      }
+      // One file travels as itself; only a multi-file selection needs a ZIP.
+      const single = files.length === 1 ? files[0] : null
+      const stream = single
+        ? singleFileStream(current.client, single, onProgress)
+        : zipStream(current.client, files, onProgress)
+      await saveStream(stream, single ? single.name : `${baseName}.zip`)
     } finally {
       if (transfer.peek()?.kind === 'download') transfer.value = null
     }
@@ -479,14 +484,13 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     if (!built) return
     const selected = nodeAtPath(built.root, path.peek())
     if (!selected) return
-    const name = selected.kind === 'dir' ? selected.name || 'share' : selected.name
-    await downloadFiles(filesUnder(selected), `${name}.zip`)
+    await downloadFiles(filesUnder(selected), selected.name || 'share')
   }
 
   async function downloadAll(): Promise<void> {
     const built = tree.peek()
     if (!built) return
-    await downloadFiles(filesUnder(built.root), 'share.zip')
+    await downloadFiles(filesUnder(built.root), 'share')
   }
 
   async function mount(): Promise<void> {
