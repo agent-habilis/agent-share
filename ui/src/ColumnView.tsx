@@ -75,13 +75,21 @@ export function ColumnView({ root, path, onPathChange }: ColumnViewProps) {
         scroller = el as HTMLDivElement
         scrollFollowRight(scroller)
       }}
-      style={{ display: 'flex', overflowX: 'auto', alignItems: 'stretch', flex: 1 }}
+      style={{
+        display: 'flex',
+        overflowX: 'auto',
+        alignItems: 'stretch',
+        flex: 1,
+        minHeight: 0,
+      }}
     >
       {keyed(columns, (column) => column.path || '/', (column, depth) => (
         <Column
           dir={column}
           selected={path[depth]}
           onSelect={(node) => select(depth, node)}
+          // Flush with the top bar; deeper columns keep inset from their left rule.
+          padX={depth === 0 ? 0 : 1}
         />
       ))}
       <Detail node={selectedNode(columns, path)} />
@@ -93,14 +101,16 @@ function Column({
   dir,
   selected,
   onSelect,
+  padX,
 }: {
   dir: DirNode
   selected: string | undefined
   onSelect: (node: Node) => void
+  padX: number
 }) {
   return (
-    <Box border="line" padX={1} padY={0} width={COLUMN_WIDTH}>
-      <div style={{ overflowY: 'auto', maxHeight: '70vh' }}>
+    <Box border="line" padX={padX} padY={0} width={COLUMN_WIDTH}>
+      <div style={{ overflowY: 'auto', height: '100%' }}>
         {dir.children.length === 0 ? (
           <Text color="fgSubtle">(empty)</Text>
         ) : (
@@ -143,9 +153,10 @@ function Row({
       }}
     >
       <Stack direction="row" gap={0} justify="between">
-        <MiddleTruncate value={node.name} budget={COLUMN_WIDTH - 3} />
+        {/* nbsp after the chevron — a plain trailing space collapses at the flex edge. */}
+        <MiddleTruncate value={node.name} budget={COLUMN_WIDTH - 4} />
         <Text color={active ? 'fg' : 'fgSubtle'}>
-          {node.kind === 'dir' ? glyphs.chevron.right : ' '}
+          {node.kind === 'dir' ? `${glyphs.chevron.right}\u00a0` : '\u00a0\u00a0'}
         </Text>
       </Stack>
     </div>
@@ -157,15 +168,17 @@ function Detail({ node }: { node: Node | undefined }) {
   if (!node || node.kind !== 'file') return null
   return (
     <Box border="line" padX={1} padY={0} width={COLUMN_WIDTH}>
-      <Stack direction="column" gap={1}>
-        <Text weight="bold">
-          <MiddleTruncate value={node.name} budget={COLUMN_WIDTH - 2} />
-        </Text>
-        <Text color="fgMuted">{humanBytes(node.size)}</Text>
-        {node.mtime > 0 ? (
-          <Text color="fgSubtle">{new Date(node.mtime * 1000).toISOString().slice(0, 10)}</Text>
-        ) : null}
-      </Stack>
+      <div style={{ overflowY: 'auto', height: '100%' }}>
+        <Stack direction="column" gap={1}>
+          <Text weight="bold">
+            <MiddleTruncate value={node.name} budget={COLUMN_WIDTH - 2} />
+          </Text>
+          <Text color="fgMuted">{humanBytes(node.size)}</Text>
+          {node.mtime > 0 ? (
+            <Text color="fgSubtle">{new Date(node.mtime * 1000).toISOString().slice(0, 10)}</Text>
+          ) : null}
+        </Stack>
+      </div>
     </Box>
   )
 }

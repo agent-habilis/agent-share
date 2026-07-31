@@ -21,6 +21,14 @@ import type { Ctx } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
 import { saveZip, zipStream, type Progress } from './download.ts'
+import {
+  canMount,
+  emptySyncedState,
+  MountError,
+  pickMountRoot,
+  syncMount,
+  type SyncedState,
+} from './mount.ts'
 import { buildTree, filesUnder, humanBytes, type Manifest } from './tree.ts'
 
 interface Client {
@@ -147,10 +155,68 @@ function Failed({ reason }: { reason: string }) {
  * One dialled session for a fixed ticket. Remounted (via `key`) when the
  * fragment changes so the previous watch/dial is disposed through ctx.aborted.
  */
+type Transfer =
+  | { kind: 'download'; progress: Progress }
+  | { kind: 'mounting'; progress: Progress }
+  | { kind: 'syncing'; progress: Progress }
+
 const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
   const state = signal<State>({ phase: 'connecting' })
   const path = signal<string[]>([])
-  const progress = signal<Progress | null>(null)
+  const transfer = signal<Transfer | null>(null)
+  const mountError = signal<string | null>(null)
+  /** Non-null while a host directory is mounted for this session. */
+  const mountRoot = signal<FileSystemDirectoryHandle | null>(null)
+
+  let synced: SyncedState = emptySyncedState()
+  let syncing = false
+  let syncDirty = false
+
+  async function runSync(label: 'mounting' | 'syncing'): Promise<void> {
+    const root = mountRoot.peek()
+    const current = state.peek()
+    if (!root || current.phase !== 'ready') return
+    if (syncing) {
+      syncDirty = true
+      return
+    }
+    syncing = true
+    try {
+      do {
+        syncDirty = false
+        // Re-read the latest ready state each pass — a watch may have landed
+        // while the previous write was in flight.
+        const latest = state.peek()
+        if (latest.phase !== 'ready' || mountRoot.peek() !== root) break
+        const latestTree = buildTree(latest.manifest)
+        const latestFiles = filesUnder(latestTree.root)
+        transfer.value = { kind: label, progress: { done: 0, total: 0 } }
+        synced = await syncMount(
+          root,
+          latest.client,
+          latestFiles,
+          latest.manifest.dirs,
+          synced,
+          (progress) => {
+            transfer.value = { kind: label, progress }
+          },
+        )
+        // After the first full mirror, later passes are incremental syncs.
+        label = 'syncing'
+      } while (syncDirty && mountRoot.peek() === root && !ctx.aborted.aborted)
+    } catch (error) {
+      if (!ctx.aborted.aborted) {
+        mountError.value = error instanceof MountError ? error.message : String(error)
+        mountRoot.value = null
+        synced = emptySyncedState()
+      }
+    } finally {
+      syncing = false
+      if (transfer.peek()?.kind === 'mounting' || transfer.peek()?.kind === 'syncing') {
+        transfer.value = null
+      }
+    }
+  }
 
   void (async () => {
     try {
@@ -164,11 +230,18 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
         if (ctx.aborted.aborted) return
         path.value = prunePath(path.peek(), next)
         state.value = { phase: 'ready', client, manifest: next }
+        if (mountRoot.peek()) void runSync('syncing')
       })
     } catch (error) {
       if (!ctx.aborted.aborted) state.value = { phase: 'failed', reason: String(error) }
     }
   })()
+
+  // Drop the mount when the session unmounts (ticket change / leave).
+  ctx.aborted.addEventListener('abort', () => {
+    mountRoot.value = null
+    synced = emptySyncedState()
+  })
 
   const tree = computed(() => {
     const current = state.value
@@ -178,19 +251,50 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
   async function download(): Promise<void> {
     const current = state.peek()
     const built = tree.peek()
-    if (current.phase !== 'ready' || !built) return
+    if (current.phase !== 'ready' || !built || transfer.peek()) return
     const files = filesUnder(built.root)
-    progress.value = {
-      done: 0,
-      total: files.reduce((sum, file) => sum + file.size, 0),
+    transfer.value = {
+      kind: 'download',
+      progress: {
+        done: 0,
+        total: files.reduce((sum, file) => sum + file.size, 0),
+      },
     }
     try {
-      const stream = zipStream(current.client, files, (next) => {
-        progress.value = next
+      const stream = zipStream(current.client, files, (progress) => {
+        transfer.value = { kind: 'download', progress }
       })
       await saveZip(stream, 'share.zip')
     } finally {
-      progress.value = null
+      if (transfer.peek()?.kind === 'download') transfer.value = null
+    }
+  }
+
+  async function mount(): Promise<void> {
+    if (mountRoot.peek()) {
+      mountRoot.value = null
+      synced = emptySyncedState()
+      mountError.value = null
+      return
+    }
+    if (!canMount()) {
+      mountError.value = 'This browser cannot mount folders'
+      return
+    }
+    if (transfer.peek()) return
+    mountError.value = null
+    try {
+      const root = await pickMountRoot()
+      if (ctx.aborted.aborted) return
+      mountRoot.value = root
+      synced = emptySyncedState()
+      await runSync('mounting')
+    } catch (error) {
+      // User dismissed the picker — not an error worth surfacing.
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      mountError.value = error instanceof MountError ? error.message : String(error)
+      mountRoot.value = null
+      synced = emptySyncedState()
     }
   }
 
@@ -220,10 +324,23 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
 
     const files = filesUnder(built.root)
     const total = files.reduce((sum, file) => sum + file.size, 0)
-    const prog = progress.value
+    const active = transfer.value
+    const mounted = mountRoot.value !== null
+    const busy = active !== null
+    const err = mountError.value
 
+    // Fill the viewport under #root's vertical padding so ColumnView can take
+    // the leftover height rather than stopping at a fixed 70vh.
     return (
-      <Stack direction="column" gap={1}>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 'calc(1 * var(--ms-row))',
+          height: 'calc(100vh - 2ch)',
+          minHeight: 0,
+        }}
+      >
         <Stack direction="row" gap={2} justify="between">
           <Stack direction="row" gap={1}>
             <Text weight="bold">agent-share</Text>
@@ -234,22 +351,31 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
               {files.length} files · {humanBytes(total)}
             </Text>
           </Stack>
-          <Button
-            variant="primary"
-            onclick={() => void download()}
-            disabled={prog !== null}
-          >
-            Download
-          </Button>
+          <Stack direction="row" gap={1}>
+            <Button variant="secondary" onclick={() => void mount()} disabled={busy}>
+              {mounted ? 'Unmount' : 'Mount'}
+            </Button>
+            <Button variant="primary" onclick={() => void download()} disabled={busy}>
+              Download
+            </Button>
+          </Stack>
         </Stack>
 
-        {prog ? (
+        {active ? (
           <ProgressBar
-            value={prog.total === 0 ? 0 : prog.done / prog.total}
-            label="downloading"
+            value={active.progress.total === 0 ? 0 : active.progress.done / active.progress.total}
+            label={
+              active.kind === 'download'
+                ? 'downloading'
+                : active.kind === 'mounting'
+                  ? 'mounting'
+                  : 'syncing'
+            }
             showValue
           />
         ) : null}
+
+        {err ? <Text color="danger">{err}</Text> : null}
 
         {built.skipped > 0 ? (
           <Text color="warning">
@@ -264,7 +390,7 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
             path.value = next
           }}
         />
-      </Stack>
+      </div>
     )
   }
 })
