@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agent-share ice-lab</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 14px;
+        line-height: 1.4;
+      }
+      body {
+        margin: 0;
+        padding: 1rem;
+        background: #f4f4f1;
+        color: #1a1a1a;
+      }
+      h1 {
+        font-size: 1rem;
+        margin: 0 0 0.75rem;
+      }
+      h2 {
+        font-size: 0.95rem;
+        margin: 0 0 0.5rem;
+      }
+      .grid {
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: 1fr;
+      }
+      @media (min-width: 900px) {
+        .grid {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+      section {
+        background: #fff;
+        border: 1px solid #ccc;
+        padding: 0.75rem;
+      }
+      button,
+      textarea,
+      input {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+        padding: 0.35rem 0.6rem;
+      }
+      button + button {
+        margin-left: 0.35rem;
+      }
+      textarea {
+        width: 100%;
+        min-height: 6rem;
+        box-sizing: border-box;
+        resize: vertical;
+      }
+      pre {
+        margin: 0.5rem 0 0;
+        padding: 0.5rem;
+        background: #111;
+        color: #d6ffd6;
+        white-space: pre-wrap;
+        word-break: break-word;
+        min-height: 8rem;
+        max-height: 28rem;
+        overflow: auto;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin: 0.5rem 0;
+      }
+      .hint {
+        color: #555;
+        margin: 0 0 1rem;
+      }
+      a {
+        color: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>agent-share ice-lab</h1>
+    <p class="hint">
+      No folder picker. Open this page in two tabs — transmit in one, receive in the other.
+      Uses the same wasm produce/join path as the app (including TURN).
+      <a href="/">← app</a>
+    </p>
+    <div class="grid">
+      <section>
+        <h2>Transmitter</h2>
+        <p class="hint">Serves a synthetic <code>hello.txt</code>.</p>
+        <div class="row">
+          <button type="button" id="tx-start">Start sharing</button>
+          <button type="button" id="tx-stop" disabled>Stop</button>
+          <button type="button" id="tx-copy" disabled>Copy ticket</button>
+        </div>
+        <textarea id="tx-ticket" readonly placeholder="ticket appears here"></textarea>
+        <pre id="tx-log"></pre>
+      </section>
+      <section>
+        <h2>Receiver</h2>
+        <p class="hint">Paste a ticket (or share URL) and connect.</p>
+        <textarea id="rx-ticket" placeholder="🐝… or http://localhost:5173/#🐝…"></textarea>
+        <div class="row">
+          <button type="button" id="rx-connect">Connect</button>
+        </div>
+        <pre id="rx-log"></pre>
+      </section>
+    </div>
+    <script type="module" src="/src/ice-lab.ts"></script>
+  </body>
+</html>

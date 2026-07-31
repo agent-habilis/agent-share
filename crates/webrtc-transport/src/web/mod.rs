@@ -7,11 +7,15 @@
 //!
 //! Unlike the experiment this was ported from, the peer connection is built
 //! with an `RtcConfiguration` carrying `iceServers`, so the browser's ICE agent
-//! gathers server-reflexive candidates. Without them a tab advertises host
-//! candidates only and connects on one LAN.
+//! gathers server-reflexive (and, when [`IceServers::with_turn_fallback`] is
+//! used, relay) candidates. Without them a tab advertises host candidates only
+//! and connects on one LAN.
 
 mod jsep;
 mod transport;
 
-pub use jsep::{BrowserSession, IceServers, PendingOffer, offer};
-pub use transport::BrowserRtcTransport;
+pub use jsep::{
+    BrowserSession, IceServer, IceServers, PendingAnswer, PendingOffer, answer, log_signal_sdps,
+    offer,
+};
+pub use transport::{BrowserHubTransport, BrowserRtcTransport};

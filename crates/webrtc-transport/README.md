@@ -52,12 +52,10 @@ result becomes a `server_reflexive` candidate alongside the host one. Configure
 with `IceConfig`; `IceConfig::host_only()` keeps the tests offline.
 
 The browser needs none of this: `IceServers` goes into the `RtcConfiguration`
-and the platform's ICE agent gathers for free.
-
-There is no TURN client. `agent-share` treats the relay as a rendezvous for the
-SDP exchange only, so a failed negotiation is a hard error rather than a quiet
-downgrade onto someone else's infrastructure. The trade is that a
-symmetric-NAT-to-symmetric-NAT pair cannot connect at all.
+and the platform's ICE agent gathers for free. Prefer
+`IceServers::with_turn_fallback()` so ICE can also pick up a short-lived public
+TURN relay when LAN/mDNS and NAT hairpin both fail. The iroh relay remains
+rendezvous-only for the SDP exchange; host/`str0m` still has no TURN client.
 
 ## Building for wasm on macOS
 

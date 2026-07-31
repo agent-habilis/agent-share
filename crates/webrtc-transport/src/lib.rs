@@ -34,9 +34,10 @@
 //! on one LAN and nowhere else. [`stun`] closes that on the host side; the
 //! browser's ICE agent does it natively once given `iceServers`.
 //!
-//! There is no TURN client. `agent-share` treats the relay as a rendezvous for
-//! the SDP exchange only, so a failed negotiation is a hard error rather than a
-//! quiet downgrade onto someone else's infrastructure.
+//! The iroh relay is still rendezvous-only for the SDP exchange. The browser
+//! backend may add a short-lived public TURN server to `iceServers` so ICE
+//! itself can relay when LAN/mDNS and NAT hairpin both fail. The host/`str0m`
+//! backend has no TURN client yet.
 
 mod addr;
 mod signaling;
@@ -62,8 +63,9 @@ mod web;
 
 #[cfg(feature = "web")]
 pub use web::{
-    BrowserRtcTransport, BrowserSession, IceServers, PendingOffer as BrowserPendingOffer,
-    offer as browser_offer,
+    BrowserHubTransport, BrowserRtcTransport, BrowserSession, IceServer, IceServers,
+    PendingAnswer as BrowserPendingAnswer, PendingOffer as BrowserPendingOffer,
+    answer as browser_answer, log_signal_sdps, offer as browser_offer,
 };
 
 /// A registered `WebRTC` transport, ready to hand to an iroh endpoint builder.
@@ -77,7 +79,7 @@ pub struct WebRtcHandle {
     #[cfg(feature = "host")]
     inner: std::sync::Arc<WebRtcTransport>,
     #[cfg(all(feature = "web", not(feature = "host")))]
-    inner: std::sync::Arc<BrowserRtcTransport>,
+    inner: std::sync::Arc<BrowserHubTransport>,
 }
 
 #[cfg(feature = "host")]
@@ -114,15 +116,37 @@ impl WebRtcHandle {
 
 #[cfg(all(feature = "web", not(feature = "host")))]
 impl WebRtcHandle {
-    /// Wrap a browser transport.
+    /// Wrap a browser hub transport (consumer or producer).
     #[must_use]
-    pub fn new(transport: std::sync::Arc<BrowserRtcTransport>) -> Self {
+    pub fn new(transport: std::sync::Arc<BrowserHubTransport>) -> Self {
         Self { inner: transport }
+    }
+
+    /// Empty hub for `local`, ready to register and later [`Self::attach`].
+    #[must_use]
+    pub fn hub(local: iroh_base::EndpointId) -> Self {
+        Self::new(BrowserHubTransport::new(local))
     }
 
     /// The transport to register with `Builder::add_custom_transport`.
     #[must_use]
-    pub fn transport(&self) -> std::sync::Arc<BrowserRtcTransport> {
+    pub fn transport(&self) -> std::sync::Arc<BrowserHubTransport> {
         std::sync::Arc::clone(&self.inner)
+    }
+
+    /// Attach a negotiated browser session for `remote`.
+    ///
+    /// Prefer calling [`BrowserPendingOffer::complete`] /
+    /// [`BrowserPendingAnswer::complete`], which attach themselves; this is
+    /// the escape hatch when the session pieces are already in hand.
+    pub fn attach_parts(
+        &self,
+        remote: iroh_base::EndpointId,
+        peer_connection: web_sys::RtcPeerConnection,
+        data_channel: web_sys::RtcDataChannel,
+        callbacks: Vec<wasm_bindgen::JsValue>,
+    ) -> Result<(), String> {
+        self.inner
+            .attach(remote, peer_connection, data_channel, callbacks)
     }
 }

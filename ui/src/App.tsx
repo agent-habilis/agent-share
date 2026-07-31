@@ -17,7 +17,7 @@ import {
   Text,
 } from 'moonspace-ui'
 import { component, computed, listen, signal } from 'visage-dom'
-import type { Ctx } from 'visage-dom'
+import type { Child, Ctx } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
 import { saveZip, zipStream, type Progress } from './download.ts'
@@ -29,6 +29,8 @@ import {
   syncMount,
   type SyncedState,
 } from './mount.ts'
+import { canProduce, pickShareRoot, startProducer, type ShareProducer } from './produce.ts'
+import { parseShareInput, shareUrl } from './ticket.ts'
 import {
   buildTree,
   filesUnder,
@@ -50,6 +52,12 @@ type State =
   | { phase: 'idle' }
   | { phase: 'connecting' }
   | { phase: 'ready'; client: Client; manifest: Manifest }
+  | { phase: 'failed'; reason: string }
+
+type HomeState =
+  | { phase: 'landing' }
+  | { phase: 'creating' }
+  | { phase: 'serving'; producer: ShareProducer }
   | { phase: 'failed'; reason: string }
 
 function importWasm() {
@@ -123,44 +131,231 @@ function prunePath(current: string[], manifest: Manifest): string[] {
   return depth === current.length ? current : current.slice(0, depth)
 }
 
-function Landing() {
+/** Shared chrome: header row plus a body that fills the rest of the viewport. */
+function AppShell({
+  trailing,
+  children,
+}: {
+  trailing?: Child
+  children: Child
+}) {
   return (
-    <div style={{ padding: '1ch 2ch' }}>
-      <Box border="line" padX={2} padY={1}>
-        <Stack direction="column" gap={1}>
-          <Text weight="bold">agent-share</Text>
-          <Text color="fgMuted">Share a folder peer-to-peer. Open a link to browse one.</Text>
-          <Text>agent-share serve ./some-folder</Text>
-          <Text color="fgSubtle">
-            The link it prints carries the whole capability in its fragment, so this site never
-            sees it.
-          </Text>
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100vh',
+        minHeight: 0,
+      }}
+    >
+      <div
+        style={{
+          flexShrink: 0,
+          padding: 'var(--ms-row) 2ch',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 'calc(1 * var(--ms-row))',
+        }}
+      >
+        <Stack direction="row" gap={2} justify="between">
+          <Stack direction="row" gap={1}>
+            <Text weight="bold">agent-share</Text>
+          </Stack>
+          {trailing ? <Stack direction="row" gap={1}>{trailing}</Stack> : null}
         </Stack>
-      </Box>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        {children}
+      </div>
     </div>
   )
 }
 
-function Failed({ reason }: { reason: string }) {
+function Centered({ children }: { children: Child }) {
   return (
-    <div style={{ padding: '1ch 2ch' }}>
-      <Box border="line" padX={2} padY={1}>
-        <Stack direction="column" gap={1}>
-          <Text weight="bold" color="danger">
-            Could not connect
-          </Text>
-          {/* No relayed data path exists by design, so a failed negotiation is
-              the end of the road rather than a slower route. Say so. */}
-          <Text color="fgMuted">
-            A direct connection to this peer could not be established. Both ends may be behind
-            restrictive NATs.
-          </Text>
-          <Text color="fgSubtle">{reason}</Text>
-        </Stack>
-      </Box>
+    <div
+      style={{
+        flex: 1,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        minHeight: 0,
+        width: '100%',
+      }}
+    >
+      {children}
     </div>
   )
 }
+
+function LoadingBody({ label }: { label: string }) {
+  return (
+    <Centered>
+      <Stack direction="row" gap={1}>
+        <Spinner />
+        <Text>{label}</Text>
+      </Stack>
+    </Centered>
+  )
+}
+
+function FailedBody({ reason }: { reason: string }) {
+  const iceHint =
+    /ice_connection_state|ondatachannel|ICE failed|no ICE candidates/i.test(reason)
+  return (
+    <Centered>
+      <div style={{ padding: '0 2ch', maxWidth: '60ch' }}>
+        <Box border="line" padX={2} padY={1}>
+          <Stack direction="column" gap={1}>
+            <Text weight="bold" color="danger">
+              Could not connect
+            </Text>
+            <Text color="fgMuted">
+              {iceHint
+                ? 'WebRTC could not open a path between the two browsers (LAN/mDNS and TURN both failed). On macOS, allow Local Network for this browser under System Settings → Privacy & Security → Local Network, hard-refresh both tabs, and retry.'
+                : 'A direct connection to this peer could not be established. Both ends may be behind restrictive NATs.'}
+            </Text>
+            <Text color="fgSubtle">{reason}</Text>
+          </Stack>
+        </Box>
+      </div>
+    </Centered>
+  )
+}
+
+const Home = component(function* (_props, ctx: Ctx) {
+  const state = signal<HomeState>({ phase: 'landing' })
+
+  async function createShare(): Promise<void> {
+    if (!canProduce()) {
+      state.value = {
+        phase: 'failed',
+        reason: 'This browser cannot share folders (File System Access API required)',
+      }
+      return
+    }
+    try {
+      const root = await pickShareRoot()
+      if (ctx.aborted.aborted) return
+      state.value = { phase: 'creating' }
+      const producer = await startProducer(root)
+      if (ctx.aborted.aborted) {
+        await producer.stop()
+        return
+      }
+      state.value = { phase: 'serving', producer }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      if (!ctx.aborted.aborted) {
+        state.value = { phase: 'failed', reason: String(error) }
+      }
+    }
+  }
+
+  function joinShare(): void {
+    const raw = window.prompt('Paste a share ticket or URL')
+    if (raw === null) return
+    const ticket = parseShareInput(raw)
+    if (!ticket) return
+    window.location.hash = encodeURIComponent(ticket)
+  }
+
+  async function stopServing(): Promise<void> {
+    const current = state.peek()
+    if (current.phase !== 'serving') return
+    try {
+      await current.producer.stop()
+    } finally {
+      if (!ctx.aborted.aborted) state.value = { phase: 'landing' }
+    }
+  }
+
+  ctx.aborted.addEventListener('abort', () => {
+    const current = state.peek()
+    if (current.phase === 'serving') void current.producer.stop()
+  })
+
+  yield () => {
+    const current = state.value
+    if (current.phase === 'creating') {
+      return (
+        <AppShell>
+          <LoadingBody label="creating share…" />
+        </AppShell>
+      )
+    }
+    if (current.phase === 'failed') {
+      return (
+        <AppShell
+          trailing={
+            <Button variant="secondary" onclick={() => {
+              state.value = { phase: 'landing' }
+            }}>
+              Back
+            </Button>
+          }
+        >
+          <FailedBody reason={current.reason} />
+        </AppShell>
+      )
+    }
+    if (current.phase === 'serving') {
+      const url = shareUrl(current.producer.ticket)
+      return (
+        <AppShell
+          trailing={
+            <Button variant="danger" onclick={() => void stopServing()}>
+              Stop sharing
+            </Button>
+          }
+        >
+          <Centered>
+            <div style={{ padding: '0 2ch', maxWidth: '72ch', width: '100%' }}>
+              <Box border="line" background="bg" padX={2} padY={1}>
+                <Stack direction="column" gap={1}>
+                  <Stack direction="row" gap={1}>
+                    <Text weight="bold">Sharing</Text>
+                    <Badge tone="success" variant="outline">
+                      {current.producer.transport}
+                    </Badge>
+                    <Text color="fgMuted">
+                      {current.producer.files} files · {humanBytes(current.producer.bytes)}
+                    </Text>
+                  </Stack>
+                  <Text color="fgMuted">Peers open this link:</Text>
+                  <Text>{url}</Text>
+                  <Button
+                    variant="primary"
+                    onclick={() => {
+                      void navigator.clipboard.writeText(url)
+                    }}
+                  >
+                    Copy link
+                  </Button>
+                </Stack>
+              </Box>
+            </div>
+          </Centered>
+        </AppShell>
+      )
+    }
+
+    return (
+      <AppShell>
+        <Centered>
+          <Stack direction="column" gap={1}>
+            <Button variant="primary" onclick={() => void createShare()}>
+              Add files/folder
+            </Button>
+            <Button variant="secondary" onclick={() => joinShare()}>
+              Join a share
+            </Button>
+          </Stack>
+        </Centered>
+      </AppShell>
+    )
+  }
+})
 
 /**
  * One dialled session for a fixed ticket. Remounted (via `key`) when the
@@ -326,23 +521,18 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     const current = state.value
     if (current.phase === 'connecting') {
       return (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            minHeight: '100vh',
-            width: '100%',
-          }}
-        >
-          <Stack direction="row" gap={1}>
-            <Spinner />
-            <Text>connecting over WebRTC…</Text>
-          </Stack>
-        </div>
+        <AppShell>
+          <LoadingBody label="Connecting…" />
+        </AppShell>
       )
     }
-    if (current.phase === 'failed') return <Failed reason={current.reason} />
+    if (current.phase === 'failed') {
+      return (
+        <AppShell>
+          <FailedBody reason={current.reason} />
+        </AppShell>
+      )
+    }
     const built = tree.value
     if (current.phase !== 'ready' || !built) return null
 
@@ -354,8 +544,6 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     const err = mountError.value
     const hasSelection = nodeAtPath(built.root, path.value) !== undefined
 
-    // Header keeps its own inset; the file explorer fills the rest of the
-    // viewport flush to the edges — no gap, no page padding around it.
     return (
       <div
         style={{
@@ -444,7 +632,7 @@ export const App = component(function* () {
 
   yield () => {
     const current = ticket.value
-    if (!current) return <Landing />
+    if (!current) return <Home />
     return <Session key={current} ticket={current} />
   }
 })

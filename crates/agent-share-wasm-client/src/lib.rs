@@ -16,8 +16,9 @@
 //! 2. Open a **fresh** connection to `agent-share/mount/1` against an address
 //!    carrying only the `WebRTC` custom addr.
 //!
-//! When ICE fails, so does the connection: there is no relayed data path to
-//! fall back to, by design.
+//! When host/mDNS and NAT hairpin both fail, ICE can still connect through a
+//! short-lived public TURN server in `IceServers`. The iroh relay carries SDP
+//! only — it is not a data-plane fallback.
 
 use std::sync::Arc;
 
@@ -29,9 +30,11 @@ use agent_share_proto::ticket::MountTicket;
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 use wasm_bindgen::prelude::*;
+mod produce;
+
 use webrtc_transport::{
-    BrowserSession, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, browser_offer,
-    custom_addr,
+    BrowserHubTransport, BrowserSession, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope,
+    WebRtcHandle, browser_offer, custom_addr, log_signal_sdps,
 };
 
 /// A connected share, ready to list and read.
@@ -39,7 +42,8 @@ use webrtc_transport::{
 pub struct ShareClient {
     connection: Connection,
     secret: [u8; SECRET_LEN],
-    // Held so the data channel outlives the connection riding on it.
+    // Held so the hub (and its data channel) outlives the connection.
+    _hub: std::sync::Arc<BrowserHubTransport>,
     _session: BrowserSession,
     _endpoint: Endpoint,
 }
@@ -66,6 +70,7 @@ impl ShareClient {
         // peers dial it on.
         let key = SecretKey::generate();
         let local = key.public();
+        let hub = BrowserHubTransport::new(local);
 
         let signaller = Endpoint::builder(presets::Minimal)
             .secret_key(key.clone())
@@ -74,11 +79,11 @@ impl ShareClient {
             .await
             .map_err(|error| err("bind signalling endpoint", &error))?;
 
-        let session = negotiate(&signaller, ticket.addr.clone(), local).await?;
+        let session = negotiate(&signaller, ticket.addr.clone(), local, &hub).await?;
         // The relay's job is over — it carried the SDP and nothing else.
         signaller.close().await;
 
-        let handle = WebRtcHandle::new(Arc::clone(&session.transport));
+        let handle = WebRtcHandle::new(Arc::clone(&hub));
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
@@ -101,6 +106,7 @@ impl ShareClient {
         Ok(ShareClient {
             connection,
             secret: ticket.secret,
+            _hub: hub,
             _session: session,
             _endpoint: endpoint,
         })
@@ -232,12 +238,19 @@ impl ShareClient {
     }
 }
 
-/// Swap one JSEP envelope each way over the signal ALPN, then attach.
+/// Swap one JSEP envelope each way over the signal ALPN, then attach into `hub`.
 async fn negotiate(
     endpoint: &Endpoint,
     producer: EndpointAddr,
     local: iroh_base::EndpointId,
+    hub: &BrowserHubTransport,
 ) -> Result<BrowserSession, JsValue> {
+    let producer_id = producer.id;
+    if producer.relay_urls().next().is_none() && producer.ip_addrs().next().is_none() {
+        return Err(JsValue::from_str(
+            "ticket has no relay or IP address — the producer was not reachable when the ticket was minted",
+        ));
+    }
     let conn = endpoint
         .connect(producer, WEBRTC_SIGNAL_ALPN)
         .await
@@ -247,7 +260,10 @@ async fn negotiate(
         .await
         .map_err(|error| err("open signal stream", &error))?;
 
-    let (pending, offer) = browser_offer(local, &IceServers::default()).await?;
+    let ice = IceServers::with_turn_fallback().await;
+    let (pending, offer) = browser_offer(local, &ice)
+        .await
+        .map_err(|error| js_stage("build offer", error))?;
     let encoded = serde_json::to_vec(&offer).map_err(|error| err("encode offer", &error))?;
     send.write_all(&encoded)
         .await
@@ -257,14 +273,37 @@ async fn negotiate(
     let raw = recv
         .read_to_end(MAX_ENVELOPE_BYTES)
         .await
-        .map_err(|error| err("read answer", &error))?;
+        .map_err(|error| {
+            err(
+                "read answer (producer never answered — is it still sharing?)",
+                &error,
+            )
+        })?;
     let answer: SignalEnvelope =
         serde_json::from_slice(&raw).map_err(|error| err("parse answer", &error))?;
-    let session = pending.complete(&answer).await?;
+    let session = match pending.complete(hub, &answer).await {
+        Ok(session) => session,
+        Err(error) => {
+            log_signal_sdps("consumer", &offer, &answer);
+            return Err(js_stage("complete WebRTC offer", error));
+        }
+    };
+    // Hub is keyed by the answer's claimed id; the mount dial uses the ticket
+    // id. A mismatch would blackhole transmits with no useful error.
+    if session.remote != producer_id {
+        return Err(JsValue::from_str(&format!(
+            "answer endpoint id {} does not match ticket producer {}",
+            session.remote, producer_id
+        )));
+    }
 
     // Signalling is done; the relay's job ends here.
     conn.close(0u32.into(), b"jsep done");
     Ok(session)
+}
+
+fn js_stage(context: &str, error: JsValue) -> JsValue {
+    JsValue::from_str(&format!("{context}: {error:?}"))
 }
 
 /// Read the `status(1) ‖ len(u32)` prefix every response carries.
