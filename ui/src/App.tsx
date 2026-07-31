@@ -29,7 +29,14 @@ import {
   syncMount,
   type SyncedState,
 } from './mount.ts'
-import { buildTree, filesUnder, humanBytes, type Manifest } from './tree.ts'
+import {
+  buildTree,
+  filesUnder,
+  humanBytes,
+  nodeAtPath,
+  type FileNode,
+  type Manifest,
+} from './tree.ts'
 
 interface Client {
   readonly transport: string
@@ -248,11 +255,9 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     return current.phase === 'ready' ? buildTree(current.manifest) : null
   })
 
-  async function download(): Promise<void> {
+  async function downloadFiles(files: FileNode[], suggestedName: string): Promise<void> {
     const current = state.peek()
-    const built = tree.peek()
-    if (current.phase !== 'ready' || !built || transfer.peek()) return
-    const files = filesUnder(built.root)
+    if (current.phase !== 'ready' || transfer.peek() || files.length === 0) return
     transfer.value = {
       kind: 'download',
       progress: {
@@ -264,10 +269,25 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
       const stream = zipStream(current.client, files, (progress) => {
         transfer.value = { kind: 'download', progress }
       })
-      await saveZip(stream, 'share.zip')
+      await saveZip(stream, suggestedName)
     } finally {
       if (transfer.peek()?.kind === 'download') transfer.value = null
     }
+  }
+
+  async function downloadSelected(): Promise<void> {
+    const built = tree.peek()
+    if (!built) return
+    const selected = nodeAtPath(built.root, path.peek())
+    if (!selected) return
+    const name = selected.kind === 'dir' ? selected.name || 'share' : selected.name
+    await downloadFiles(filesUnder(selected), `${name}.zip`)
+  }
+
+  async function downloadAll(): Promise<void> {
+    const built = tree.peek()
+    if (!built) return
+    await downloadFiles(filesUnder(built.root), 'share.zip')
   }
 
   async function mount(): Promise<void> {
@@ -328,6 +348,7 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     const mounted = mountRoot.value !== null
     const busy = active !== null
     const err = mountError.value
+    const hasSelection = nodeAtPath(built.root, path.value) !== undefined
 
     // Fill the viewport under #root's vertical padding so ColumnView can take
     // the leftover height rather than stopping at a fixed 70vh.
@@ -355,8 +376,15 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
             <Button variant="secondary" onclick={() => void mount()} disabled={busy}>
               {mounted ? 'Unmount' : 'Mount'}
             </Button>
-            <Button variant="primary" onclick={() => void download()} disabled={busy}>
+            <Button
+              variant="primary"
+              onclick={() => void downloadSelected()}
+              disabled={busy || !hasSelection}
+            >
               Download
+            </Button>
+            <Button variant="secondary" onclick={() => void downloadAll()} disabled={busy}>
+              Download all
             </Button>
           </Stack>
         </Stack>

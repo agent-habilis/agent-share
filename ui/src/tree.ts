@@ -146,6 +146,19 @@ export function filesUnder(node: Node): FileNode[] {
   return node.children.flatMap(filesUnder)
 }
 
+/** The file or directory at `path`, or `undefined` when the path is empty/stale. */
+export function nodeAtPath(root: DirNode, path: string[]): Node | undefined {
+  if (path.length === 0) return undefined
+  let current: Node = root
+  for (const name of path) {
+    if (current.kind !== 'dir') return undefined
+    const next: Node | undefined = current.children.find((child) => child.name === name)
+    if (!next) return undefined
+    current = next
+  }
+  return current
+}
+
 const UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const
 
 export function humanBytes(bytes: number): string {
