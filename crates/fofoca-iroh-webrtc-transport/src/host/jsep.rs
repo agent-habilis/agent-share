@@ -5,7 +5,7 @@ use anyhow::Context as _;
 use iroh::EndpointId;
 use str0m::Rtc;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
-use str0m::channel::ChannelId;
+use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use tokio::net::UdpSocket;
 
 use super::driver::{
@@ -94,7 +94,17 @@ pub async fn offer_with(
 ) -> anyhow::Result<(PendingOffer, SignalEnvelope)> {
     let mut inner = start(ice).await?;
     let mut change = inner.rtc.sdp_api();
-    let channel_id = change.add_channel(DATA_CHANNEL_LABEL.into());
+    // Unreliable + unordered: the channel carries QUIC datagrams, and QUIC
+    // already owns loss recovery and congestion control. Reliable ordered
+    // SCTP underneath it would stack a second retransmission loop and
+    // head-of-line-block unrelated QUIC streams. The answerer adopts this
+    // config from DCEP, so the offerer is the only place it is declared.
+    let channel_id = change.add_channel_with_config(ChannelConfig {
+        label: DATA_CHANNEL_LABEL.into(),
+        ordered: false,
+        reliability: Reliability::MaxRetransmits { retransmits: 0 },
+        ..ChannelConfig::default()
+    });
     let (sdp_offer, pending) = change
         .apply()
         .context("str0m produced no offer for the pending change")?;

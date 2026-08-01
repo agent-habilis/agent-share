@@ -2,7 +2,10 @@
 
 An iroh custom transport carrying QUIC datagrams over a WebRTC data channel —
 on the host and in the browser. One data channel per remote peer, one QUIC
-datagram per binary SCTP message, no extra framing.
+datagram per binary SCTP message, no extra framing. The channel is negotiated
+unreliable + unordered (`maxRetransmits: 0`): QUIC above it owns loss recovery
+and congestion control, so the channel stays a plain datagram pipe instead of
+stacking a second retransmission loop.
 
 Structure follows `iroh-multihop-transport` and the upstream
 [iroh-tor-transport](https://github.com/n0-computer/iroh-tor-transport): a

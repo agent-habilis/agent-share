@@ -20,6 +20,15 @@ pub(crate) struct InboundPacket {
     pub(crate) payload: Bytes,
 }
 
+/// Rate-limited visibility for the lossy queues: without it a congested
+/// channel is indistinguishable from a broken one. `total` is the counter
+/// value *after* the increment; logs on the first drop and every 256th.
+pub(crate) fn note_dropped(remote: &EndpointId, total: u64, context: &str) {
+    if total == 1 || total.is_multiple_of(256) {
+        tracing::warn!(%remote, total, "webrtc lane dropping datagrams ({context})");
+    }
+}
+
 /// Aborts the session driver task when the handle leaves the registry, so
 /// a `detach` (or dropping the whole transport) reliably stops the str0m
 /// loop instead of detaching it.

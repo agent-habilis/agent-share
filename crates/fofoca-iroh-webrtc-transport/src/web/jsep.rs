@@ -32,6 +32,25 @@ const POLL_MS: i32 = 50;
 /// traffic volume — replace with a project-owned TURN when that matters.
 const ELIXIR_TURN_CREDENTIALS_URL: &str =
     "https://turn.elixir-webrtc.org/?service=turn&username=agent-share";
+/// Give up on the credential fetch after this long; negotiation continues
+/// STUN-only, same as a failed fetch.
+const TURN_FETCH_TIMEOUT_MS: i32 = 1_500;
+/// Cache lifetime when the credential expiry cannot be read from the username.
+const TURN_CACHE_FALLBACK_TTL_MS: f64 = 120_000.0;
+/// Refresh this long before the credential's declared expiry.
+const TURN_EXPIRY_MARGIN_MS: f64 = 60_000.0;
+
+/// Cached TURN credentials, so repeated connects in one tab do not each pay a
+/// third-party round-trip inside negotiation. wasm is single-threaded.
+struct CachedTurn {
+    server: IceServer,
+    expires_at_ms: f64,
+}
+
+thread_local! {
+    static TURN_CACHE: std::cell::RefCell<Option<CachedTurn>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// One `RTCIceServer` entry (STUN or credentialed TURN).
 #[derive(Debug, Clone)]
@@ -68,22 +87,13 @@ impl IceServers {
     ///
     /// Browser↔browser on the same NAT often cannot use mDNS host candidates
     /// (macOS Local Network) or hairpin on `srflx`. TURN is the path that still
-    /// connects. A failed fetch leaves STUN-only — same as before.
+    /// connects. A failed or slow fetch leaves STUN-only — same as before.
+    /// Credentials are cached until shortly before their expiry, so repeated
+    /// connects pay the third-party round-trip at most once.
     pub async fn with_turn_fallback() -> Self {
         let mut servers = Self::default();
-        match fetch_elixir_turn().await {
-            Ok(turn) => {
-                web_sys::console::log_1(&JsValue::from_str(&format!(
-                    "[agent-share webrtc] TURN ready ({})",
-                    turn.urls.join(", ")
-                )));
-                servers.0.push(turn);
-            }
-            Err(error) => {
-                web_sys::console::warn_1(&JsValue::from_str(&format!(
-                    "[agent-share webrtc] TURN credentials unavailable; STUN-only: {error:?}"
-                )));
-            }
+        if let Some(turn) = cached_or_fetch_turn().await {
+            servers.0.push(turn);
         }
         servers
     }
@@ -117,6 +127,67 @@ impl IceServers {
         config.set_ice_servers(&servers);
         config
     }
+}
+
+/// Cached credentials if still fresh, else one bounded fetch. `None` means
+/// STUN-only this round (fetch failed or timed out).
+async fn cached_or_fetch_turn() -> Option<IceServer> {
+    let now_ms = js_sys::Date::now();
+    let cached = TURN_CACHE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .filter(|cached| now_ms < cached.expires_at_ms)
+            .map(|cached| cached.server.clone())
+    });
+    if cached.is_some() {
+        return cached;
+    }
+
+    let fetch = fetch_elixir_turn();
+    let timeout = sleep_ms(TURN_FETCH_TIMEOUT_MS);
+    futures::pin_mut!(fetch);
+    futures::pin_mut!(timeout);
+    match futures::future::select(fetch, timeout).await {
+        futures::future::Either::Left((Ok(turn), _)) => {
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "[agent-share webrtc] TURN ready ({})",
+                turn.urls.join(", ")
+            )));
+            TURN_CACHE.with(|cell| {
+                *cell.borrow_mut() = Some(CachedTurn {
+                    server: turn.clone(),
+                    expires_at_ms: turn_expiry_ms(&turn, now_ms),
+                });
+            });
+            Some(turn)
+        }
+        futures::future::Either::Left((Err(error), _)) => {
+            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                "[agent-share webrtc] TURN credentials unavailable; STUN-only: {error:?}"
+            )));
+            None
+        }
+        futures::future::Either::Right(((), _)) => {
+            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                "[agent-share webrtc] TURN credential fetch exceeded \
+                 {TURN_FETCH_TIMEOUT_MS}ms; STUN-only"
+            )));
+            None
+        }
+    }
+}
+
+/// When to drop cached credentials. TURN-REST usernames are
+/// `<unix-expiry>:<id>`; trust that minus a margin, else a fixed TTL.
+fn turn_expiry_ms(server: &IceServer, now_ms: f64) -> f64 {
+    server
+        .username
+        .as_deref()
+        .and_then(|username| username.split(':').next())
+        .and_then(|stamp| stamp.parse::<f64>().ok())
+        .map(|expiry_secs| expiry_secs * 1000.0 - TURN_EXPIRY_MARGIN_MS)
+        .filter(|expiry_ms| *expiry_ms > now_ms)
+        .unwrap_or(now_ms + TURN_CACHE_FALLBACK_TTL_MS)
 }
 
 #[derive(serde::Deserialize)]
@@ -222,7 +293,16 @@ pub async fn offer(
 ) -> Result<(PendingOffer, SignalEnvelope), JsValue> {
     let peer_connection = RtcPeerConnection::new_with_configuration(&ice.to_configuration())
         .map_err(|error| js_err("RTCPeerConnection", error))?;
-    let data_channel = peer_connection.create_data_channel(DATA_CHANNEL_LABEL);
+    // Unreliable + unordered: the channel carries QUIC datagrams, and QUIC
+    // already owns loss recovery and congestion control. Reliable ordered
+    // SCTP underneath it would stack a second retransmission loop and
+    // head-of-line-block unrelated QUIC streams. The answerer adopts this
+    // config from DCEP, so the offerer is the only place it is declared.
+    let channel_init = web_sys::RtcDataChannelInit::new();
+    channel_init.set_ordered(false);
+    channel_init.set_max_retransmits(0);
+    let data_channel = peer_connection
+        .create_data_channel_with_data_channel_dict(DATA_CHANNEL_LABEL, &channel_init);
     data_channel.set_binary_type(web_sys::RtcDataChannelType::Arraybuffer);
     // Do not install onmessage yet — `complete` attaches first so the hub
     // handler is live before the channel opens (avoids dropping QUIC Initials).
@@ -314,15 +394,14 @@ pub async fn answer(
 
     let (channel_tx, channel_rx) = futures::channel::oneshot::channel::<RtcDataChannel>();
     let channel_tx = std::cell::RefCell::new(Some(channel_tx));
-    let ondatachannel = Closure::<dyn FnMut(RtcDataChannelEvent)>::new(
-        move |event: RtcDataChannelEvent| {
+    let ondatachannel =
+        Closure::<dyn FnMut(RtcDataChannelEvent)>::new(move |event: RtcDataChannelEvent| {
             let channel = event.channel();
             channel.set_binary_type(web_sys::RtcDataChannelType::Arraybuffer);
             if let Some(tx) = channel_tx.borrow_mut().take() {
                 let _ = tx.send(channel);
             }
-        },
-    );
+        });
     peer_connection.set_ondatachannel(Some(ondatachannel.as_ref().unchecked_ref()));
 
     let offer_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);

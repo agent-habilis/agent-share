@@ -1,0 +1,13 @@
+{
+  "transport": "webrtc",
+  "connect_ms": 110.176333,
+  "duration_s": 10.001321791,
+  "latency_ms": {
+    "min": 0.06949999999999999,
+    "median": 0.079916,
+    "p95": 0.309166
+  },
+  "throughput_mib_s": 104.58617589339796,
+  "bytes": 1096810496,
+  "pings": 10
+}

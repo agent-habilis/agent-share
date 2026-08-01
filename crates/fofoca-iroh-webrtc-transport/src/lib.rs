@@ -2,7 +2,10 @@
 //! on the host and in the browser.
 //!
 //! One data channel per remote peer, one QUIC datagram per binary SCTP
-//! message, no extra framing. Structure follows
+//! message, no extra framing. The channel is negotiated **unreliable and
+//! unordered** (`maxRetransmits: 0`): QUIC above it owns loss recovery and
+//! congestion control, so reliable ordered SCTP underneath would stack a
+//! second retransmission loop on every loss. Structure follows
 //! [iroh-multihop-transport](https://github.com/agent-habilis/agent-gossip)
 //! and the upstream
 //! [iroh-tor-transport](https://github.com/n0-computer/iroh-tor-transport):

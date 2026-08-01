@@ -35,7 +35,7 @@ pub struct ShareProducer {
     bytes: u64,
     stop_tx: Option<oneshot::Sender<()>>,
     _endpoint: Endpoint,
-    _hub: Arc<BrowserHubTransport>,
+    hub: Arc<BrowserHubTransport>,
 }
 
 #[wasm_bindgen]
@@ -128,7 +128,7 @@ impl ShareProducer {
             bytes: total_bytes,
             stop_tx: Some(stop_tx),
             _endpoint: endpoint,
-            _hub: hub,
+            hub,
         })
     }
 
@@ -157,6 +157,9 @@ impl ShareProducer {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());
         }
+        // Close live WebRTC sessions before the endpoint: dropping them clears
+        // their browser handlers and closes the peer connections.
+        self.hub.detach_all();
         self._endpoint.close().await;
         Ok(())
     }
@@ -168,7 +171,7 @@ pub struct BenchProducer {
     ticket: String,
     stop_tx: Option<oneshot::Sender<()>>,
     _endpoint: Endpoint,
-    _hub: Arc<BrowserHubTransport>,
+    hub: Arc<BrowserHubTransport>,
 }
 
 #[wasm_bindgen]
@@ -237,7 +240,7 @@ impl BenchProducer {
             ticket: ticket.encode(),
             stop_tx: Some(stop_tx),
             _endpoint: endpoint,
-            _hub: hub,
+            hub,
         })
     }
 
@@ -251,6 +254,9 @@ impl BenchProducer {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());
         }
+        // Close live WebRTC sessions before the endpoint: dropping them clears
+        // their browser handlers and closes the peer connections.
+        self.hub.detach_all();
         self._endpoint.close().await;
         Ok(())
     }

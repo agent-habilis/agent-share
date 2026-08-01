@@ -44,9 +44,21 @@ struct SessionHandle {
 
 /// Opaque hold on browser handles that must outlive the QUIC path.
 struct SessionKeepalive {
-    _peer_connection: RtcPeerConnection,
-    _data_channel: RtcDataChannel,
+    peer_connection: RtcPeerConnection,
+    data_channel: RtcDataChannel,
     _callbacks: Vec<JsValue>,
+}
+
+impl Drop for SessionKeepalive {
+    fn drop(&mut self) {
+        // Clear the handlers before the closures in `callbacks` drop, so a
+        // late browser event cannot invoke a destroyed closure.
+        self.data_channel.set_onmessage(None);
+        self.data_channel.set_onclose(None);
+        self.data_channel.set_onerror(None);
+        self.data_channel.close();
+        self.peer_connection.close();
+    }
 }
 
 type SessionMap = Arc<Mutex<HashMap<EndpointId, SessionHandle>>>;
@@ -101,6 +113,35 @@ impl BrowserHubTransport {
         data_channel.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
         callbacks.push(onmessage.into_js_value());
 
+        // Self-remove when the channel dies, so a reconnecting peer is not
+        // refused with "a live session already exists" and the map cannot
+        // grow without bound. Removal is deferred to a task: it drops this
+        // very closure (it lives in the session's keepalive), which must not
+        // happen while the closure is executing.
+        for event in ["close", "error"] {
+            let sessions = Arc::clone(&self.sessions);
+            let hook = Closure::<dyn FnMut()>::new(move || {
+                let sessions = Arc::clone(&sessions);
+                wasm_bindgen_futures::spawn_local(async move {
+                    if sessions
+                        .lock()
+                        .expect("browser hub session map poisoned")
+                        .remove(&remote)
+                        .is_some()
+                    {
+                        web_sys::console::log_1(&JsValue::from_str(&format!(
+                            "[agent-share webrtc] session for {remote} detached (channel closed)"
+                        )));
+                    }
+                });
+            });
+            match event {
+                "close" => data_channel.set_onclose(Some(hook.as_ref().unchecked_ref())),
+                _ => data_channel.set_onerror(Some(hook.as_ref().unchecked_ref())),
+            }
+            callbacks.push(hook.into_js_value());
+        }
+
         {
             let mut inbound_tx = self.inbound_tx.clone();
             wasm_bindgen_futures::spawn_local(async move {
@@ -124,10 +165,27 @@ impl BrowserHubTransport {
         {
             let data_channel = data_channel.clone();
             wasm_bindgen_futures::spawn_local(async move {
+                // Rate-limited visibility for the lossy gate: without it a
+                // congested channel is indistinguishable from a broken one.
+                let mut dropped: u64 = 0;
                 while let Some(datagram) = out_rx.next().await {
                     if data_channel.buffered_amount() < BUFFER_CAP {
                         let _ = data_channel.send_with_u8_array(&datagram);
+                    } else {
+                        dropped += 1;
+                        if dropped == 1 || dropped.is_multiple_of(256) {
+                            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                                "[agent-share webrtc] dropping outbound datagrams \
+                                 (bufferedAmount over cap); total {dropped} for {remote}"
+                            )));
+                        }
                     }
+                }
+                if dropped > 0 {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "[agent-share webrtc] session for {remote} dropped \
+                         {dropped} outbound datagrams over its lifetime"
+                    )));
                 }
             });
         }
@@ -144,8 +202,8 @@ impl BrowserHubTransport {
             SessionHandle {
                 out_tx,
                 _keepalive: SessionKeepalive {
-                    _peer_connection: peer_connection,
-                    _data_channel: data_channel,
+                    peer_connection,
+                    data_channel,
                     _callbacks: callbacks,
                 },
             },
@@ -161,6 +219,18 @@ impl BrowserHubTransport {
             .remove(remote)
             .is_some()
     }
+
+    /// Tear down every live session (producer shutdown). Returns how many
+    /// sessions were closed.
+    pub fn detach_all(&self) -> usize {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("browser hub session map poisoned");
+        let count = sessions.len();
+        sessions.clear();
+        count
+    }
 }
 
 impl std::fmt::Debug for BrowserHubTransport {
@@ -170,11 +240,7 @@ impl std::fmt::Debug for BrowserHubTransport {
             .field("local_id", &self.local_id)
             .field(
                 "sessions",
-                &self
-                    .sessions
-                    .lock()
-                    .map(|map| map.len())
-                    .unwrap_or(0),
+                &self.sessions.lock().map(|map| map.len()).unwrap_or(0),
             )
             .finish_non_exhaustive()
     }

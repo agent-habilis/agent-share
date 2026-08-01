@@ -246,7 +246,8 @@ pub(crate) async fn drive_session(
                     if channel.write(true, &datagram).is_err() {
                         // The channel refused the write (e.g. buffer full or
                         // closing): drop the datagram, QUIC retransmits.
-                        dropped_rx.fetch_add(1, Ordering::Relaxed);
+                        let total = dropped_rx.fetch_add(1, Ordering::Relaxed) + 1;
+                        super::session::note_dropped(&remote, total, "channel write refused");
                     }
                 }
             }
@@ -265,6 +266,10 @@ pub(crate) async fn drive_session(
         SessionEnd::Failed(error) => {
             tracing::warn!(%remote, "webrtc session failed: {error:#}");
         }
+    }
+    let dropped_total = dropped_rx.load(Ordering::Relaxed);
+    if dropped_total > 0 {
+        tracing::info!(%remote, dropped_total, "webrtc session dropped datagrams over its lifetime");
     }
     registry.remove_if_generation(&remote, generation);
 }

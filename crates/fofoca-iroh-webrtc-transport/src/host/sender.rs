@@ -60,7 +60,8 @@ impl CustomSender for WebRtcSender {
                     // Never return `Pending`: that would stall iroh's shared
                     // send loop for every transport. Drop and let QUIC
                     // retransmit.
-                    dropped_tx.fetch_add(1, Ordering::Relaxed);
+                    let total = dropped_tx.fetch_add(1, Ordering::Relaxed) + 1;
+                    super::session::note_dropped(&remote, total, "outbound queue full");
                 }
                 Err(TrySendError::Closed(_)) => {
                     return Poll::Ready(Err(io::Error::from(io::ErrorKind::NotConnected)));
