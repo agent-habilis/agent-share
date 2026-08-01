@@ -38,6 +38,9 @@ pub(crate) async fn build_endpoint(
     bind_port: Option<u16>,
     alpns: Vec<Vec<u8>>,
     webrtc: Option<fofoca_iroh_webrtc_transport::WebRtcHandle>,
+    // When true, strip IP/UDP transports so the endpoint cannot hole-punch
+    // or upgrade off a relay path (used by the relay bench).
+    clear_ip: bool,
 ) -> Result<Endpoint> {
     // A pinned key alone no longer means "beacon": a producer pins one so the
     // WebRTC transport can advertise the same identity the endpoint binds.
@@ -95,6 +98,13 @@ pub(crate) async fn build_endpoint(
         builder = builder.add_custom_transport(handle.transport());
     }
 
+    if clear_ip {
+        // Without this, a relay-only dial still upgrades to direct once both
+        // peers learn each other's IPs (same machine / LAN). See iroh's
+        // `endpoint_two_relay_only_becomes_direct` test.
+        builder = builder.clear_ip_transports();
+    }
+
     // Transport config is intentionally left at iroh's defaults: iroh tunes
     // keep-alive / idle (and the per-path multipath settings) for its
     // holepunching, and its own docs warn that adjusting them "may cause
@@ -145,9 +155,10 @@ mod tests {
 
     #[tokio::test]
     async fn loopback_all_off_binds() {
-        let endpoint = build_endpoint(&LookupOpts::loopback(), None, None, Vec::new(), None)
-            .await
-            .expect("loopback endpoint must bind");
+        let endpoint =
+            build_endpoint(&LookupOpts::loopback(), None, None, Vec::new(), None, false)
+                .await
+                .expect("loopback endpoint must bind");
         endpoint.close().await;
     }
 
@@ -156,9 +167,16 @@ mod tests {
         // No lookup wired: exercises the `Minimal` + pinned-ladder
         // composition. `bind()` is non-blocking wrt the relay, so this
         // is offline-safe even with the relay ladder configured.
-        let endpoint = build_endpoint(&LookupOpts::public_preset(), None, None, Vec::new(), None)
-            .await
-            .expect("endpoint with pinned relay ladder must bind");
+        let endpoint = build_endpoint(
+            &LookupOpts::public_preset(),
+            None,
+            None,
+            Vec::new(),
+            None,
+            false,
+        )
+        .await
+        .expect("endpoint with pinned relay ladder must bind");
         endpoint.close().await;
     }
 }

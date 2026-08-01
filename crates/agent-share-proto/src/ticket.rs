@@ -8,11 +8,23 @@ use crate::lookup::LookupOpts;
 use crate::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
 use crate::token::{self, TokenType};
 
+/// No special flags (ordinary file share).
+pub const TICKET_FLAG_NONE: u8 = 0;
+
+/// Bench producer chose `WebRTC` for the mount data path.
+pub const TICKET_FLAG_BENCH_WEBRTC: u8 = 1;
+
+/// Bench producer chose the iroh relay / ticket address for the mount data path.
+pub const TICKET_FLAG_BENCH_RELAY: u8 = 2;
+
 /// A decoded mount ticket — the bearer secret, the share's discovery config,
 /// and the producer's address. Payload layout mirrors the file ticket:
 /// `secret(32) ‖ flags(1) ‖ lookups ‖ address-json` (lookups is
-/// self-delimiting, so the address occupies the remainder). `flags` is
-/// reserved for forward-compat and always 0 today.
+/// self-delimiting, so the address occupies the remainder).
+///
+/// `flags` is `0` for ordinary shares. Bench tickets set
+/// [`TICKET_FLAG_BENCH_WEBRTC`] or [`TICKET_FLAG_BENCH_RELAY`] so the consumer
+/// knows which path the producer opened.
 ///
 /// The secret is a pure bearer capability: whoever holds this string can read
 /// the share. That is why the web client keeps it in the URL *fragment*,
@@ -22,6 +34,7 @@ pub struct MountTicket {
     pub addr: EndpointAddr,
     pub secret: [u8; SECRET_LEN],
     pub lookups: LookupOpts,
+    pub flags: u8,
 }
 
 impl MountTicket {
@@ -34,7 +47,7 @@ impl MountTicket {
     pub fn encode(&self) -> String {
         let mut payload = Vec::with_capacity(SECRET_LEN + 1 + 64);
         payload.extend_from_slice(&self.secret);
-        payload.push(0); // reserved flags byte
+        payload.push(self.flags);
         self.lookups.encode_into(&mut payload);
         let addr_json = serde_json::to_vec(&endpoint_addr_to_json(&self.addr))
             .expect("EndpointAddr JSON always serializes");
@@ -54,11 +67,9 @@ impl MountTicket {
         let secret_slice = payload.get(..SECRET_LEN).context("ticket too short")?;
         let mut secret = [0u8; SECRET_LEN];
         secret.copy_from_slice(secret_slice);
-        // Skip the reserved flags byte.
-        let mut pos = SECRET_LEN + 1;
-        if payload.len() < pos {
-            bail!("ticket missing flags");
-        }
+        let mut pos = SECRET_LEN;
+        let flags = *payload.get(pos).context("ticket missing flags")?;
+        pos += 1;
         let lookups = LookupOpts::decode_from(&payload, &mut pos)?;
         let addr_json = payload.get(pos..).context("ticket missing address")?;
         let value: serde_json::Value =
@@ -68,13 +79,17 @@ impl MountTicket {
             addr,
             secret,
             lookups,
+            flags,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MountTicket, SECRET_LEN};
+    use super::{
+        MountTicket, SECRET_LEN, TICKET_FLAG_BENCH_RELAY, TICKET_FLAG_BENCH_WEBRTC,
+        TICKET_FLAG_NONE,
+    };
     use crate::lookup::LookupOpts;
     use crate::token::{self, TokenType};
     use iroh_base::{EndpointAddr, SecretKey};
@@ -85,6 +100,7 @@ mod tests {
             addr: EndpointAddr::new(id).with_ip_addr("127.0.0.1:4242".parse().expect("addr")),
             secret: [5u8; SECRET_LEN],
             lookups: LookupOpts::public_preset(),
+            flags: TICKET_FLAG_NONE,
         }
     }
 
@@ -97,6 +113,17 @@ mod tests {
         assert_eq!(decoded.addr.id, ticket.addr.id);
         assert_eq!(decoded.secret, ticket.secret);
         assert_eq!(decoded.lookups, ticket.lookups);
+        assert_eq!(decoded.flags, TICKET_FLAG_NONE);
+    }
+
+    #[test]
+    fn bench_flags_round_trip() {
+        for flags in [TICKET_FLAG_BENCH_WEBRTC, TICKET_FLAG_BENCH_RELAY] {
+            let mut ticket = sample();
+            ticket.flags = flags;
+            let decoded = MountTicket::decode(&ticket.encode()).expect("decode");
+            assert_eq!(decoded.flags, flags);
+        }
     }
 
     #[test]
@@ -118,7 +145,7 @@ mod tests {
 
     #[test]
     fn rejects_a_truncated_payload() {
-        let mount = token::encode(TokenType::Mount, &[0u8; SECRET_LEN - 1]);
-        assert!(MountTicket::decode(&mount).is_err());
+        let short = token::encode(TokenType::Mount, &[0u8; 8]);
+        assert!(MountTicket::decode(&short).is_err());
     }
 }

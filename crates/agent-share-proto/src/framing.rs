@@ -48,6 +48,28 @@ pub const OP_READ: u8 = 2;
 /// it already has instead of failing the mount.
 pub const OP_WATCH: u8 = 3;
 
+/// Synthetic throughput / latency probe. Additive like [`OP_WATCH`]: an older
+/// producer drops the stream and keeps the connection.
+pub const OP_BENCH: u8 = 4;
+
+/// [`OP_BENCH`] kind: consumer sends `n` bytes; producer echoes them back.
+pub const BENCH_KIND_ECHO: u8 = 0;
+
+/// [`OP_BENCH`] kind: producer replies with `n` synthetic bytes (no echo body).
+pub const BENCH_KIND_FILL: u8 = 1;
+
+/// Cap on one echo payload (and thus one echo response body).
+pub const MAX_BENCH_ECHO_BYTES: u32 = 64 * 1024;
+
+/// Cap on one fill response body. Throughput runs issue many fill requests.
+pub const MAX_BENCH_FILL_BYTES: u32 = 1024 * 1024;
+
+/// Default consumer measurement window after connect (seconds).
+pub const DEFAULT_BENCH_DURATION_SECS: u64 = 30;
+
+/// How often the timed bench samples latency with an echo (seconds).
+pub const BENCH_ECHO_INTERVAL_SECS: u64 = 1;
+
 /// Ceiling on the encoded manifest, so a hostile producer can't force an
 /// unbounded allocation before the first decode error.
 pub const MAX_MANIFEST_BYTES: u32 = 64 * 1024 * 1024;
@@ -78,6 +100,9 @@ pub const MAX_DELTA_BYTES: u32 = 8 * 1024 * 1024;
 
 /// Body length of an [`OP_READ`] request: `index(u32) ‖ offset(u64) ‖ len(u32)`.
 pub const READ_REQUEST_LEN: usize = 16;
+
+/// Fixed prefix of an [`OP_BENCH`] request after the op byte: `kind(u8) ‖ n(u32)`.
+pub const BENCH_REQUEST_PREFIX_LEN: usize = 5;
 
 /// Build the header for an [`OP_MANIFEST`] request. The manifest op has no
 /// body, so this is the whole request.
@@ -114,6 +139,63 @@ pub fn encode_read_request(
     out.extend_from_slice(&offset.to_le_bytes());
     out.extend_from_slice(&len.to_le_bytes());
     out
+}
+
+/// Build an [`OP_BENCH`] echo request: header + kind/len + payload.
+///
+/// # Errors
+/// `payload.len()` exceeds [`MAX_BENCH_ECHO_BYTES`].
+pub fn encode_bench_echo_request(secret: &[u8; SECRET_LEN], payload: &[u8]) -> Result<Vec<u8>> {
+    let len = u32::try_from(payload.len()).context("echo payload too large for u32")?;
+    if len > MAX_BENCH_ECHO_BYTES {
+        bail!("echo payload {len} exceeds cap {MAX_BENCH_ECHO_BYTES}");
+    }
+    let mut out = Vec::with_capacity(REQUEST_HEADER_LEN + BENCH_REQUEST_PREFIX_LEN + payload.len());
+    out.extend_from_slice(secret);
+    out.push(OP_BENCH);
+    out.push(BENCH_KIND_ECHO);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(payload);
+    Ok(out)
+}
+
+/// Build an [`OP_BENCH`] fill request: header + kind/len (no body).
+///
+/// # Errors
+/// `len` exceeds [`MAX_BENCH_FILL_BYTES`] or is zero.
+pub fn encode_bench_fill_request(secret: &[u8; SECRET_LEN], len: u32) -> Result<Vec<u8>> {
+    if len == 0 || len > MAX_BENCH_FILL_BYTES {
+        bail!("fill length {len} must be in 1..={MAX_BENCH_FILL_BYTES}");
+    }
+    let mut out = Vec::with_capacity(REQUEST_HEADER_LEN + BENCH_REQUEST_PREFIX_LEN);
+    out.extend_from_slice(secret);
+    out.push(OP_BENCH);
+    out.push(BENCH_KIND_FILL);
+    out.extend_from_slice(&len.to_le_bytes());
+    Ok(out)
+}
+
+/// Decode the `kind ‖ len` prefix of an [`OP_BENCH`] request.
+///
+/// # Errors
+/// Prefix is short or kind is unknown.
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "the length check above makes the 4-byte slice exactly sized"
+)]
+pub fn decode_bench_request_prefix(prefix: &[u8]) -> Result<(u8, u32)> {
+    if prefix.len() < BENCH_REQUEST_PREFIX_LEN {
+        bail!(
+            "bench request prefix must be {BENCH_REQUEST_PREFIX_LEN} bytes, got {}",
+            prefix.len()
+        );
+    }
+    let kind = prefix[0];
+    let len = u32::from_le_bytes(prefix[1..5].try_into().expect("4 bytes"));
+    match kind {
+        BENCH_KIND_ECHO | BENCH_KIND_FILL => Ok((kind, len)),
+        other => bail!("unknown bench kind {other}"),
+    }
 }
 
 /// Decode an [`OP_READ`] request body — the producer's side of
@@ -174,8 +256,11 @@ pub fn decode_response_header(prefix: &[u8], requested: u32) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ,
-        OP_WATCH, SECRET_LEN, WEBRTC_SIGNAL_ALPN, decode_read_request, decode_response_header,
+        BENCH_ECHO_INTERVAL_SECS, BENCH_KIND_ECHO, BENCH_KIND_FILL, DEFAULT_BENCH_DURATION_SECS,
+        MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES, MAX_DELTA_BYTES, MAX_MANIFEST_BYTES,
+        MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_MANIFEST, OP_READ, OP_WATCH, SECRET_LEN,
+        WEBRTC_SIGNAL_ALPN, decode_bench_request_prefix, decode_read_request,
+        decode_response_header, encode_bench_echo_request, encode_bench_fill_request,
         encode_manifest_request, encode_read_request,
     };
     use crate::manifest::ReadStatus;
@@ -195,6 +280,13 @@ mod tests {
         // know costs that one stream, not the connection, so a new consumer
         // degrades to snapshot semantics instead of failing outright.
         assert_eq!(OP_WATCH, 3);
+        assert_eq!(OP_BENCH, 4);
+        assert_eq!(BENCH_KIND_ECHO, 0);
+        assert_eq!(BENCH_KIND_FILL, 1);
+        assert_eq!(MAX_BENCH_ECHO_BYTES, 64 * 1024);
+        assert_eq!(MAX_BENCH_FILL_BYTES, 1024 * 1024);
+        assert_eq!(DEFAULT_BENCH_DURATION_SECS, 30);
+        assert_eq!(BENCH_ECHO_INTERVAL_SECS, 1);
         assert_eq!(SECRET_LEN, 32);
         assert_eq!(MAX_MANIFEST_BYTES, 64 * 1024 * 1024);
         assert_eq!(MAX_READ_LEN, 256 * 1024);
@@ -222,6 +314,32 @@ mod tests {
     fn read_request_rejects_a_wrong_sized_body() {
         assert!(decode_read_request(&[0u8; 15]).is_err());
         assert!(decode_read_request(&[0u8; 17]).is_err());
+    }
+
+    #[test]
+    fn bench_echo_request_round_trips() {
+        let payload = b"ping";
+        let request = encode_bench_echo_request(&[9u8; SECRET_LEN], payload).expect("encode");
+        assert_eq!(request[SECRET_LEN], OP_BENCH);
+        let (kind, len) = decode_bench_request_prefix(&request[SECRET_LEN + 1..]).expect("prefix");
+        assert_eq!((kind, len), (BENCH_KIND_ECHO, 4));
+        assert_eq!(&request[SECRET_LEN + 1 + 5..], payload);
+    }
+
+    #[test]
+    fn bench_fill_request_encodes() {
+        let request = encode_bench_fill_request(&[1u8; SECRET_LEN], 1024).expect("encode");
+        assert_eq!(request[SECRET_LEN], OP_BENCH);
+        let (kind, len) = decode_bench_request_prefix(&request[SECRET_LEN + 1..]).expect("prefix");
+        assert_eq!((kind, len), (BENCH_KIND_FILL, 1024));
+    }
+
+    #[test]
+    fn bench_rejects_oversize_echo_and_fill() {
+        let big = vec![0u8; (MAX_BENCH_ECHO_BYTES as usize) + 1];
+        assert!(encode_bench_echo_request(&[0u8; SECRET_LEN], &big).is_err());
+        assert!(encode_bench_fill_request(&[0u8; SECRET_LEN], 0).is_err());
+        assert!(encode_bench_fill_request(&[0u8; SECRET_LEN], MAX_BENCH_FILL_BYTES + 1).is_err());
     }
 
     #[test]

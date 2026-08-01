@@ -1,5 +1,5 @@
 /**
- * Bare ICE / WebRTC lab: synthetic produce + ticket join, no directory picker.
+ * Lab: synthetic OP_BENCH producer + consumer (transport set by producer).
  */
 
 import { parseShareInput } from './ticket.ts'
@@ -11,10 +11,10 @@ function importWasm() {
 }
 
 type WasmModule = Awaited<ReturnType<typeof importWasm>>
-type ShareProducer = InstanceType<WasmModule['ShareProducer']>
+type BenchProducer = InstanceType<WasmModule['BenchProducer']>
 
 let wasmModule: Promise<WasmModule> | null = null
-let producer: ShareProducer | null = null
+let producer: BenchProducer | null = null
 
 function loadWasm(): Promise<WasmModule> {
   if (!wasmModule) {
@@ -51,7 +51,7 @@ function logger(pre: HTMLPreElement) {
     const stamp = new Date().toISOString().slice(11, 23)
     pre.textContent += `[${stamp}] ${line}\n`
     pre.scrollTop = pre.scrollHeight
-    console.log('[ice-lab]', ...parts)
+    console.log('[lab]', ...parts)
   }
 }
 
@@ -65,43 +65,34 @@ function jsError(error: unknown): string {
   }
 }
 
-async function startTransmit(
+async function startProducer(
+  transport: string,
   log: (...parts: unknown[]) => void,
   ticketBox: HTMLTextAreaElement,
   stopBtn: HTMLButtonElement,
   copyBtn: HTMLButtonElement,
 ): Promise<void> {
   if (producer) {
-    log('already sharing — stop first')
+    log('already producing — stop first')
     return
   }
   log('loading wasm…')
   const wasm = await loadWasm()
-  const body = new TextEncoder().encode(
-    `hello from ice-lab\nstarted ${new Date().toISOString()}\n`,
-  )
-  const file = new File([body], 'hello.txt', { type: 'text/plain' })
-  const listing = {
-    dirs: [] as string[],
-    files: [{ rel_path: 'hello.txt', size: file.size, file }],
-  }
-  log('ShareProducer.start (synthetic hello.txt)…')
-  producer = await wasm.ShareProducer.start(listing)
-  const ticket = producer.ticket
-  ticketBox.value = ticket
+  log(`BenchProducer.start(${transport})…`)
+  producer = await wasm.BenchProducer.start(transport)
+  ticketBox.value = producer.ticket
   stopBtn.disabled = false
   copyBtn.disabled = false
-  log('sharing', {
-    transport: producer.transport,
-    files: producer.files,
-    bytes: Number(producer.bytes),
-  })
-  log('ticket ready — paste into the receiver tab')
+  log('bench producer ready — paste ticket into the consumer panel')
 }
 
-async function stopTransmit(log: (...parts: unknown[]) => void, stopBtn: HTMLButtonElement, copyBtn: HTMLButtonElement) {
+async function stopProducer(
+  log: (...parts: unknown[]) => void,
+  stopBtn: HTMLButtonElement,
+  copyBtn: HTMLButtonElement,
+) {
   if (!producer) {
-    log('not sharing')
+    log('not producing')
     return
   }
   log('stopping…')
@@ -113,7 +104,7 @@ async function stopTransmit(log: (...parts: unknown[]) => void, stopBtn: HTMLBut
   log('stopped')
 }
 
-async function receive(
+async function runBench(
   rawTicket: string,
   log: (...parts: unknown[]) => void,
 ): Promise<void> {
@@ -124,25 +115,31 @@ async function receive(
   }
   log('loading wasm…')
   const wasm = await loadWasm()
-  log('ShareClient.connect…')
-  const client = await wasm.ShareClient.connect(ticket)
-  log('connected', { transport: client.transport })
-  log('fetching manifest…')
-  const manifest = (await client.manifest()) as {
-    dirs: { rel_path: string }[]
-    files: { rel_path: string; size: number }[]
-  }
-  log('manifest', manifest)
-  const first = manifest.files?.[0]
-  if (!first) {
-    log('no files in share')
-    return
-  }
-  const size = Number(first.size)
-  log(`reading ${first.rel_path} (${size} bytes)…`)
-  const bytes = await client.read(0, 0n, size)
-  const text = new TextDecoder().decode(Uint8Array.from(bytes))
-  log('read ok:\n' + text)
+  const report = await wasm.ShareClient.bench(ticket, undefined, (status: {
+    stage: string
+    transport?: string
+    connect_ms?: number
+    duration_s?: number
+    elapsed_s?: number
+  }) => {
+    switch (status.stage) {
+      case 'connecting':
+        log('Connecting', status.transport)
+        break
+      case 'connected':
+        log('Connected', `${Number(status.connect_ms).toFixed(1)} ms (${status.transport})`)
+        break
+      case 'benching':
+        log('Benching', `${status.duration_s}s`)
+        break
+      case 'progress':
+        log('Benching', `${status.elapsed_s}s / ${status.duration_s}s`)
+        break
+      default:
+        log('status', status)
+    }
+  })
+  log('report', report)
 }
 
 function main() {
@@ -153,15 +150,18 @@ function main() {
   const txStart = el<HTMLButtonElement>('tx-start')
   const txStop = el<HTMLButtonElement>('tx-stop')
   const txCopy = el<HTMLButtonElement>('tx-copy')
-  const rxConnect = el<HTMLButtonElement>('rx-connect')
+  const txTransport = el<HTMLSelectElement>('tx-transport')
+  const rxRun = el<HTMLButtonElement>('rx-run')
 
   txStart.onclick = () => {
-    void startTransmit(txLog, txTicket, txStop, txCopy).catch((error) => {
-      txLog('FAILED', jsError(error))
-    })
+    void startProducer(txTransport.value, txLog, txTicket, txStop, txCopy).catch(
+      (error) => {
+        txLog('FAILED', jsError(error))
+      },
+    )
   }
   txStop.onclick = () => {
-    void stopTransmit(txLog, txStop, txCopy).catch((error) => {
+    void stopProducer(txLog, txStop, txCopy).catch((error) => {
       txLog('FAILED', jsError(error))
     })
   }
@@ -170,18 +170,10 @@ function main() {
     await navigator.clipboard.writeText(txTicket.value)
     txLog('ticket copied')
   }
-  rxConnect.onclick = () => {
-    void receive(rxTicket.value, rxLog).catch((error) => {
+  rxRun.onclick = () => {
+    void runBench(rxTicket.value, rxLog).catch((error) => {
       rxLog('FAILED', jsError(error))
     })
-  }
-
-  const params = new URLSearchParams(location.search)
-  const role = params.get('role')
-  if (role === 'tx') {
-    rxLog('open ?role=rx (or the other panel) in another tab')
-  } else if (role === 'rx') {
-    txLog('open ?role=tx (or the other panel) in another tab')
   }
 }
 

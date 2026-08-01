@@ -18,7 +18,9 @@ publish = false
 [workspace]
 
 [lib]
-crate-type = ["cdylib"]
+# `rlib` so unit tests (transport mode parsing) can run on the host; `cdylib`
+# is what wasm-bindgen / the browser load.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 agent-share-proto = { path = "../agent-share-proto" }

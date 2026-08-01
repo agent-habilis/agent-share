@@ -10,6 +10,24 @@ The CLI: share a directory read-only over iroh QUIC, or consume one.
 
 Reads are lazy and ranged: only the bytes a reader touches cross the network.
 
+## Bench
+
+Synthetic throughput / latency over `OP_BENCH` (no real directory):
+
+```bash
+agent-share bench --transport webrtc                 # producer
+agent-share bench --transport relay
+agent-share bench '<🐝ticket>'                       # consumer (30s)
+agent-share bench '<🐝ticket>' --duration 30
+```
+
+`--transport` is set on the **producer** and encoded in the ticket; the consumer
+has no transport flag. After connect the consumer measures for **30s** by default
+(`--duration`). `relay` dials **only** the iroh relay URL (direct IPs stripped);
+`webrtc` dials **only** the WebRTC custom addr. Same-machine WebRTC still uses
+host ICE (localhost), so compare against a forced relay to see a real gap. The
+web lab at `ui/lab.html` and `npx agent-share bench` expose the same pair.
+
 ## Where things live
 
 This crate owns the mount protocol's *server and client*, plus the WebRTC lane that lets

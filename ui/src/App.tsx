@@ -109,6 +109,7 @@ const clients = new Map<string, Promise<Client>>()
 function connect(ticket: string): Promise<Client> {
   let client = clients.get(ticket)
   if (!client) {
+    // Omit transport ⇒ dynamic (WebRTC preferred, iroh relay fallback).
     client = loadWasm().then(
       (wasm) => wasm.ShareClient.connect(ticket) as unknown as Promise<Client>,
     )

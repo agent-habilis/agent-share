@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>agent-share ice-lab</title>
+    <title>agent-share lab</title>
     <style>
       :root {
         color-scheme: light;
@@ -42,7 +42,8 @@
       }
       button,
       textarea,
-      input {
+      input,
+      select {
         font: inherit;
       }
       button {
@@ -72,6 +73,7 @@
       .row {
         display: flex;
         flex-wrap: wrap;
+        align-items: center;
         gap: 0.35rem;
         margin: 0.5rem 0;
       }
@@ -82,21 +84,33 @@
       a {
         color: inherit;
       }
+      label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+      }
     </style>
   </head>
   <body>
-    <h1>agent-share ice-lab</h1>
+    <h1>agent-share lab</h1>
     <p class="hint">
-      No folder picker. Open this page in two tabs — transmit in one, receive in the other.
-      Uses the same wasm produce/join path as the app (including TURN).
-      <a href="/">← app</a>
+      Synthetic <code>OP_BENCH</code> throughput / latency. The producer chooses
+      <code>webrtc</code> or <code>relay</code>; the consumer reads that from the
+      ticket. <a href="/">← app</a>
     </p>
     <div class="grid">
       <section>
-        <h2>Transmitter</h2>
-        <p class="hint">Serves a synthetic <code>hello.txt</code>.</p>
+        <h2>Bench producer</h2>
+        <p class="hint">Serves echo/fill only — no real files.</p>
         <div class="row">
-          <button type="button" id="tx-start">Start sharing</button>
+          <label>
+            transport
+            <select id="tx-transport">
+              <option value="webrtc">webrtc</option>
+              <option value="relay">relay</option>
+            </select>
+          </label>
+          <button type="button" id="tx-start">Start bench producer</button>
           <button type="button" id="tx-stop" disabled>Stop</button>
           <button type="button" id="tx-copy" disabled>Copy ticket</button>
         </div>
@@ -104,15 +118,15 @@
         <pre id="tx-log"></pre>
       </section>
       <section>
-        <h2>Receiver</h2>
-        <p class="hint">Paste a ticket (or share URL) and connect.</p>
+        <h2>Bench consumer</h2>
+        <p class="hint">Paste a ticket and run (30s after connect).</p>
         <textarea id="rx-ticket" placeholder="🐝… or http://localhost:5173/#🐝…"></textarea>
         <div class="row">
-          <button type="button" id="rx-connect">Connect</button>
+          <button type="button" id="rx-run">Run bench</button>
         </div>
         <pre id="rx-log"></pre>
       </section>
     </div>
-    <script type="module" src="/src/ice-lab.ts"></script>
+    <script type="module" src="/src/lab.ts"></script>
   </body>
 </html>

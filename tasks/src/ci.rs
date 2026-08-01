@@ -16,9 +16,20 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     cmd!(sh, "cargo test --workspace").quiet().run()?;
     // The host backend is not in the default feature set, so a plain
     // `--workspace` run never touches it.
-    cmd!(sh, "cargo test -p fofoca-iroh-webrtc-transport --features host")
-        .quiet()
-        .run()?;
+    cmd!(
+        sh,
+        "cargo test -p fofoca-iroh-webrtc-transport --features host"
+    )
+    .quiet()
+    .run()?;
+    // Standalone workspace (excluded from the root); covers transport-mode
+    // parsing for ShareClient::connect.
+    cmd!(
+        sh,
+        "cargo test --manifest-path crates/agent-share-wasm-client/Cargo.toml --lib"
+    )
+    .quiet()
+    .run()?;
 
     // The transport id and the signal envelope must have exactly one
     // definition each. They were duplicated across two crates upstream, kept
@@ -26,7 +37,10 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     // no useful error, so the de-duplication is worth a test.
     output::status("Checking", "no duplicated wire constants");
     for (needle, owner) in [
-        ("0x5752_5443", "crates/fofoca-iroh-webrtc-transport/src/addr.rs"),
+        (
+            "0x5752_5443",
+            "crates/fofoca-iroh-webrtc-transport/src/addr.rs",
+        ),
         (
             "enum SignalEnvelope",
             "crates/fofoca-iroh-webrtc-transport/src/signaling.rs",

@@ -1,25 +1,11 @@
 #!/usr/bin/env node
 /**
  * `npx agent-share <🐝…> [dir]` — receive a shared folder.
+ * `npx agent-share bench --transport webrtc|relay` — synthetic OP_BENCH producer.
+ * `npx agent-share bench <🐝…>` — bench consumer (transport from ticket).
  *
- * Receive only. Serving needs a filesystem scan whose sort order *is* the READ
- * index (`src/mount/scan.rs`), so a JS reimplementation that ordered
- * differently would silently corrupt every read; producing stays on the native
- * binary, which also gets you the NFS mount.
- *
- * This writes real files rather than mounting: NFS is a native-only path and
- * unreachable from wasm.
- *
- * ## Why this needs a native addon
- *
- * The relay is a rendezvous only — it carries the SDP exchange and never file
- * data — so every byte arrives over a WebRTC data channel. Node has no
- * `RTCPeerConnection`, so one has to be supplied. `node-datachannel` is an
- * optional dependency for exactly that reason: when it is present this works,
- * and when it is not the failure says so instead of hanging.
- *
- * That is a real tension with the zero-install premise of `npx`, and it is a
- * consequence of the rendezvous-only rule rather than an oversight.
+ * Folder receive writes real files rather than mounting: NFS is native-only.
+ * Folder produce stays on the native binary (scan order is the READ index).
  */
 
 import { mkdir, writeFile } from 'node:fs/promises'
@@ -34,17 +20,18 @@ import { safeJoin } from './paths.js'
 const CHUNK = 256 * 1024
 
 function usage() {
-  console.error('usage: npx agent-share <🐝ticket> [destination]')
+  console.error('usage:')
+  console.error('  npx agent-share <🐝ticket> [destination]')
+  console.error('  npx agent-share bench --transport webrtc|relay')
+  console.error('  npx agent-share bench <🐝ticket>')
   console.error()
-  console.error('  Receives a shared folder into `destination` (default: ./share).')
+  console.error('  Receive writes into `destination` (default: ./share).')
   console.error('  Produce a share with the native binary: agent-share serve <dir>')
+  console.error('  Bench: producer sets --transport; consumer reads it from the ticket.')
 }
 
 /**
  * Install a WebRTC implementation onto `globalThis`, or explain why we cannot.
- *
- * The wasm client reaches for the platform's `RTCPeerConnection`; in a browser
- * that exists, in Node it does not.
  */
 async function installWebRtc() {
   const globals = /** @type {Record<string, unknown>} */ (
@@ -107,14 +94,14 @@ async function receive(ticket, destination) {
   await installWebRtc()
   const wasm = await loadClient()
 
-  process.stderr.write('connecting over WebRTC…\n')
-  const client = await wasm.ShareClient.connect(ticket)
+  process.stderr.write('connecting (relay)…\n')
+  const client = await wasm.ShareClient.connect(ticket, 'relay')
+  process.stderr.write(`connected over ${client.transport}\n`)
   const manifest = /** @type {Manifest} */ (await client.manifest())
 
   const root = resolve(destination)
   await mkdir(root, { recursive: true })
 
-  // Directories first so a file never races its parent.
   for (const dir of manifest.dirs) {
     await mkdir(safeJoin(root, dir.rel_path), { recursive: true })
   }
@@ -131,8 +118,6 @@ async function receive(ticket, destination) {
       continue
     }
 
-    // Streamed, not buffered: a share can be far larger than memory, and the
-    // protocol hands back at most 256 KiB per request anyway.
     let offset = 0
     const chunks = new Readable({
       async read() {
@@ -142,8 +127,6 @@ async function receive(ticket, destination) {
         }
         const want = Math.min(CHUNK, file.size - offset)
         const chunk = await client.read(index, BigInt(offset), want)
-        // Past-EOF is a valid empty read in this protocol, so an empty chunk
-        // means the file ended — not that something failed.
         if (chunk.length === 0) {
           this.push(null)
           return
@@ -160,13 +143,160 @@ async function receive(ticket, destination) {
   process.stderr.write(`\rreceived ${manifest.files.length} files into ${root}\n`)
 }
 
-const [ticket, destination = './share'] = process.argv.slice(2)
-if (!ticket || ticket === '-h' || ticket === '--help') {
-  usage()
-  process.exit(ticket ? 0 : 2)
+/**
+ * @param {string} transport
+ */
+async function benchProduce(transport) {
+  if (transport !== 'webrtc' && transport !== 'relay') {
+    throw new Error('bench producer requires --transport webrtc|relay')
+  }
+  await installWebRtc()
+  const wasm = await loadClient()
+  process.stderr.write(`starting bench producer (${transport})…\n`)
+  const producer = await wasm.BenchProducer.start(transport)
+  const ticket = producer.ticket
+  console.log(`npx agent-share bench '${ticket}'`)
+  process.stderr.write('bench producer running — Ctrl-C to stop\n')
+
+  await new Promise((resolve) => {
+    const stop = async () => {
+      process.stderr.write('\nstopping…\n')
+      try {
+        await producer.stop()
+      } catch {
+        // best-effort
+      }
+      resolve(undefined)
+    }
+    process.once('SIGINT', () => {
+      void stop()
+    })
+    process.once('SIGTERM', () => {
+      void stop()
+    })
+  })
 }
 
-receive(ticket, destination).catch((error) => {
+/**
+ * @param {string[]} argv
+ */
+function parseBenchArgs(argv) {
+  /** @type {string | undefined} */
+  let ticket
+  /** @type {string | undefined} */
+  let transport
+  /** @type {number | undefined} */
+  let duration
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--transport') {
+      transport = argv[++i]
+      continue
+    }
+    if (arg.startsWith('--transport=')) {
+      transport = arg.slice('--transport='.length)
+      continue
+    }
+    if (arg === '--duration') {
+      duration = Number(argv[++i])
+      continue
+    }
+    if (arg.startsWith('--duration=')) {
+      duration = Number(arg.slice('--duration='.length))
+      continue
+    }
+    if (arg === '-h' || arg === '--help') {
+      return { help: true }
+    }
+    if (!ticket) {
+      ticket = arg
+      continue
+    }
+    throw new Error(`unexpected argument: ${arg}`)
+  }
+  return { ticket, transport, duration, help: false }
+}
+
+/**
+ * @param {string} ticket
+ * @param {number | undefined} duration
+ */
+/**
+ * @param {{ stage: string, transport?: string, connect_ms?: number, duration_s?: number, elapsed_s?: number }} status
+ */
+function onBenchStatus(status) {
+  switch (status.stage) {
+    case 'connecting':
+      process.stderr.write(`connecting (${status.transport})…\n`)
+      break
+    case 'connected':
+      process.stderr.write(
+        `connected ${Number(status.connect_ms).toFixed(1)} ms (${status.transport})\n`,
+      )
+      break
+    case 'benching':
+      process.stderr.write(`benching ${status.duration_s}s…\n`)
+      break
+    case 'progress':
+      process.stderr.write(`benching ${status.elapsed_s}s / ${status.duration_s}s\n`)
+      break
+    default:
+      break
+  }
+}
+
+async function benchConsume(ticket, duration) {
+  if (duration !== undefined && !(Number.isFinite(duration) && duration > 0)) {
+    throw new Error('--duration must be a positive number of seconds')
+  }
+  await installWebRtc()
+  const wasm = await loadClient()
+  const report = await wasm.ShareClient.bench(
+    ticket,
+    duration === undefined ? undefined : BigInt(Math.floor(duration)),
+    onBenchStatus,
+  )
+  console.log(JSON.stringify(report, null, 2))
+}
+
+async function main() {
+  const argv = process.argv.slice(2)
+  if (argv[0] === '-h' || argv[0] === '--help') {
+    usage()
+    process.exit(0)
+  }
+
+  if (argv[0] === 'bench') {
+    const parsed = parseBenchArgs(argv.slice(1))
+    if (parsed.help) {
+      usage()
+      process.exit(0)
+    }
+    if (!parsed.ticket) {
+      if (!parsed.transport) {
+        throw new Error('bench producer requires --transport webrtc|relay')
+      }
+      await benchProduce(parsed.transport)
+      return
+    }
+    if (parsed.transport) {
+      throw new Error(
+        'bench consumer has no --transport; the producer sets it in the ticket',
+      )
+    }
+    await benchConsume(parsed.ticket, parsed.duration)
+    return
+  }
+
+  const [ticket, destination = './share'] = argv
+  if (!ticket) {
+    usage()
+    process.exit(2)
+  }
+  await receive(ticket, destination)
+}
+
+main().catch((error) => {
   process.stderr.write(`\n${error.message ?? error}\n`)
   process.exit(1)
 })

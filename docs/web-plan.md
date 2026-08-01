@@ -298,16 +298,20 @@ Then close the LAN-only gap:
 ```rust
 #[wasm_bindgen]
 impl ShareClient {
-    pub async fn connect(ticket: String) -> Result<ShareClient, JsValue>;
-    /// Skip the WebRTC attempt entirely and go straight to the relay. Node
-    /// has no `RTCPeerConnection`, so the npx CLI calls only this and must
-    /// not pay a WebRTC timeout it can never win.
-    pub async fn connect_relay_only(ticket: String) -> Result<ShareClient, JsValue>;
-    pub fn transport(&self) -> String;              // always "webrtc" — see below
+    /// `transport`: `webrtc` | `relay` | `dynamic` (omit ⇒ dynamic:
+    /// both on, WebRTC preferred, iroh relay fallback).
+    pub async fn connect(
+        ticket: String,
+        transport: Option<String>,
+    ) -> Result<ShareClient, JsValue>;
+    pub fn transport(&self) -> String; // "webrtc" or "relay" after connect
     pub async fn manifest(&self) -> Result<JsValue, JsValue>;
     pub async fn read(&self, index: u32, offset: u64, len: u32) -> Result<Uint8Array, JsValue>;
 }
 ```
+
+UI omits the mode (dynamic default). ICE lab passes `"webrtc"`. Node/npx
+passes `"relay"` so it never pays an ICE timeout it cannot win.
 
 **One library, two consumers.** `crates/agent-share-wasm-client/` is the single shared wasm target:
 the browser UI and the `npx agent-share` CLI link the same `.wasm`, differing
@@ -320,11 +324,9 @@ callback (the CLI chunks `read()` itself and owns its own progress), and no
 serve surface (npx is receive-only; producing stays on the native binary,
 which needs filesystem access wasm does not have).
 
-The endpoint gains the relay transport (currently `RelayMode::Disabled` +
-`clear_address_lookup()`) driven by the ticket's `LookupOpts`, keeping the WebRTC custom
-transport alongside. The relay leg exists **only** to reach the signal ALPN; the mount dial
-goes over the WebRTC custom addr and nowhere else. A failed ICE negotiation is a hard
-error surfaced to the UI, not a quiet downgrade.
+Under `dynamic` (default), signaling uses the ticket's iroh relay ladder; mount
+prefers WebRTC, then falls back to dialing `MOUNT_ALPN` over that same relay/IP
+path. `webrtc` keeps ICE failure fatal; `relay` skips WebRTC entirely.
 
 Build via `cargo task web-wasm`, mirroring `tasks/src/webrtc_wasm.rs` (needs
 `wasm-bindgen-cli` and a wasm-capable clang — Homebrew LLVM on macOS, since ring's C core

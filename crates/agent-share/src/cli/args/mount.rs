@@ -1,14 +1,15 @@
 use std::path::PathBuf;
 
+use agent_share_proto::framing::DEFAULT_BENCH_DURATION_SECS;
 use clap::Subcommand;
 
 use super::lookup::PublicLookupArgs;
 use super::output::OutputFormat;
 use crate::protocol::SwarmId;
 
-/// The `agent-share serve` action. The consumer side is the bare
+/// The `agent-share serve` / `bench` actions. The consumer side is the bare
 /// `agent-share <🐝…> <mountpoint>` form (positionals on the root command),
-/// so a `🐝…` ticket can never collide with the `serve` literal.
+/// so a `🐝…` ticket can never collide with the `serve` / `bench` literals.
 #[derive(Subcommand, Debug)]
 pub(crate) enum MountAction {
     /// Share a folder read-only; prints the `agent-share 🐝…` command on stdout.
@@ -33,6 +34,24 @@ pub(crate) enum MountAction {
         lookups: PublicLookupArgs,
         /// Output format: human (default) — a cargo-style status + hint — or
         /// json, a single direct `agent-share 🐝…` line for machines.
+        #[arg(long, default_value = "human")]
+        output: OutputFormat,
+    },
+    /// Synthetic throughput / latency bench (no real directory).
+    ///
+    /// No ticket → producer; `--transport webrtc|relay` is required and is
+    /// encoded in the ticket. With ticket → consumer (uses the producer's
+    /// transport; no `--transport` flag).
+    Bench {
+        /// Ticket from a bench producer. Omit to produce.
+        ticket: Option<String>,
+        /// Mount data path the producer opens: `webrtc` or `relay` (producer only).
+        #[arg(long)]
+        transport: Option<String>,
+        /// Measurement window after connect, in seconds (consumer).
+        #[arg(long, default_value_t = DEFAULT_BENCH_DURATION_SECS)]
+        duration: u64,
+        /// Output format: human (default) or json.
         #[arg(long, default_value = "human")]
         output: OutputFormat,
     },
@@ -103,5 +122,42 @@ mod tests {
         let cli = Cli::parse_from(["agent-share"]);
         assert!(cli.action.is_none());
         assert!(cli.ticket.is_none());
+    }
+
+    #[test]
+    fn mount_bench_producer_parses() {
+        let cli = Cli::parse_from(["agent-share", "bench", "--transport", "relay"]);
+        let Some(super::MountAction::Bench {
+            ticket,
+            transport,
+            duration,
+            ..
+        }) = cli.action
+        else {
+            panic!("expected Bench");
+        };
+        assert!(ticket.is_none());
+        assert_eq!(transport.as_deref(), Some("relay"));
+        assert_eq!(
+            duration,
+            agent_share_proto::framing::DEFAULT_BENCH_DURATION_SECS
+        );
+    }
+
+    #[test]
+    fn mount_bench_consumer_parses() {
+        let cli = Cli::parse_from(["agent-share", "bench", "🐝abc", "--duration", "5"]);
+        let Some(super::MountAction::Bench {
+            ticket,
+            transport,
+            duration,
+            ..
+        }) = cli.action
+        else {
+            panic!("expected Bench");
+        };
+        assert_eq!(ticket.as_deref(), Some("🐝abc"));
+        assert!(transport.is_none());
+        assert_eq!(duration, 5);
     }
 }

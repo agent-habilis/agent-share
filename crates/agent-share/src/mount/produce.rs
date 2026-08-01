@@ -129,6 +129,7 @@ pub(super) async fn bind(
         None,
         vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()],
         Some(webrtc.clone()),
+        false,
     )
     .await?;
     debug_assert_eq!(
@@ -146,6 +147,7 @@ pub(super) async fn bind(
         addr: endpoint.addr(),
         secret,
         lookups,
+        flags: 0,
     };
     Ok((endpoint, ticket, secret, webrtc))
 }

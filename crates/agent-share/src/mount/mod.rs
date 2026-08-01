@@ -1,3 +1,4 @@
+mod bench;
 mod consume;
 mod live;
 mod nfs;
@@ -42,6 +43,7 @@ pub mod test_support {
     type Shared<T> = Arc<T>;
 }
 
+pub(crate) use bench::{produce as produce_bench, run as run_bench};
 pub(crate) use consume::attach;
 pub(crate) use produce::serve;
 
@@ -51,8 +53,8 @@ pub(crate) use produce::serve;
 // under their long-standing names; the golden pin that guards them moved with
 // them (`agent_share_proto::framing` — `wire_constants_are_pinned`).
 pub(crate) use agent_share_proto::framing::{
-    MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH,
-    REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST,
+    MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_MANIFEST, OP_READ,
+    OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST,
 };
 pub(crate) use agent_share_proto::manifest::{MountManifest, ReadStatus};
 pub(crate) use agent_share_proto::ticket::MountTicket;
@@ -149,9 +151,10 @@ mod tests {
             }
         });
 
-        let consumer_endpoint = build_endpoint(&ticket.lookups, None, None, Vec::new(), None)
-            .await
-            .expect("consumer endpoint");
+        let consumer_endpoint =
+            build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
+                .await
+                .expect("consumer endpoint");
         add_peer_addr(&consumer_endpoint, ticket.addr.clone()).expect("add peer addr");
         let client = RemoteClient::new(consumer_endpoint, ticket);
         (endpoint, client, producer)
@@ -220,10 +223,12 @@ mod tests {
             addr: client.producer_addr(),
             secret: [0u8; SECRET_LEN],
             lookups: LookupOpts::loopback(),
+            flags: 0,
         };
-        let bad_endpoint = build_endpoint(&bad_ticket.lookups, None, None, Vec::new(), None)
-            .await
-            .expect("bad-client endpoint");
+        let bad_endpoint =
+            build_endpoint(&bad_ticket.lookups, None, None, Vec::new(), None, false)
+                .await
+                .expect("bad-client endpoint");
         add_peer_addr(&bad_endpoint, bad_ticket.addr.clone()).expect("add peer addr");
         let bad = RemoteClient::new(bad_endpoint, bad_ticket);
         assert!(bad.fetch_manifest().await.is_err(), "bad secret must fail");

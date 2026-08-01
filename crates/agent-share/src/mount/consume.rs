@@ -47,13 +47,16 @@ pub(crate) async fn attach(
     let mut key_bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
     let key = iroh::SecretKey::from_bytes(&key_bytes);
-    let webrtc = WebRtcHandle::new(fofoca_iroh_webrtc_transport::WebRtcTransport::new(key.public()));
+    let webrtc = WebRtcHandle::new(fofoca_iroh_webrtc_transport::WebRtcTransport::new(
+        key.public(),
+    ));
     let endpoint = build_endpoint(
         &ticket.lookups,
         Some(key),
         None,
         Vec::new(),
         Some(webrtc.clone()),
+        false,
     )
     .await?;
     add_peer_addr(&endpoint, ticket.addr.clone())?;
