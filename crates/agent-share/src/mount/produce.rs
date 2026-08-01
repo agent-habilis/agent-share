@@ -21,7 +21,7 @@ use super::{
     wait_online,
 };
 use super::{WEBRTC_SIGNAL_ALPN, serve_signal};
-use webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
+use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 
 /// Producer: share `dir` read-only. Scans at startup, then rescans whenever
 /// the tree changes and publishes the difference to anyone watching, so a

@@ -18,7 +18,7 @@ a peer with no IP path reach it. The pieces it shares with the browser live else
 | | |
 |---|---|
 | `agent-share-proto` | the wire format — ticket, manifest, framing |
-| `webrtc-transport` | the iroh custom transport (`host` feature here) |
+| `fofoca-iroh-webrtc-transport` | the iroh custom transport (`host` feature here) |
 | `agent-share-wasm-client` | the same protocol, compiled to wasm for `ui/` and `node/` |
 
 See the repository README for the web client and the overall layout.

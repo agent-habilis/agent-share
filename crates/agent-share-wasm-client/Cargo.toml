@@ -5,7 +5,7 @@
 # `cargo task ci`'s default build.
 #
 # Path deps DO cross the boundary, so this still links the very same
-# `agent-share-proto` and `webrtc-transport` the CLI does.
+# `agent-share-proto` and `fofoca-iroh-webrtc-transport` the CLI does.
 [package]
 name = "agent-share-wasm-client"
 version = "0.1.0"
@@ -22,7 +22,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 agent-share-proto = { path = "../agent-share-proto" }
-webrtc-transport = { path = "../webrtc-transport", features = ["web"] }
+fofoca-iroh-webrtc-transport = { path = "../fofoca-iroh-webrtc-transport", features = ["web"] }
 iroh = { version = "1.0.1", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 iroh-base = { version = "1.0.1", default-features = false, features = ["key"] }
 anyhow = "1"

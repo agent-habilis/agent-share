@@ -18,7 +18,7 @@ use std::time::Duration;
 use agent_share_proto::framing::{MOUNT_ALPN, SECRET_LEN, WEBRTC_SIGNAL_ALPN};
 use agent_share_proto::manifest::MountManifest;
 use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr, endpoint::presets};
-use webrtc_transport::{
+use fofoca_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, WebRtcTransport, answer_with,
     custom_addr, offer_with,
 };

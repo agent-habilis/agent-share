@@ -51,7 +51,7 @@ Its HTTP signaling binds `127.0.0.1` (`src/webrtc/mod.rs:63`) — unreachable ac
 internet.
 
 **`SignalEnvelope` and the transport id are already duplicated** between
-`webrtc-transport/src/signaling.rs:24-42` and `webrtc-browser/src/lib.rs:26-46`, with a
+`fofoca-iroh-webrtc-transport/src/signaling.rs:24-42` and `webrtc-browser/src/lib.rs:26-46`, with a
 "keep in lockstep" comment. That is the drift hazard requirement 8 exists to kill.
 
 **[str0m does no candidate gathering](https://docs.rs/str0m/latest/str0m/) and has no TURN
@@ -110,7 +110,7 @@ Browser                                             CLI producer
 ```
 
 Step 4 is exactly the case that works, and is what
-`webrtc-transport/tests/loopback.rs` and `tests/webrtc.rs::swarm_runs_entirely_over_webrtc`
+`fofoca-iroh-webrtc-transport/tests/loopback.rs` and `tests/webrtc.rs::swarm_runs_entirely_over_webrtc`
 already prove.
 
 **The relay is a rendezvous, not a transport.** It carries the SDP exchange and nothing
@@ -150,7 +150,7 @@ crates/agent-share/               the CLI: producer, NFS consumer, WebRTC lane
 crates/agent-share-proto/         wire format — ticket, manifest, framing (wasm-safe)
 crates/agent-share-wasm-client/   wasm cdylib, own [workspace], NOT a member
 crates/agent-habilis-mesh/        vendored gossip engine, `host` feature gates wasm
-crates/webrtc-transport/          one crate: core + `host` (str0m) + `web` (web-sys)
+crates/fofoca-iroh-webrtc-transport/          one crate: core + `host` (str0m) + `web` (web-sys)
 crates/iroh-multihop-transport/   vendored with mesh
 tasks/                            cargo task runner
 ui/                               React + Vite + Bun SPA
@@ -169,7 +169,7 @@ Two keys on the root manifest are load-bearing and easy to lose:
 
 Being excluded, it keeps its own `[workspace]` and therefore its own duplicated
 `[patch.crates-io]` — patches are not inherited across a workspace boundary. Path deps
-*do* cross, so it still links the very same `agent-share-proto` and `webrtc-transport`
+*do* cross, so it still links the very same `agent-share-proto` and `fofoca-iroh-webrtc-transport`
 the CLI does.
 
 The single `.wasm` it produces feeds both front ends, differing only in wasm-bindgen glue:
@@ -181,7 +181,7 @@ The single `.wasm` it produces feeds both front ends, differing only in wasm-bin
 first `cargo build`. str0m and tokio don't target `wasm32`; `web-sys` doesn't exist off
 browser. Both researchers reached this independently.
 
-**Shared** (the crate root of `webrtc-transport`, always compiled, deps: `iroh-base` + serde only):
+**Shared** (the crate root of `fofoca-iroh-webrtc-transport`, always compiled, deps: `iroh-base` + serde only):
 `WEBRTC_TRANSPORT_ID` / `custom_addr()`, `SignalEnvelope` / `SIGNAL_VERSION` /
 `MAX_ENVELOPE_BYTES`, `DATA_CHANNEL_LABEL`, the signal ALPN and one-envelope-each-way
 contract, and the offer/answer sequencing state machine.
@@ -198,11 +198,11 @@ bound would force two signatures and defeat the sharing.
 
 | | CLI producer | CLI consumer | Browser |
 |---|---|---|---|
-| Signal envelope + addr | `webrtc-transport` root | `webrtc-transport` root | `webrtc-transport` root |
+| Signal envelope + addr | `fofoca-iroh-webrtc-transport` root | `fofoca-iroh-webrtc-transport` root | `fofoca-iroh-webrtc-transport` root |
 | Mount wire format | `proto` | `proto` | `proto` |
-| WebRTC backend | `webrtc-transport` (`host`) | `webrtc-transport` (`host`) | `webrtc-transport` (`web`) |
+| WebRTC backend | `fofoca-iroh-webrtc-transport` (`host`) | `fofoca-iroh-webrtc-transport` (`host`) | `fofoca-iroh-webrtc-transport` (`web`) |
 
-`agent-share <🐝…> <mnt>` gains WebRTC by linking the same `webrtc-transport` (`host`) the producer
+`agent-share <🐝…> <mnt>` gains WebRTC by linking the same `fofoca-iroh-webrtc-transport` (`host`) the producer
 does. Since `ByteSource` is already the seam, neither the NFS layer nor the mount logic
 changes.
 
@@ -377,7 +377,7 @@ The relay does rendezvous; the ticket never leaves the client. Deploy `web/dist`
 |---|---|
 | commit | the 21 staged files (rename + ALPN fork) |
 | new | `crates/agent-share-proto/` (from `src/mount/{wire,ticket}.rs`, `src/protocol/**`) |
-| new | `crates/webrtc-transport/` (protocol at the root, `host`/`web` backends) |
+| new | `crates/fofoca-iroh-webrtc-transport/` (protocol at the root, `host`/`web` backends) |
 | new | `crates/agent-share-wasm-client/` (from `webrtc-browser/`, minus the duplicated types) |
 | new | `ui/` React app |
 | edit | `Cargo.toml` — members, iroh bump, `unstable-custom-transports`, `exclude` `ui/` |
@@ -399,13 +399,13 @@ cargo check --target wasm32-unknown-unknown -p agent-share-proto
 
 **The constant is shared, not copied:**
 ```
-grep -rn --include=*.rs "0x5752_5443" crates/   # exactly one hit, in webrtc-transport/src/addr.rs
+grep -rn --include=*.rs "0x5752_5443" crates/   # exactly one hit, in fofoca-iroh-webrtc-transport/src/addr.rs
 grep -rn --include=*.rs "enum SignalEnvelope" crates/  # exactly one hit
 ```
 
 **Transport:**
 ```
-cargo test -p webrtc-transport --features host  # quic_echo_over_webrtc, detach_then_reattach,
+cargo test -p fofoca-iroh-webrtc-transport --features host  # quic_echo_over_webrtc, detach_then_reattach,
                                           # plus a new srflx-in-SDP assertion
 ```
 

@@ -37,7 +37,7 @@ pub(crate) async fn build_endpoint(
     secret_key: Option<SecretKey>,
     bind_port: Option<u16>,
     alpns: Vec<Vec<u8>>,
-    webrtc: Option<webrtc_transport::WebRtcHandle>,
+    webrtc: Option<fofoca_iroh_webrtc_transport::WebRtcHandle>,
 ) -> Result<Endpoint> {
     // A pinned key alone no longer means "beacon": a producer pins one so the
     // WebRTC transport can advertise the same identity the endpoint binds.

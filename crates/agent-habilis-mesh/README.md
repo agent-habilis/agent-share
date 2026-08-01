@@ -52,7 +52,7 @@ itself* differs per target:
 pub struct TransportHandles {
     #[cfg(feature = "host")]
     pub multihop: Option<iroh_multihop_transport::MultihopHandle>,
-    pub webrtc: Option<webrtc_transport::WebRtcHandle>,
+    pub webrtc: Option<fofoca_iroh_webrtc_transport::WebRtcHandle>,
 }
 ```
 

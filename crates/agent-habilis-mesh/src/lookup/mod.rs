@@ -63,7 +63,7 @@ pub struct TransportHandles {
     pub multihop: Option<iroh_multihop_transport::MultihopHandle>,
     /// QUIC over a `WebRTC` data channel. The browser's only way onto the
     /// mesh, and an opportunistic extra path for a native peer.
-    pub webrtc: Option<webrtc_transport::WebRtcHandle>,
+    pub webrtc: Option<fofoca_iroh_webrtc_transport::WebRtcHandle>,
 }
 
 impl TransportHandles {

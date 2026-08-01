@@ -19,7 +19,7 @@ use js_sys::{Array, Reflect, Uint8Array};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use webrtc_transport::{
+use fofoca_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle,
     browser_answer, log_signal_sdps,
 };

@@ -16,7 +16,7 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     cmd!(sh, "cargo test --workspace").quiet().run()?;
     // The host backend is not in the default feature set, so a plain
     // `--workspace` run never touches it.
-    cmd!(sh, "cargo test -p webrtc-transport --features host")
+    cmd!(sh, "cargo test -p fofoca-iroh-webrtc-transport --features host")
         .quiet()
         .run()?;
 
@@ -26,10 +26,10 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     // no useful error, so the de-duplication is worth a test.
     output::status("Checking", "no duplicated wire constants");
     for (needle, owner) in [
-        ("0x5752_5443", "crates/webrtc-transport/src/addr.rs"),
+        ("0x5752_5443", "crates/fofoca-iroh-webrtc-transport/src/addr.rs"),
         (
             "enum SignalEnvelope",
-            "crates/webrtc-transport/src/signaling.rs",
+            "crates/fofoca-iroh-webrtc-transport/src/signaling.rs",
         ),
     ] {
         // Source files only: a README is free to name the constant in prose,
@@ -69,7 +69,7 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         match wasm_clang(sh) {
             Some(clang) => {
                 for args in [
-                    "check --target wasm32-unknown-unknown -p webrtc-transport --features web",
+                    "check --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web",
                     // The engine itself must reach the browser, not merely be
                     // avoidable from it. Without this gate the wasm target rots
                     // on the next edit that reaches for a file or a socket.

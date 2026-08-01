@@ -24,7 +24,7 @@ use agent_share_proto::manifest::MountManifest;
 use agent_share_proto::ticket::MountTicket;
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
-use webrtc_transport::{
+use fofoca_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, WebRtcTransport, custom_addr,
     offer_with,
 };

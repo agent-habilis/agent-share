@@ -21,7 +21,7 @@
 use anyhow::{Context, Result};
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
-use webrtc_transport::{
+use fofoca_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, answer_with, custom_addr,
     offer_with,
 };

@@ -1,4 +1,4 @@
-# webrtc-transport
+# fofoca-iroh-webrtc-transport
 
 An iroh custom transport carrying QUIC datagrams over a WebRTC data channel —
 on the host and in the browser. One data channel per remote peer, one QUIC
@@ -29,8 +29,8 @@ is on by default.
 | backpressure | mpsc queue | `bufferedAmount` |
 
 ```bash
-cargo build -p webrtc-transport --features host
-cargo build -p webrtc-transport --features web --target wasm32-unknown-unknown
+cargo build -p fofoca-iroh-webrtc-transport --features host
+cargo build -p fofoca-iroh-webrtc-transport --features web --target wasm32-unknown-unknown
 ```
 
 In the experiment this was ported from, `SignalEnvelope` and
@@ -66,7 +66,7 @@ LLVM:
 CC=/opt/homebrew/opt/llvm/bin/clang \
 CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang \
 AR=/opt/homebrew/opt/llvm/bin/llvm-ar \
-cargo check -p webrtc-transport --features web --target wasm32-unknown-unknown
+cargo check -p fofoca-iroh-webrtc-transport --features web --target wasm32-unknown-unknown
 ```
 
 `cargo task web-wasm` wraps this.

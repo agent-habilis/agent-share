@@ -40,7 +40,7 @@ path = "src/main.rs"
 agent-share-proto = { path = "../agent-share-proto" }
 # The WebRTC lane. `host` here — the browser client takes the same crate with
 # `web` instead.
-webrtc-transport = { path = "../webrtc-transport", features = ["host"] }
+fofoca-iroh-webrtc-transport = { path = "../fofoca-iroh-webrtc-transport", features = ["host"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 clap = { version = "4", features = ["derive"] }
 anstyle = "1"

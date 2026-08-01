@@ -72,6 +72,7 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "divan",
+ "fofoca-iroh-webrtc-transport",
  "futures-util",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
@@ -94,7 +95,6 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vergen-gitcl 1.0.8",
- "webrtc-transport",
  "x25519-dalek",
  "zeroize",
 ]
@@ -110,6 +110,7 @@ dependencies = [
  "async-trait",
  "bs58",
  "clap",
+ "fofoca-iroh-webrtc-transport",
  "iroh",
  "iroh-mainline-address-lookup",
  "iroh-mdns-address-lookup",
@@ -122,7 +123,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "webrtc-transport",
 ]
 
 [[package]]
@@ -1547,6 +1547,33 @@ name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+
+[[package]]
+name = "fofoca-iroh-webrtc-transport"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "if-addrs",
+ "iroh",
+ "iroh-base",
+ "js-sys",
+ "n0-error",
+ "n0-watcher",
+ "noq-udp",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "str0m",
+ "str0m-aws-lc-rs",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
 
 [[package]]
 name = "foldhash"
@@ -5407,33 +5434,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf85cb06032201fa7c6f829d7db5a7e5aa45bcc0655327713065f6f0576731bf"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "webrtc-transport"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "futures",
- "if-addrs",
- "iroh",
- "iroh-base",
- "js-sys",
- "n0-error",
- "n0-watcher",
- "noq-udp",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "str0m",
- "str0m-aws-lc-rs",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

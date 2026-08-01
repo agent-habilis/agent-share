@@ -20,7 +20,7 @@ use super::nfs::{ByteSource, RemoteFs, TreeIds, build_tree};
 use super::{MAX_MANIFEST_BYTES, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH};
 use super::{MountManifest, ReadStatus};
 use super::{WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
-use webrtc_transport::{IceConfig, WebRtcHandle};
+use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
 
 /// How long to keep retrying the dial while the producer's address propagates
 /// (mDNS is instant on a LAN; the DHT fallback can take tens of seconds).
@@ -47,7 +47,7 @@ pub(crate) async fn attach(
     let mut key_bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
     let key = iroh::SecretKey::from_bytes(&key_bytes);
-    let webrtc = WebRtcHandle::new(webrtc_transport::WebRtcTransport::new(key.public()));
+    let webrtc = WebRtcHandle::new(fofoca_iroh_webrtc_transport::WebRtcTransport::new(key.public()));
     let endpoint = build_endpoint(
         &ticket.lookups,
         Some(key),

@@ -3,7 +3,7 @@ use std::time::Duration;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
-use webrtc_transport::{
+use fofoca_iroh_webrtc_transport::{
     IceConfig, WEBRTC_TRANSPORT_ID, WebRtcTransport, answer_with, custom_addr, offer_with,
 };
 

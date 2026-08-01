@@ -1,7 +1,7 @@
 //! The browser client: read a share over a `WebRTC` data channel.
 //!
 //! No web-specific protocol. This speaks the same `agent-share/mount/1` ALPN
-//! the CLI does, over the same `webrtc-transport`, using the same
+//! the CLI does, over the same `fofoca-iroh-webrtc-transport`, using the same
 //! `agent-share-proto` wire types — the browser is a peer, not a special case.
 //!
 //! # The two-connection dance
@@ -32,7 +32,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 use wasm_bindgen::prelude::*;
 mod produce;
 
-use webrtc_transport::{
+use fofoca_iroh_webrtc_transport::{
     BrowserHubTransport, BrowserSession, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope,
     WebRtcHandle, browser_offer, custom_addr, log_signal_sdps,
 };
