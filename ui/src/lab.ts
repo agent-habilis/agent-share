@@ -11,7 +11,7 @@ function importWasm() {
 }
 
 type WasmModule = Awaited<ReturnType<typeof importWasm>>
-type BenchProducer = InstanceType<WasmModule['BenchProducer']>
+type BenchProducer = Awaited<ReturnType<WasmModule['BenchProducer']['start']>>
 
 let wasmModule: Promise<WasmModule> | null = null
 let producer: BenchProducer | null = null

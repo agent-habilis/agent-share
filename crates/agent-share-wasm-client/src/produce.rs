@@ -1,8 +1,11 @@
 //! In-browser share producer: serve a File System Access tree over WebRTC.
 //!
-//! Snapshot at start (no live watch). The accept loop answers the signal ALPN
-//! (JSEP answerer) and the mount ALPN (manifest / read / watch snapshot).
+//! Live: JS rescans and calls [`ShareProducer::update`]; `OP_WATCH` pushes
+//! full-manifest frames. The accept loop answers the signal ALPN (JSEP
+//! answerer) and the mount ALPN (manifest / read / watch).
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use agent_share_proto::framing::{
@@ -12,12 +15,14 @@ use agent_share_proto::framing::{
     decode_bench_request_prefix,
 };
 use agent_share_proto::lookup::LookupOpts;
-use agent_share_proto::manifest::{DirEntry, FileEntry, MountManifest, ReadStatus};
+use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
 use agent_share_proto::ticket::{MountTicket, TICKET_FLAG_BENCH_RELAY, TICKET_FLAG_BENCH_WEBRTC};
 use fofoca_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle,
     browser_answer, log_signal_sdps,
 };
+use futures::StreamExt as _;
+use futures::channel::mpsc;
 use futures::channel::oneshot;
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, SecretKey};
@@ -25,14 +30,22 @@ use js_sys::{Array, Reflect, Uint8Array};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::File;
+use web_sys::FileSystemFileHandle;
+
+use crate::live_state::LiveState;
+
+struct ProducerShared {
+    state: LiveState<FileSystemFileHandle>,
+    watchers: Vec<mpsc::UnboundedSender<Rc<Vec<u8>>>>,
+}
+
+type Shared = Rc<RefCell<ProducerShared>>;
 
 /// An in-browser share, serving until [`ShareProducer::stop`].
 #[wasm_bindgen]
 pub struct ShareProducer {
     ticket: String,
-    files: u32,
-    bytes: u64,
+    shared: Shared,
     stop_tx: Option<oneshot::Sender<()>>,
     _endpoint: Endpoint,
     hub: Arc<BrowserHubTransport>,
@@ -41,7 +54,7 @@ pub struct ShareProducer {
 #[wasm_bindgen]
 impl ShareProducer {
     /// Start serving a pre-scanned listing from JS:
-    /// `{ dirs: string[], files: { rel_path: string, size: number, file: File }[] }`.
+    /// `{ dirs: string[], files: { rel_path, size, mtime, handle }[] }`.
     ///
     /// # Errors
     /// Bad listing shape, bind failure, or empty tree.
@@ -52,38 +65,15 @@ impl ShareProducer {
             return Err(JsValue::from_str("share is empty"));
         }
 
-        let file_count = u32::try_from(scanned.files.len()).unwrap_or(u32::MAX);
-        let total_bytes: u64 = scanned.files.iter().map(|f| f.size).sum();
-        let manifest = MountManifest {
-            dirs: scanned
-                .dirs
-                .iter()
-                .map(|rel_path| DirEntry {
-                    rel_path: rel_path.clone(),
-                    mode: 0o755,
-                    mtime: 0,
-                })
-                .collect(),
-            files: scanned
-                .files
-                .iter()
-                .map(|f| FileEntry {
-                    rel_path: f.rel_path.clone(),
-                    size: f.size,
-                    mode: 0o644,
-                    mtime: 0,
-                })
-                .collect(),
-        };
-        let encoded = manifest.encode();
-        if encoded.len() > MAX_MANIFEST_BYTES as usize {
+        let state = LiveState::new(scanned.dirs, scanned.files);
+        if state.encoded().len() > MAX_MANIFEST_BYTES as usize {
             return Err(JsValue::from_str("tree too large to serve"));
         }
 
-        let tree = Arc::new(ServeTree {
-            manifest_bytes: encoded,
-            files: scanned.files,
-        });
+        let shared: Shared = Rc::new(RefCell::new(ProducerShared {
+            state,
+            watchers: Vec::new(),
+        }));
 
         let key = SecretKey::generate();
         let local = key.public();
@@ -106,9 +96,9 @@ impl ShareProducer {
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let accept_endpoint = endpoint.clone();
         let accept_hub = Arc::clone(&hub);
-        let accept_tree = Arc::clone(&tree);
+        let accept_shared = Rc::clone(&shared);
         wasm_bindgen_futures::spawn_local(async move {
-            accept_loop(accept_endpoint, accept_hub, secret, accept_tree, stop_rx).await;
+            accept_loop(accept_endpoint, accept_hub, secret, accept_shared, stop_rx).await;
         });
 
         // Ticket must carry a relay URL — the browser consumer has no mdns/dht
@@ -124,12 +114,42 @@ impl ShareProducer {
 
         Ok(ShareProducer {
             ticket: ticket_str,
-            files: file_count,
-            bytes: total_bytes,
+            shared,
             stop_tx: Some(stop_tx),
             _endpoint: endpoint,
             hub,
         })
+    }
+
+    /// Fold a fresh directory listing into the live tree and notify watchers.
+    ///
+    /// Sync on purpose: no awaits ⇒ atomic with respect to reads and watch
+    /// registration. Oversized encodings are refused; the previous tree stays.
+    ///
+    /// # Errors
+    /// Bad listing shape.
+    pub fn update(&self, listing: JsValue) -> Result<(), JsValue> {
+        let scanned = parse_listing(&listing)?;
+        let mut shared = self.shared.borrow_mut();
+        let previous = shared.state.snapshot();
+        if !shared.state.apply(scanned.dirs, scanned.files) {
+            return Ok(());
+        }
+        if shared.state.encoded().len() > MAX_MANIFEST_BYTES as usize {
+            web_sys::console::warn_1(&JsValue::from_str(
+                "[share] rescan exceeded MAX_MANIFEST_BYTES; keeping previous tree",
+            ));
+            shared.state.restore(previous);
+            return Ok(());
+        }
+        let mut frame = Vec::with_capacity(1 + shared.state.encoded().len());
+        frame.push(WATCH_FRAME_MANIFEST);
+        frame.extend_from_slice(shared.state.encoded());
+        let frame = Rc::new(frame);
+        shared
+            .watchers
+            .retain(|tx| tx.unbounded_send(Rc::clone(&frame)).is_ok());
+        Ok(())
     }
 
     #[wasm_bindgen(getter)]
@@ -144,12 +164,12 @@ impl ShareProducer {
 
     #[wasm_bindgen(getter)]
     pub fn files(&self) -> u32 {
-        self.files
+        self.shared.borrow().state.live_counts().0
     }
 
     #[wasm_bindgen(getter)]
     pub fn bytes(&self) -> u64 {
-        self.bytes
+        self.shared.borrow().state.live_counts().1
     }
 
     /// Stop accepting peers. Idempotent.
@@ -397,20 +417,9 @@ async fn serve_bench_stream(
     Ok(())
 }
 
-struct ServeFile {
-    rel_path: String,
-    size: u64,
-    file: File,
-}
-
 struct Scanned {
-    dirs: Vec<String>,
-    files: Vec<ServeFile>,
-}
-
-struct ServeTree {
-    manifest_bytes: Vec<u8>,
-    files: Vec<ServeFile>,
+    dirs: Vec<DirEntry>,
+    files: Vec<(FileEntry, FileSystemFileHandle)>,
 }
 
 fn parse_listing(listing: &JsValue) -> Result<Scanned, JsValue> {
@@ -434,7 +443,11 @@ fn parse_listing(listing: &JsValue) -> Result<Scanned, JsValue> {
         if !safe_rel_path(&path) {
             continue;
         }
-        dirs.push(path);
+        dirs.push(DirEntry {
+            rel_path: path,
+            mode: 0o755,
+            mtime: 0,
+        });
     }
 
     let mut files = Vec::new();
@@ -451,16 +464,24 @@ fn parse_listing(listing: &JsValue) -> Result<Scanned, JsValue> {
             .ok()
             .and_then(|v| v.as_f64())
             .ok_or_else(|| JsValue::from_str("file.size missing"))? as u64;
-        let file_val = Reflect::get(&entry, &JsValue::from_str("file"))
-            .map_err(|error| js_err("file.file", error))?;
-        let file: File = file_val
+        let mtime = Reflect::get(&entry, &JsValue::from_str("mtime"))
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as i64;
+        let handle_val = Reflect::get(&entry, &JsValue::from_str("handle"))
+            .map_err(|error| js_err("file.handle", error))?;
+        let handle: FileSystemFileHandle = handle_val
             .dyn_into()
-            .map_err(|_| JsValue::from_str("file.file must be a File"))?;
-        files.push(ServeFile {
-            rel_path,
-            size,
-            file,
-        });
+            .map_err(|_| JsValue::from_str("file.handle must be a FileSystemFileHandle"))?;
+        files.push((
+            FileEntry {
+                rel_path,
+                size,
+                mode: 0o644,
+                mtime,
+            },
+            handle,
+        ));
     }
     Ok(Scanned { dirs, files })
 }
@@ -477,7 +498,7 @@ async fn accept_loop(
     endpoint: Endpoint,
     hub: Arc<BrowserHubTransport>,
     secret: [u8; SECRET_LEN],
-    tree: Arc<ServeTree>,
+    shared: Shared,
     mut stop_rx: oneshot::Receiver<()>,
 ) {
     loop {
@@ -487,10 +508,10 @@ async fn accept_loop(
             futures::future::Either::Left((None, _)) => break,
             futures::future::Either::Left((Some(incoming), _)) => {
                 let hub = Arc::clone(&hub);
-                let tree = Arc::clone(&tree);
+                let shared = Rc::clone(&shared);
                 let local = endpoint.id();
                 wasm_bindgen_futures::spawn_local(async move {
-                    if let Err(error) = accept_one(incoming, local, &hub, secret, &tree).await {
+                    if let Err(error) = accept_one(incoming, local, &hub, secret, shared).await {
                         web_sys::console::error_1(&error);
                     }
                 });
@@ -504,7 +525,7 @@ async fn accept_one(
     local: iroh::EndpointId,
     hub: &BrowserHubTransport,
     secret: [u8; SECRET_LEN],
-    tree: &ServeTree,
+    shared: Shared,
 ) -> Result<(), JsValue> {
     let conn = incoming
         .await
@@ -512,7 +533,7 @@ async fn accept_one(
     if conn.alpn() == WEBRTC_SIGNAL_ALPN {
         return serve_signal(&conn, local, hub).await;
     }
-    serve_mount(conn, secret, tree).await
+    serve_mount(conn, secret, shared).await
 }
 
 async fn serve_signal(
@@ -550,14 +571,13 @@ async fn serve_signal(
 async fn serve_mount(
     conn: Connection,
     secret: [u8; SECRET_LEN],
-    tree: &ServeTree,
+    shared: Shared,
 ) -> Result<(), JsValue> {
     while let Ok((send, recv)) = conn.accept_bi().await {
         let conn = conn.clone();
-        let tree_manifest = tree.manifest_bytes.clone();
-        let files = tree.files.clone();
+        let shared = Rc::clone(&shared);
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = serve_stream(&conn, send, recv, &secret, &tree_manifest, &files).await;
+            let _ = serve_stream(&conn, send, recv, &secret, shared).await;
         });
     }
     Ok(())
@@ -568,8 +588,7 @@ async fn serve_stream(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     secret: &[u8; SECRET_LEN],
-    manifest_bytes: &[u8],
-    files: &[ServeFile],
+    shared: Shared,
 ) -> Result<(), JsValue> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
     if recv.read_exact(&mut header).await.is_err() {
@@ -581,36 +600,30 @@ async fn serve_stream(
     }
     match header[SECRET_LEN] {
         OP_MANIFEST => {
-            send.write_all(&[ReadStatus::Ok.to_byte()])
-                .await
-                .map_err(|error| err("write status", &error))?;
-            let len = u32::try_from(manifest_bytes.len())
-                .map_err(|_| JsValue::from_str("manifest too large"))?;
-            send.write_all(&len.to_le_bytes())
-                .await
-                .map_err(|error| err("write len", &error))?;
-            send.write_all(manifest_bytes)
-                .await
-                .map_err(|error| err("write manifest", &error))?;
+            let manifest_bytes = {
+                let borrowed = shared.borrow();
+                borrowed.state.encoded().to_vec()
+            };
+            write_ok_body(&mut send, &manifest_bytes).await?;
         }
         OP_WATCH => {
-            // MVP: one snapshot frame (same opening shape as native), then idle.
-            let mut frame = Vec::with_capacity(1 + manifest_bytes.len());
-            frame.push(WATCH_FRAME_MANIFEST);
-            frame.extend_from_slice(manifest_bytes);
-            send.write_all(&[ReadStatus::Ok.to_byte()])
-                .await
-                .map_err(|error| err("write status", &error))?;
-            let len = u32::try_from(frame.len())
-                .map_err(|_| JsValue::from_str("watch frame too large"))?;
-            send.write_all(&len.to_le_bytes())
-                .await
-                .map_err(|error| err("write len", &error))?;
-            send.write_all(&frame)
-                .await
-                .map_err(|error| err("write watch frame", &error))?;
-            // Keep the stream open; native would push deltas here.
-            std::future::pending::<()>().await;
+            let (tx, mut rx) = mpsc::unbounded::<Rc<Vec<u8>>>();
+            let opening = {
+                let mut borrowed = shared.borrow_mut();
+                borrowed.watchers.push(tx);
+                let mut frame = Vec::with_capacity(1 + borrowed.state.encoded().len());
+                frame.push(WATCH_FRAME_MANIFEST);
+                frame.extend_from_slice(borrowed.state.encoded());
+                frame
+            };
+            if write_watch_frame(&mut send, &opening).await.is_err() {
+                return Ok(());
+            }
+            while let Some(frame) = rx.next().await {
+                if write_watch_frame(&mut send, &frame).await.is_err() {
+                    break;
+                }
+            }
             return Ok(());
         }
         OP_READ => {
@@ -621,7 +634,7 @@ async fn serve_stream(
             let index = u32::from_le_bytes(request[..4].try_into().expect("4"));
             let offset = u64::from_le_bytes(request[4..12].try_into().expect("8"));
             let len = u32::from_le_bytes(request[12..].try_into().expect("4"));
-            let (status, data) = answer_read(files, index, offset, len).await;
+            let (status, data) = answer_read(&shared, index, offset, len).await;
             send.write_all(&[status.to_byte()])
                 .await
                 .map_err(|error| err("write status", &error))?;
@@ -639,8 +652,33 @@ async fn serve_stream(
     Ok(())
 }
 
+async fn write_ok_body(
+    send: &mut iroh::endpoint::SendStream,
+    body: &[u8],
+) -> Result<(), JsValue> {
+    send.write_all(&[ReadStatus::Ok.to_byte()])
+        .await
+        .map_err(|error| err("write status", &error))?;
+    let len = u32::try_from(body.len()).map_err(|_| JsValue::from_str("body too large"))?;
+    send.write_all(&len.to_le_bytes())
+        .await
+        .map_err(|error| err("write len", &error))?;
+    send.write_all(body)
+        .await
+        .map_err(|error| err("write body", &error))?;
+    Ok(())
+}
+
+/// Every watch frame: `status(Ok) ‖ len(u32 LE) ‖ frame`, matching native.
+async fn write_watch_frame(
+    send: &mut iroh::endpoint::SendStream,
+    frame: &[u8],
+) -> Result<(), JsValue> {
+    write_ok_body(send, frame).await
+}
+
 async fn answer_read(
-    files: &[ServeFile],
+    shared: &Shared,
     index: u32,
     offset: u64,
     len: u32,
@@ -648,24 +686,52 @@ async fn answer_read(
     if len > MAX_READ_LEN {
         return (ReadStatus::LenOverCap, Vec::new());
     }
-    let Some(file) = files.get(index as usize) else {
-        return (ReadStatus::BadIndex, Vec::new());
+
+    let handle = {
+        let borrowed = shared.borrow();
+        match borrowed.state.slot(index) {
+            Some(handle) => handle.clone(),
+            None => return (ReadStatus::BadIndex, Vec::new()),
+        }
     };
-    let live = file.file.size() as u64;
+
+    match read_from_handle(&handle, offset, len).await {
+        Ok(bytes) => (ReadStatus::Ok, bytes),
+        Err(()) => {
+            // An update may have installed a fresh handle; retry once.
+            let handle = {
+                let borrowed = shared.borrow();
+                match borrowed.state.slot(index) {
+                    Some(handle) => handle.clone(),
+                    None => return (ReadStatus::BadIndex, Vec::new()),
+                }
+            };
+            match read_from_handle(&handle, offset, len).await {
+                Ok(bytes) => (ReadStatus::Ok, bytes),
+                Err(()) => (ReadStatus::Io, Vec::new()),
+            }
+        }
+    }
+}
+
+async fn read_from_handle(
+    handle: &FileSystemFileHandle,
+    offset: u64,
+    len: u32,
+) -> Result<Vec<u8>, ()> {
+    let file = JsFuture::from(handle.get_file()).await.map_err(|_| ())?;
+    let file: web_sys::File = file.dyn_into().map_err(|_| ())?;
+    let live = file.size() as u64;
     let want = (len as u64).min(live.saturating_sub(offset));
     if want == 0 {
-        return (ReadStatus::Ok, Vec::new());
+        return Ok(Vec::new());
     }
     let end = offset + want;
-    let blob = file.file.slice_with_f64_and_f64(offset as f64, end as f64);
-    let Ok(blob) = blob else {
-        return (ReadStatus::Io, Vec::new());
-    };
-    let Ok(buffer) = JsFuture::from(blob.array_buffer()).await else {
-        return (ReadStatus::Io, Vec::new());
-    };
-    let bytes = Uint8Array::new(&buffer).to_vec();
-    (ReadStatus::Ok, bytes)
+    let blob = file
+        .slice_with_f64_and_f64(offset as f64, end as f64)
+        .map_err(|_| ())?;
+    let buffer = JsFuture::from(blob.array_buffer()).await.map_err(|_| ())?;
+    Ok(Uint8Array::new(&buffer).to_vec())
 }
 
 fn err(context: &str, error: &impl std::fmt::Display) -> JsValue {
@@ -696,13 +762,3 @@ async fn wait_until_dialable(endpoint: &Endpoint) -> Result<(), JsValue> {
     Ok(())
 }
 
-// ServeFile needs Clone for spawn_local copies — File is cloneable via clone().
-impl Clone for ServeFile {
-    fn clone(&self) -> Self {
-        Self {
-            rel_path: self.rel_path.clone(),
-            size: self.size,
-            file: self.file.clone(),
-        }
-    }
-}

@@ -182,11 +182,22 @@ export async function syncMount(
   let done = 0
   onProgress?.({ done, total })
 
+  let writeFailures = 0
   for (const file of toWrite) {
-    await writeFile(root, reader, file, (n) => {
-      done += n
-      onProgress?.({ done, total })
-    })
+    try {
+      await writeFile(root, reader, file, (n) => {
+        done += n
+        onProgress?.({ done, total })
+      })
+    } catch (error) {
+      writeFailures += 1
+      console.warn(`[share] failed to sync ${file.path}; will retry`, error)
+      // Omit so the next pass treats it as still needing a write.
+      nextFiles.delete(file.path)
+    }
+  }
+  if (toWrite.length > 0 && writeFailures === toWrite.length) {
+    throw new MountError('Mount sync failed for every file in this batch')
   }
 
   // Delete files that disappeared, deepest paths first so parents can go next.

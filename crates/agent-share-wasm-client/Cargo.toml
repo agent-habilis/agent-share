@@ -40,6 +40,8 @@ web-sys = { version = "0.3", features = [
     "File",
     "Blob",
     "console",
+    "FileSystemHandle",
+    "FileSystemFileHandle",
 ] }
 # Both generations that reach wasm need their browser backend switched on.
 # 0.3+ additionally needs the `getrandom_backend` rustflag — see

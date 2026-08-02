@@ -40,6 +40,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+mod live_state;
 mod produce;
 mod transport_mode;
 
@@ -138,52 +139,22 @@ impl ShareClient {
     /// back.
     ///
     /// # Errors
-    /// Opening the stream fails. Failures *after* that end the subscription
-    /// quietly, since there is no caller left to return them to.
+    /// Never: the subscription runs in the background. Stream failures retry
+    /// every 3s while the connection is alive; a clean zero-frame end means
+    /// the producer does not support live watch and the loop stops.
     pub async fn watch(&self, on_manifest: js_sys::Function) -> Result<(), JsValue> {
-        let (mut send, mut recv) = self
-            .connection
-            .open_bi()
-            .await
-            .map_err(|error| err("open watch stream", &error))?;
-        send.write_all(&framing::encode_watch_request(&self.secret))
-            .await
-            .map_err(|error| err("send watch request", &error))?;
-        send.finish().map_err(|error| err("finish", &error))?;
-
+        let conn = self.connection.clone();
+        let secret = self.secret;
         wasm_bindgen_futures::spawn_local(async move {
-            let mut manifest = MountManifest::default();
             loop {
-                // A clean end is the normal way out: the share went away, or
-                // the producer predates the op and dropped the stream.
-                let Ok(len) = read_header(&mut recv, MAX_MANIFEST_BYTES).await else {
-                    return;
-                };
-                let mut body = vec![0u8; len as usize];
-                if recv.read_exact(&mut body).await.is_err() {
-                    return;
-                }
-                let Some((kind, payload)) = body.split_first() else {
-                    return;
-                };
-                let applied = match *kind {
-                    framing::WATCH_FRAME_MANIFEST => {
-                        MountManifest::decode(payload).map(|fresh| manifest = fresh)
+                match follow_watch(&conn, &secret, &on_manifest).await {
+                    WatchEnd::Unsupported => return,
+                    WatchEnd::Retryable => {
+                        if conn.close_reason().is_some() {
+                            return;
+                        }
+                        wait_ms(3_000).await;
                     }
-                    framing::WATCH_FRAME_DELTA => {
-                        ManifestDelta::decode(payload).map(|delta| manifest.apply(&delta))
-                    }
-                    _ => return,
-                };
-                if applied.is_err() {
-                    return;
-                }
-                let Ok(value) = serde_wasm(&manifest) else {
-                    return;
-                };
-                if on_manifest.call1(&JsValue::NULL, &value).is_err() {
-                    // The subscriber threw; stop rather than loop on it.
-                    return;
                 }
             }
         });
@@ -591,6 +562,75 @@ async fn ensure_relay_selected(conn: &Connection) -> Result<(), JsValue> {
             )));
         }
         wait_ms(50).await;
+    }
+}
+
+enum WatchEnd {
+    /// Clean stream end before any frame — producer does not do live watch.
+    Unsupported,
+    /// Mid-stream error; retry on the same connection if it is still open.
+    Retryable,
+}
+
+/// One OP_WATCH attempt: open a bi-stream, send the request, apply frames.
+async fn follow_watch(
+    conn: &Connection,
+    secret: &[u8; SECRET_LEN],
+    on_manifest: &js_sys::Function,
+) -> WatchEnd {
+    let Ok((mut send, mut recv)) = conn.open_bi().await else {
+        return WatchEnd::Retryable;
+    };
+    if send
+        .write_all(&framing::encode_watch_request(secret))
+        .await
+        .is_err()
+    {
+        return WatchEnd::Retryable;
+    }
+    if send.finish().is_err() {
+        return WatchEnd::Retryable;
+    }
+
+    let mut manifest = MountManifest::default();
+    let mut saw_frame = false;
+    loop {
+        let Ok(len) = read_header(&mut recv, MAX_MANIFEST_BYTES).await else {
+            return if saw_frame {
+                WatchEnd::Retryable
+            } else {
+                WatchEnd::Unsupported
+            };
+        };
+        let mut body = vec![0u8; len as usize];
+        if recv.read_exact(&mut body).await.is_err() {
+            return WatchEnd::Retryable;
+        }
+        let Some((kind, payload)) = body.split_first() else {
+            return WatchEnd::Retryable;
+        };
+        let applied = match *kind {
+            framing::WATCH_FRAME_MANIFEST => {
+                MountManifest::decode(payload).map(|fresh| manifest = fresh)
+            }
+            framing::WATCH_FRAME_DELTA => {
+                ManifestDelta::decode(payload).map(|delta| manifest.apply(&delta))
+            }
+            _ => return WatchEnd::Retryable,
+        };
+        if applied.is_err() {
+            return WatchEnd::Retryable;
+        }
+        saw_frame = true;
+        let Ok(value) = serde_wasm(&manifest) else {
+            return WatchEnd::Retryable;
+        };
+        if on_manifest.call1(&JsValue::NULL, &value).is_err() {
+            web_sys::console::warn_1(&JsValue::from_str(
+                "[share] watch callback threw; continuing subscription",
+            ));
+            continue;
+        }
     }
 }
 
