@@ -6,7 +6,7 @@
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
@@ -19,6 +19,7 @@ use crate::lookup::add_peer_addr;
 use crate::protocol::identity;
 use crate::protocol::message::MessageBody;
 use crate::protocol::{Channel, Message, MessageKind, Nickname};
+use crate::util::clock::Instant;
 use crate::util::tuning::RECLAIM_WINDOW_SECS;
 
 use super::app::{AppClass, InboundApp, NodeApp};
@@ -381,7 +382,7 @@ pub(crate) async fn ingest(
             {
                 round
                     .pongs
-                    .insert(message.author.clone(), tokio::time::Instant::now());
+                    .insert(message.author.clone(), n0_future::time::Instant::now());
             }
             return;
         }
@@ -1092,6 +1093,10 @@ async fn handle_peer_info(
     // and *asks* the gossip actor to graft it. Until the link
     // materializes, each post-cooldown re-receipt retries the dial —
     // the healer's per-peer backstop.
+    // Negotiate a direct WebRTC session alongside the graft, never in front of
+    // it. Blocking the graft on the session deadlocks mesh formation — see the
+    // note on `negotiate_session`.
+    crate::transport::webrtc::negotiate_session(state, ctx, peer_id, peer_addr.clone());
     if !defer_first_dial
         && state.linked_endpoints.len() < ctx.max_peers
         && !state.linked_endpoints.contains(&peer_id)

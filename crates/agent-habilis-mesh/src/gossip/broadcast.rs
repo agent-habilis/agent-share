@@ -253,7 +253,7 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
         let pool = state.unicast_pool.clone();
         let endpoint_id = *endpoint_id;
         let bytes = bytes.clone();
-        tokio::spawn(async move {
+        n0_future::task::spawn(async move {
             if let Err(error) = pool.dial_and_send(endpoint_id, bytes).await {
                 tracing::debug!(target: "agent_habilis_mesh::gossip", %error, "unicast farewell mirror failed");
             }

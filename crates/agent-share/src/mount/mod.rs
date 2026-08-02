@@ -1,6 +1,8 @@
 mod bench;
 mod consume;
+mod handlers;
 mod live;
+mod mesh;
 mod nfs;
 mod produce;
 mod scan;
@@ -225,10 +227,9 @@ mod tests {
             lookups: LookupOpts::loopback(),
             flags: 0,
         };
-        let bad_endpoint =
-            build_endpoint(&bad_ticket.lookups, None, None, Vec::new(), None, false)
-                .await
-                .expect("bad-client endpoint");
+        let bad_endpoint = build_endpoint(&bad_ticket.lookups, None, None, Vec::new(), None, false)
+            .await
+            .expect("bad-client endpoint");
         add_peer_addr(&bad_endpoint, bad_ticket.addr.clone()).expect("add peer addr");
         let bad = RemoteClient::new(bad_endpoint, bad_ticket);
         assert!(bad.fetch_manifest().await.is_err(), "bad secret must fail");

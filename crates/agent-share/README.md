@@ -4,9 +4,9 @@ The CLI: share a directory read-only over iroh QUIC, or consume one.
 
 - **Produce** — `agent-share serve <dir>` scans the tree once (metadata only) and
   serves file bytes on demand, printing a `🐝…` bearer ticket.
-- **Consume** — `agent-share <🐝…> <mountpoint>` mounts it through a loopback NFSv3
-  bridge, so the OS's own NFS client does the filesystem work. No FUSE, no kernel
-  extension, no daemon.
+- **Consume** — `agent-share <🐝…> <target>` creates `agent-share-…/` under the
+  target and mounts through a loopback NFSv3 bridge, so the OS's own NFS client
+  does the filesystem work. No FUSE, no kernel extension, no daemon.
 
 Reads are lazy and ranged: only the bytes a reader touches cross the network.
 

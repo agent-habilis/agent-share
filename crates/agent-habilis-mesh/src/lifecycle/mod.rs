@@ -10,8 +10,6 @@
 pub(crate) mod heartbeat;
 pub(crate) mod membership;
 
-use std::time::Instant;
-
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::app::NodeApp;
@@ -19,6 +17,7 @@ use crate::gossip::event::NodeEvent;
 use crate::protocol::{Message, MessageKind, PresenceSubtype};
 
 use crate::gossip;
+use crate::util::clock::Instant;
 
 /// Developer log for the mesh-ready milestone. Mirrors the operator
 /// `ready` event but on the lifecycle log target (stderr, opt-in via

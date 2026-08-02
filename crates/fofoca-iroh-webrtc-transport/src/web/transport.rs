@@ -211,6 +211,28 @@ impl BrowserHubTransport {
         Ok(())
     }
 
+    /// Whether a live session for `remote` exists.
+    ///
+    /// The mirror of `WebRtcTransport::has_session` on the host side. A session
+    /// manager needs this to answer "have I already negotiated with this peer?"
+    /// without attempting a duplicate `attach` and reading the error.
+    #[must_use]
+    pub fn has_session(&self, remote: &EndpointId) -> bool {
+        self.sessions
+            .lock()
+            .expect("browser hub session map poisoned")
+            .contains_key(remote)
+    }
+
+    /// How many live sessions this hub holds — the tab's direct-peer count.
+    #[must_use]
+    pub fn session_count(&self) -> usize {
+        self.sessions
+            .lock()
+            .expect("browser hub session map poisoned")
+            .len()
+    }
+
     /// Tear down the session for `remote`, if any.
     pub fn detach(&self, remote: &EndpointId) -> bool {
         self.sessions

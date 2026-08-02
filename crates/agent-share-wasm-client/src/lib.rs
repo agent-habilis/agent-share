@@ -41,15 +41,27 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 mod live_state;
+mod mesh;
 mod produce;
 mod transport_mode;
 
+pub use mesh::MeshPeer;
 pub use transport_mode::TransportMode;
 
 use fofoca_iroh_webrtc_transport::{
     BrowserHubTransport, BrowserSession, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope,
     WebRtcHandle, browser_offer, custom_addr, log_signal_sdps,
 };
+
+/// The endpoint the mount rides, offered to the mesh so both share one hub.
+///
+/// Only present on the WebRTC path. On the relay path there is no hub to share,
+/// so the mesh builds its own endpoint as before — one identity is the goal, but
+/// a relay-only viewer has no WebRTC sessions to miscount anyway.
+struct MeshEndpoint {
+    endpoint: Endpoint,
+    webrtc: WebRtcHandle,
+}
 
 /// A connected share, ready to list and read.
 #[wasm_bindgen]
@@ -62,6 +74,14 @@ pub struct ShareClient {
     _hub: Option<Arc<BrowserHubTransport>>,
     _session: Option<BrowserSession>,
     _endpoint: Endpoint,
+    /// Handed to the mesh so the mount session and every mesh session land in
+    /// one hub, under one identity. Taken at `connect`.
+    mesh_endpoint: Option<MeshEndpoint>,
+    /// This tab's membership in the share's mesh — the thing that makes two
+    /// viewers of one share peers rather than strangers. `None` when the mesh
+    /// could not be joined; the share itself still works, so this is never
+    /// allowed to fail a connect.
+    mesh: Option<mesh::MeshPeer>,
 }
 
 #[wasm_bindgen]
@@ -84,13 +104,84 @@ impl ShareClient {
         let mode = TransportMode::parse(transport.as_deref())
             .map_err(|message| JsValue::from_str(&message))?;
         let ticket = MountTicket::decode(&ticket).map_err(|error| err("decode ticket", &error))?;
-        match mode {
+        let secret = ticket.secret;
+        let mut client = match mode {
             TransportMode::Relay => connect_relay(ticket).await,
             TransportMode::WebRtc => connect_webrtc(ticket, /*allow_relay_fallback=*/ false).await,
             TransportMode::Dynamic => {
                 connect_webrtc(ticket, /*allow_relay_fallback=*/ true).await
             }
+        }?;
+        // Join the share's mesh so this tab can see — and hold direct sessions
+        // with — the other people viewing the same share. Strictly additive:
+        // a mesh that will not start costs the peer counts and nothing else,
+        // so it must never turn a working share into a failed connect.
+        let shared = client
+            .mesh_endpoint
+            .take()
+            .map(|shared| (shared.endpoint, shared.webrtc));
+        match mesh::MeshPeer::join_share(&secret, shared).await {
+            Ok(peer) => client.mesh = Some(peer),
+            Err(error) => {
+                web_sys::console::warn_1(&JsValue::from_str(&format!(
+                    "[share] mesh unavailable; peer counts disabled: {error:?}"
+                )));
+            }
         }
+        Ok(client)
+    }
+
+    /// Members on this share's mesh, including us. `0` when the mesh is not up.
+    #[must_use]
+    #[wasm_bindgen(getter)]
+    pub fn peers_gossip(&self) -> u32 {
+        self.mesh.as_ref().map_or(0, mesh::MeshPeer::peers_gossip)
+    }
+
+    /// Peers we hold a direct `WebRTC` data channel with, on the share's mesh.
+    /// Distinct from the mount connection to the producer, which is not a mesh
+    /// session and is not counted here.
+    #[must_use]
+    #[wasm_bindgen(getter)]
+    pub fn peers_direct(&self) -> u32 {
+        self.mesh.as_ref().map_or(0, mesh::MeshPeer::peers_direct)
+    }
+
+    /// The direct-session ceiling this tab negotiates up to.
+    #[must_use]
+    #[wasm_bindgen(getter)]
+    pub fn max_direct(&self) -> u32 {
+        self.mesh.as_ref().map_or(0, mesh::MeshPeer::max_direct)
+    }
+
+    /// Leave the share's mesh, announcing departure so peers drop us now.
+    ///
+    /// Fire-and-forget, and deliberately not `async`: a `pagehide` handler
+    /// cannot await.
+    ///
+    /// # This does not help on tab close — measured
+    ///
+    /// Closing a tab and watching a peer's roster for 35s: the member count
+    /// does **not** drop. The spawned `Left` broadcast never gets to run,
+    /// because the JS context is torn down before the microtask queue is
+    /// drained. Departure still waits for the silence sweeper.
+    ///
+    /// It *is* effective on the in-page path — a ticket change unmounts the
+    /// session while the page lives on, so the broadcast completes normally.
+    /// That is the case this method actually earns its keep in.
+    ///
+    /// Making tab-close prompt needs a synchronous departure signal, which the
+    /// engine does not currently have: something the browser can emit during
+    /// unload (a `sendBeacon`-shaped path, or a relay-side hint), not an async
+    /// gossip broadcast. Note the *direct* count is unaffected by any of this —
+    /// the data channel closes immediately and `peers_direct` drops at once.
+    pub fn leave_mesh(&mut self) {
+        let Some(peer) = self.mesh.take() else {
+            return;
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = peer.leave().await;
+        });
     }
 
     /// Which path carries mount data: `"webrtc"` or `"relay"`.
@@ -457,8 +548,10 @@ async fn connect_relay(ticket: MountTicket) -> Result<ShareClient, JsValue> {
         secret: ticket.secret,
         data_path: "relay".to_owned(),
         _hub: None,
+        mesh_endpoint: None,
         _session: None,
         _endpoint: endpoint,
+        mesh: None,
     })
 }
 
@@ -494,16 +587,15 @@ async fn connect_relay_only(ticket: MountTicket) -> Result<ShareClient, JsValue>
         secret: ticket.secret,
         data_path: "relay".to_owned(),
         _hub: None,
+        mesh_endpoint: None,
         _session: None,
         _endpoint: endpoint,
+        mesh: None,
     })
 }
 
 /// Retry dial for up to 90s (same policy as the native bench consumer).
-async fn dial_with_retry(
-    endpoint: &Endpoint,
-    addr: EndpointAddr,
-) -> Result<Connection, JsValue> {
+async fn dial_with_retry(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection, JsValue> {
     let deadline = now_ms() + 90_000.0;
     loop {
         match endpoint.connect(addr.clone(), MOUNT_ALPN).await {
@@ -651,70 +743,93 @@ async fn connect_webrtc(
     let producer = ticket.addr.id;
     ensure_reachable_addr(&ticket.addr)?;
 
-    // One key, two endpoints. A custom transport can only be registered at
-    // build time, and the transport itself does not exist until the JSEP
-    // exchange has produced a session — which needs an endpoint to happen
-    // over. Keep the signaller alive until WebRTC succeeds (or fallback dials)
-    // so `dynamic` can reuse it for the iroh path.
+    // **One** endpoint, not two.
+    //
+    // The old shape bound a `signaller` for JSEP and a separate
+    // `data_endpoint` for the mount, on the theory that a custom transport must
+    // be registered at build time while the session does not exist until JSEP
+    // has run. That reasoning conflates the *hub* with a *session*: the hub is
+    // built here, empty, and registered at build time; sessions are attached to
+    // it later. The browser producer has always done exactly this
+    // (`produce.rs`), so one endpoint serves both roles.
+    //
+    // Collapsing them is what makes the peer count honest. Two endpoints meant
+    // two identities and two hubs, so the mount session lived in a hub the mesh
+    // counter never read — a tab showed `0 direct` while happily streaming
+    // files over a direct channel.
     let key = SecretKey::generate();
     let local = key.public();
     let hub = BrowserHubTransport::new(local);
+    let handle = WebRtcHandle::new(Arc::clone(&hub));
 
-    let signaller = Endpoint::builder(presets::Minimal)
-        .secret_key(key.clone())
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .secret_key(key)
         .relay_mode(relay_mode(&ticket))
+        .add_custom_transport(handle.transport())
         .bind()
         .await
-        .map_err(|error| err("bind signalling endpoint", &error))?;
+        .map_err(|error| err("bind endpoint", &error))?;
 
-    let session = match negotiate(&signaller, ticket.addr.clone(), local, &hub).await {
+    let session = match negotiate(&endpoint, ticket.addr.clone(), local, &hub).await {
         Ok(session) => session,
         Err(error) if allow_relay_fallback => {
             web_sys::console::warn_1(&JsValue::from_str(&format!(
                 "[agent-share] WebRTC signal/ICE failed ({error:?}); falling back to iroh relay/IP"
             )));
-            return finish_relay_fallback(signaller, ticket).await;
+            return finish_relay_fallback(endpoint, ticket).await;
         }
         Err(error) => {
-            signaller.close().await;
+            endpoint.close().await;
             return Err(error);
         }
     };
 
-    let handle = WebRtcHandle::new(Arc::clone(&hub));
-    let data_endpoint = Endpoint::builder(presets::Minimal)
-        .secret_key(key)
-        .relay_mode(RelayMode::Disabled)
-        .add_custom_transport(handle.transport())
-        .bind()
-        .await
-        .map_err(|error| err("bind data endpoint", &error))?;
-
+    // The address lists *only* the WebRTC path, so the Initial fans out over
+    // the data channel. With one endpoint the relay is still registered, which
+    // is why the selected path is checked below rather than assumed — the old
+    // `RelayMode::Disabled` on a throwaway endpoint used to enforce this
+    // structurally, and that lever is gone.
     let webrtc_only =
         EndpointAddr::from_parts(producer, [TransportAddr::Custom(custom_addr(producer))]);
-    match data_endpoint.connect(webrtc_only, MOUNT_ALPN).await {
+    match endpoint.connect(webrtc_only, MOUNT_ALPN).await {
         Ok(connection) => {
-            signaller.close().await;
+            let on_webrtc = connection.paths().iter().any(|path| {
+                matches!(
+                    path.remote_addr(),
+                    TransportAddr::Custom(addr)
+                        if addr.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID
+                )
+            });
+            if !on_webrtc && !allow_relay_fallback {
+                endpoint.close().await;
+                return Err(JsValue::from_str(
+                    "mount connected but not over WebRTC, and webrtc mode forbids a fallback",
+                ));
+            }
             Ok(ShareClient {
                 connection,
                 secret: ticket.secret,
-                data_path: "webrtc".to_owned(),
+                // Report what was actually selected. Previously this said
+                // "webrtc" unconditionally on this path, which was a guess.
+                data_path: if on_webrtc { "webrtc" } else { "relay" }.to_owned(),
                 _hub: Some(hub),
                 _session: Some(session),
-                _endpoint: data_endpoint,
+                mesh_endpoint: Some(MeshEndpoint {
+                    endpoint: endpoint.clone(),
+                    webrtc: handle,
+                }),
+                _endpoint: endpoint,
+                mesh: None,
             })
         }
         Err(error) if allow_relay_fallback => {
             web_sys::console::warn_1(&JsValue::from_str(&format!(
                 "[agent-share] WebRTC mount dial failed ({error}); falling back to iroh relay/IP"
             )));
-            data_endpoint.close().await;
-            // Session/hub drop with data_endpoint; signaller still has relay.
-            finish_relay_fallback(signaller, ticket).await
+            finish_relay_fallback(endpoint, ticket).await
         }
         Err(error) => {
-            data_endpoint.close().await;
-            signaller.close().await;
+            endpoint.close().await;
             Err(err("dial the mount ALPN over WebRTC", &error))
         }
     }
@@ -733,8 +848,10 @@ async fn finish_relay_fallback(
         secret: ticket.secret,
         data_path: "relay".to_owned(),
         _hub: None,
+        mesh_endpoint: None,
         _session: None,
         _endpoint: endpoint,
+        mesh: None,
     })
 }
 

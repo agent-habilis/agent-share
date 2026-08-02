@@ -8,7 +8,7 @@ use super::output::OutputFormat;
 use crate::protocol::SwarmId;
 
 /// The `agent-share serve` / `bench` actions. The consumer side is the bare
-/// `agent-share <🐝…> <mountpoint>` form (positionals on the root command),
+/// `agent-share <🐝…> <target>` form (positionals on the root command),
 /// so a `🐝…` ticket can never collide with the `serve` / `bench` literals.
 #[derive(Subcommand, Debug)]
 pub(crate) enum MountAction {

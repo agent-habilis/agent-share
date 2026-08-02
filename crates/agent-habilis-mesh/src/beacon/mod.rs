@@ -37,8 +37,8 @@ use std::time::Duration;
 
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use iroh_gossip::proto::TopicId;
+use n0_future::task::JoinHandle;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use crate::lookup::{TransportHandles, add_peer_addr, build_endpoint, build_mesh, probe_connect};
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
@@ -109,7 +109,7 @@ impl Rendezvous {
     /// zombie link that only dies at the QUIC idle timeout.
     pub(crate) fn shed(self) {
         let endpoint = self.endpoint.clone();
-        tokio::spawn(async move {
+        n0_future::task::spawn(async move {
             endpoint.close().await;
         });
         // `self` drops here, aborting both tasks.
@@ -303,10 +303,17 @@ pub(crate) async fn ensure(
     // member peer cap, so it stays at the shipped default rather than
     // tracking `--max-peers`.
     // The rendezvous pseudo-node accepts no unicast — it is not a peer.
+    // The rendezvous serves no WebRTC either: it is a meeting point reached
+    // over the relay, and a peer that finds us here immediately moves to the
+    // real peer endpoint.
     let (gossip, router) = build_mesh(
         endpoint.clone(),
         crate::util::consts::GOSSIP_ACTIVE_VIEW_CAPACITY,
         None,
+        None,
+        // The rendezvous serves no caller protocol either — it is a meeting
+        // point, not somewhere an application is reachable.
+        Vec::new(),
     );
 
     // Register the peer's address so the rendezvous can dial it
@@ -327,7 +334,7 @@ pub(crate) async fn ensure(
     let monitor_rung_tx = params.rung_tx.clone();
     let rendezvous_endpoint = endpoint.clone();
 
-    let task = tokio::spawn(async move {
+    let task = n0_future::task::spawn(async move {
         use std::time::Duration;
 
         use futures_util::StreamExt as _;
@@ -353,10 +360,11 @@ pub(crate) async fn ensure(
         // Retain the gossip frontend for the task's lifetime.
         let _gossip = gossip;
         let _ =
-            tokio::time::timeout(Duration::from_secs(BEACON_MESH_WAIT_SECS), topic.joined()).await;
+            n0_future::time::timeout(Duration::from_secs(BEACON_MESH_WAIT_SECS), topic.joined())
+                .await;
 
         let (sender, mut receiver) = topic.split();
-        let mut heal = tokio::time::interval(Duration::from_secs(heal_interval_secs()));
+        let mut heal = n0_future::time::interval(Duration::from_secs(heal_interval_secs()));
         heal.tick().await; // eat the immediate first tick
 
         loop {

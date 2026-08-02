@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use tokio::time::Instant as TokioInstant;
+use n0_future::time::Instant as TokioInstant;
 
 use bytes::Bytes;
 use iroh::EndpointId;
@@ -18,6 +18,7 @@ use crate::protocol::mesh::Mesh;
 use crate::protocol::{Message, Nickname, ShardGroup};
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
+use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
@@ -214,6 +215,23 @@ pub struct EventLoopState {
     /// [`iroh_multihop_transport`].
     #[cfg(feature = "host")]
     pub(crate) multihop: Option<iroh_multihop_transport::MultihopHandle>,
+    /// The `WebRTC` transport handle, when one is registered on this peer's
+    /// endpoint. Portable — it is the browser's only direct path, and an
+    /// opportunistic extra one for a native peer. `None` on the beacon.
+    pub(crate) webrtc: Option<fofoca_iroh_webrtc_transport::WebRtcHandle>,
+    /// Peers with a JSEP round in flight right now.
+    ///
+    /// `has_session` only flips at *attach*, so without this a membership event
+    /// and a re-flood of the same `PeerInfo` both start a negotiation with the
+    /// same peer, and the loser fails on duplicate attach after paying a full
+    /// gathering budget.
+    ///
+    /// Shared with the spawned negotiation rather than owned by the loop: the
+    /// task must clear its own entry, and it must do so whether it succeeded or
+    /// failed. Sweeping from the loop by "does a session exist yet" cannot tell
+    /// a failure from a round still in progress, and would leave a failed peer
+    /// permanently unretryable.
+    pub(crate) webrtc_dialing: Arc<std::sync::Mutex<HashSet<EndpointId>>>,
     /// Monotonic sequence for *our own* emitted link-state vectors, so peers keep
     /// the freshest and drop reorders.
     pub(crate) link_state_seq: u64,
@@ -393,7 +411,6 @@ pub(crate) struct MeshSecrets {
 /// because tests pin it to a deterministic instant.
 pub(crate) struct StateInit {
     #[cfg(feature = "host")]
-    #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
     pub(crate) identity: Arc<Identity>,
     pub secrets: MeshSecrets,
@@ -451,6 +468,8 @@ impl EventLoopState {
             unicast_pool: crate::transport::UnicastPool::disconnected(),
             #[cfg(feature = "host")]
             multihop: None,
+            webrtc: None,
+            webrtc_dialing: Arc::new(std::sync::Mutex::new(HashSet::new())),
             link_state_seq: 0,
             reclaim_until: None,
             next_rival_recheck: None,

@@ -72,12 +72,8 @@ pub(crate) async fn serve(
     let (endpoint, ticket, secret, webrtc) = bind(lookups).await?;
     // Shell-quoted: the hint is printed for copy-paste (and captured verbatim
     // by scripts in json mode), so a dir name with a space must stay one word.
-    let mount_hint = super::shell_word(
-        &root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map_or_else(|| "./mnt".to_owned(), |name| format!("./{name}")),
-    );
+    // Target parent for the consumer — it creates `agent-share-…/` under this.
+    let mount_hint = super::shell_word(".");
     super::announce(
         json,
         &format!(
@@ -88,19 +84,71 @@ pub(crate) async fn serve(
         &format!("agent-share {} {mount_hint}", ticket.encode()),
     );
 
-    let local_id = endpoint.id();
+    // One endpoint, shared with the mesh — see `mount::handlers` for why the
+    // accept loop had to go. The share's two ALPNs are registered on a Router
+    // instead, normally the mesh's.
     let ice = IceConfig::default();
-    while let Some(incoming) = endpoint.accept().await {
-        let tree = Arc::clone(&tree);
-        let webrtc = webrtc.clone();
-        let ice = ice.clone();
-        tokio::spawn(async move {
-            if let Err(error) = accept_one(incoming, secret, tree, local_id, &webrtc, &ice).await {
-                tracing::debug!(%error, "mount connection ended");
+    let protocols = || -> Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> {
+        vec![
+            (
+                MOUNT_ALPN.to_vec(),
+                Box::new(super::handlers::MountHandler::new(
+                    secret,
+                    Arc::clone(&tree),
+                )),
+            ),
+            (
+                WEBRTC_SIGNAL_ALPN.to_vec(),
+                Box::new(super::handlers::SignalHandler::new(
+                    endpoint.id(),
+                    webrtc.clone(),
+                    ice.clone(),
+                )),
+            ),
+        ]
+    };
+
+    // The mesh normally owns the accept loop, but it must never be the reason a
+    // share fails to serve. Sharing an endpoint made the mesh load-bearing for
+    // *serving* — no mesh, no Router, nothing answering `MOUNT_ALPN` — which
+    // quietly turned a warn-and-continue into "the share does not exist". So on
+    // failure we stand up a plain Router with just the share's protocols and
+    // carry on without peer counts, which is exactly the old behaviour.
+    let mut fallback_router = None;
+    let share_mesh = match super::mesh::join(
+        &secret,
+        agent_habilis_mesh::runtime::InjectedEndpoint {
+            endpoint: endpoint.clone(),
+            webrtc: webrtc.clone(),
+        },
+        protocols(),
+    )
+    .await
+    {
+        Ok(mesh) => {
+            tracing::info!(mesh = mesh.mesh_id(), "joined the share mesh");
+            mesh.spawn_report(json);
+            Some(mesh)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "share mesh unavailable; serving without peer discovery");
+            let mut builder = iroh::protocol::Router::builder(endpoint.clone());
+            for (alpn, handler) in protocols() {
+                builder = builder.accept(alpn, handler);
             }
-        });
+            fallback_router = Some(builder.spawn());
+            None
+        }
+    };
+
+    // Nothing to accept here any more; just wait for ctrl-c so the mesh can
+    // announce a graceful `Left` instead of peers waiting out a silence
+    // timeout.
+    let _ = tokio::signal::ctrl_c().await;
+    if let Some(mesh) = share_mesh {
+        mesh.leave().await;
     }
-    // The accept loop ended (endpoint closed) — shut down gracefully.
+    drop(fallback_router);
     endpoint.close().await;
     Ok(())
 }

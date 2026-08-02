@@ -16,7 +16,12 @@
 pub mod embed;
 pub mod net;
 pub mod ops;
-#[cfg(feature = "host")]
+// Portable. The node runtime — `setup_mesh` → `Node::spawn` → the event loop —
+// is the same on a CLI and in a browser; only the host-shaped *inputs* to it
+// (the control socket, the session state file) are gated, inside the module.
+// Before this, a wasm build of the crate exposed the protocol types and no way
+// whatsoever to run a node, which made the wasm CI leg a compile check of code
+// nobody could call.
 pub mod runtime;
 
 pub(crate) mod beacon;

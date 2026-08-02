@@ -8,9 +8,10 @@ use rand::RngCore;
 use tokio::sync::{mpsc, watch};
 
 use crate::gossip::event::{NodeEvent, NodeSink};
+#[cfg(feature = "host")]
+use crate::lookup::build_peer_multihop;
 use crate::lookup::{
-    add_peer_addr, build_mesh, build_peer_endpoint, build_peer_multihop, relay_ladder,
-    select_bootstrap_rung,
+    add_peer_addr, build_mesh, build_peer_endpoint, relay_ladder, select_bootstrap_rung,
 };
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
@@ -111,7 +112,7 @@ fn spawn_startup_rung_confirmation(
     if ladder.is_empty() {
         return;
     }
-    tokio::spawn(async move {
+    n0_future::task::spawn(async move {
         let confirmed =
             select_bootstrap_rung(&ladder, Duration::from_secs(RELAY_RUNG_PROBE_SECS)).await;
         rung_tx.send_if_modified(|current| {
@@ -190,14 +191,83 @@ fn unicast_inbox() -> (
 
 /// Build this member's peer endpoint, registering the multi-hop transport
 /// (and standing up its underlay) when `--multihop` is set.
+#[cfg(feature = "host")]
 async fn build_member_endpoint(
     build: &SetupBuild<'_>,
-) -> Result<(Endpoint, Option<iroh_multihop_transport::MultihopHandle>)> {
+) -> Result<(
+    Endpoint,
+    Option<iroh_multihop_transport::MultihopHandle>,
+    fofoca_iroh_webrtc_transport::WebRtcHandle,
+)> {
+    if let Some(injected) = build.injected.as_ref() {
+        // Shared endpoint: no key to mint, nothing to bind. Multihop is not
+        // available on this path — it pins the key for its own hop identity,
+        // which is precisely what the caller has already done.
+        anyhow::ensure!(
+            !build.multihop,
+            "multihop cannot share a caller-supplied endpoint: both need to pin the key"
+        );
+        crate::lookup::check_injected_identity(&injected.endpoint, &injected.webrtc)?;
+        return Ok((injected.endpoint.clone(), None, injected.webrtc.clone()));
+    }
     if build.multihop {
+        // Multihop pins the key for its own hop identity, so it cannot also be
+        // the WebRTC transport's endpoint. The two are alternatives today; a
+        // peer that wants both needs one key shared between them.
         let (endpoint, handle) = build_peer_multihop(build.lookups).await?;
-        Ok((endpoint, Some(handle)))
+        let webrtc = crate::lookup::detached_webrtc_handle(endpoint.id());
+        Ok((endpoint, Some(handle), webrtc))
     } else {
-        Ok((build_peer_endpoint(build.lookups).await?, None))
+        let (endpoint, webrtc) =
+            crate::lookup::build_peer_webrtc(build.lookups, build.transports).await?;
+        Ok((endpoint, None, webrtc))
+    }
+}
+
+/// Off a host there is no multihop transport to register — it forwards real UDP
+/// packets — so the endpoint is always the plain peer one. The `multihop` flag
+/// is accepted and ignored rather than removed from `SetupParams`, so a caller
+/// compiles unchanged for both targets.
+#[cfg(not(feature = "host"))]
+async fn build_member_endpoint(
+    build: &SetupBuild<'_>,
+) -> Result<(
+    Endpoint,
+    Option<()>,
+    fofoca_iroh_webrtc_transport::WebRtcHandle,
+)> {
+    if let Some(injected) = build.injected.as_ref() {
+        crate::lookup::check_injected_identity(&injected.endpoint, &injected.webrtc)?;
+        return Ok((injected.endpoint.clone(), None, injected.webrtc.clone()));
+    }
+    let (endpoint, webrtc) =
+        crate::lookup::build_peer_webrtc(build.lookups, build.transports).await?;
+    Ok((endpoint, None, webrtc))
+}
+
+/// An endpoint the caller already built, shared with the mesh.
+///
+/// Lets one process run an application protocol and a mesh node on **one**
+/// identity instead of two. Without it a process that does both appears on the
+/// network as two unrelated peers — which, among other things, makes any
+/// per-peer count wrong: the same machine is reachable twice and there is
+/// nothing to deduplicate on.
+///
+/// The endpoint must be built with the WebRTC transport already registered from
+/// the same key it binds; [`check_injected_identity`](crate::net::check_injected_identity)
+/// enforces that. Its `LookupOpts` must also match the ones the mesh id derives,
+/// or the relay-direct rendezvous dial has no rung to ride.
+pub struct InjectedEndpoint {
+    pub endpoint: Endpoint,
+    pub webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
+}
+
+impl std::fmt::Debug for InjectedEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InjectedEndpoint")
+            .field("id", &self.endpoint.id())
+            .finish_non_exhaustive()
     }
 }
 
@@ -217,6 +287,21 @@ pub struct SetupParams {
     pub runtime_base: Option<PathBuf>,
     pub state_file: Option<PathBuf>,
     pub sink: std::sync::Arc<dyn NodeSink>,
+    /// Share the caller's endpoint instead of minting one. `None` ⇒ the mesh
+    /// builds its own, which is right for a standalone peer and wrong for a
+    /// process that also speaks its own protocol.
+    pub endpoint: Option<InjectedEndpoint>,
+    /// ALPNs the caller wants served on the mesh's Router.
+    ///
+    /// Required rather than optional when sharing an endpoint: `Router::spawn`
+    /// *overrides* the endpoint's ALPN list, and two `accept()` loops on one
+    /// endpoint race for the same queue. One Router owns accept; everything
+    /// else registers here.
+    pub protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    /// Which transports this instance may carry data on. `Default` is
+    /// everything; `TransportOpts::webrtc_only()` clears IP so a WebRTC-only
+    /// run cannot silently fall back. Never part of the mesh id — see the type.
+    pub transports: crate::lookup::TransportOpts,
     /// `--multihop`: register the multi-hop custom transport on the peer
     /// endpoint (a second underlay endpoint is stood up for hop-by-hop
     /// forwarding). Off by default on every path.
@@ -252,6 +337,12 @@ struct SetupBuild<'a> {
     unicast_acceptor: &'a crate::transport::UnicastAcceptor,
     /// Register the multi-hop transport on the peer endpoint.
     multihop: bool,
+    transports: crate::lookup::TransportOpts,
+    injected: Option<InjectedEndpoint>,
+    /// The caller's ALPN handlers, moved out exactly once by whichever of
+    /// create/join runs. `RefCell` because they are boxed trait objects — not
+    /// `Clone` — and `SetupBuild` is threaded by reference.
+    protocols: std::cell::RefCell<Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>>,
     rung_tx: &'a watch::Sender<Option<RelayUrl>>,
 }
 
@@ -276,7 +367,14 @@ struct Assembled {
     mint_mesh: Option<Mesh>,
     /// The multi-hop transport handle when `--multihop` registered it, threaded
     /// into `EventLoopState` so the link-state tick can feed its routing table.
+    /// Host-only: the transport forwards real UDP packets, so off a host the
+    /// field's own type does not exist.
+    #[cfg(feature = "host")]
     multihop: Option<iroh_multihop_transport::MultihopHandle>,
+    /// This peer's `WebRTC` transport handle, threaded into `EventLoopState` so
+    /// the session manager can negotiate with peers as it learns of them, and
+    /// so a consumer can read its live direct-peer count.
+    webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
     /// The raw topic string (`SetupKind::Topic` only); `None` for create/join.
     topic_string: Option<String>,
 }
@@ -292,6 +390,9 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         sink,
         cohost: cohost_override,
         live_count,
+        endpoint: injected,
+        protocols,
+        transports,
         multihop,
         per_peer_gate,
     } = params;
@@ -326,6 +427,9 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         lookups: &lookups,
         unicast_acceptor: &unicast_acceptor,
         multihop,
+        transports,
+        injected,
+        protocols: std::cell::RefCell::new(protocols),
         rung_tx: &rung_tx,
     };
     let Assembled {
@@ -340,7 +444,9 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         mesh_password,
         mesh_key,
         mint_mesh,
-        multihop: multihop_handle,
+        #[cfg(feature = "host")]
+            multihop: multihop_handle,
+        webrtc,
         topic_string,
     } = match kind {
         SetupKind::Create {
@@ -396,7 +502,9 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         cohost: cohost_override.unwrap_or(cohost),
         runtime_base,
         state_file,
+        #[cfg(feature = "host")]
         multihop: multihop_handle,
+        webrtc,
         unicast_rx,
         live_count,
         // Default to the CLI driver; the in-process sessions
@@ -434,7 +542,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     let mut seed = [0u8; 32];
     rand::rng().fill_bytes(&mut seed);
 
-    let (endpoint, multihop) = build_member_endpoint(build).await?;
+    let (endpoint, multihop, webrtc) = build_member_endpoint(build).await?;
 
     let mut mesh = Mesh::new(seed, name.clone(), config);
     // Invite-only: mint the invite root + issuer keypair and bake the issuer
@@ -448,6 +556,11 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     // invites — retained, never folded into derivation. Either way the raw
     // password is returned (not dropped) so the daemon can key tickets with it.
     let (mesh, mesh_password) = match (password, invite_only) {
+        // Argon2id costs ~100ms, so on a host it goes to a blocking worker.
+        // There is no such worker in a browser — `spawn_blocking` needs
+        // `rt-multi-thread` — so it runs inline and janks the frame it lands on.
+        // Acceptable: it happens once, at join, on a passworded mesh only.
+        #[cfg(feature = "host")]
         (Some(password), false) => {
             tokio::task::spawn_blocking(move || {
                 let mut mesh = mesh;
@@ -455,6 +568,12 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
                 (mesh, Some(password))
             })
             .await?
+        }
+        #[cfg(not(feature = "host"))]
+        (Some(password), false) => {
+            let mut mesh = mesh;
+            mesh.set_password(&password);
+            (mesh, Some(password))
         }
         (password, _) => (mesh, password),
     };
@@ -494,6 +613,8 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         endpoint.clone(),
         build.max_peers,
         Some(build.unicast_acceptor.clone()),
+        Some(webrtc.clone()),
+        build.protocols.take(),
     );
     // Creator has no peers yet — bootstrap is empty.
     let topic = gossip.subscribe(topic_id, vec![]).await?;
@@ -513,7 +634,9 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         mesh_password,
         mesh_key,
         mint_mesh,
+        #[cfg(feature = "host")]
         multihop,
+        webrtc,
         topic_string: None,
     })
 }
@@ -543,7 +666,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         MeshId::new(id_str.clone()).expect("Mesh::to_string always produces a valid MeshId");
     let topic_id = mesh.topic_id();
 
-    let (endpoint, multihop) = build_member_endpoint(build).await?;
+    let (endpoint, multihop, webrtc) = build_member_endpoint(build).await?;
 
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
     // Must precede the join: the peer resolves the rendezvous id via
@@ -555,6 +678,8 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         endpoint.clone(),
         build.max_peers,
         Some(build.unicast_acceptor.clone()),
+        Some(webrtc.clone()),
+        build.protocols.take(),
     );
     // We subscribe, background-connect to the rendezvous, and — for a plain
     // join — `daemon::run` defers co-hosting our own (same seed-id) rendezvous
@@ -592,7 +717,9 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         // A joiner holds no issuer key, so it can never mint — even after
         // redeeming an invite-only mesh.
         mint_mesh: None,
+        #[cfg(feature = "host")]
         multihop,
+        webrtc,
         topic_string,
     })
 }

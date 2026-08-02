@@ -24,6 +24,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 agent-share-proto = { path = "../agent-share-proto" }
+# The gossip engine, portable half only: `host` pulls in signals, the control
+# socket, the filesystem and multihop, none of which exist in a tab. What
+# remains is the whole node runtime — `setup_mesh` → `Node::spawn` → the event
+# loop — so a browser peer is the same peer a CLI runs, not a reduced stand-in.
+agent-habilis-mesh = { path = "../agent-habilis-mesh", default-features = false }
 fofoca-iroh-webrtc-transport = { path = "../fofoca-iroh-webrtc-transport", features = ["web"] }
 iroh = { version = "1.0.1", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 iroh-base = { version = "1.0.1", default-features = false, features = ["key"] }
@@ -35,6 +40,11 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
 futures = "0.3"
+# Lets a `!Send` value satisfy a `Send + Sync` bound, panicking if it is ever
+# touched from another thread. Sound here because wasm is single-threaded, and
+# necessary because iroh's `DynProtocolHandler` requires `Send + Sync` while the
+# producer's state holds `FileSystemFileHandle`s, which are JS values.
+send_wrapper = "0.6"
 web-sys = { version = "0.3", features = [
     "Window",
     "File",

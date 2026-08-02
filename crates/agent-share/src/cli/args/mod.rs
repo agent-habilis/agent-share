@@ -1,6 +1,6 @@
 //! The clap surface. The root command is what `ahsw mount` was in
 //! agent-habilis/swarm, hoisted to a standalone binary: the bare
-//! `agent-share <🐝…> <mountpoint>` consumer form plus the `serve`
+//! `agent-share <🐝…> <target>` consumer form plus the `serve`
 //! subcommand.
 
 use std::path::PathBuf;
@@ -18,10 +18,10 @@ pub(crate) use output::OutputFormat;
 /// (read-only, lazy, no daemon).
 ///
 /// `agent-share serve <dir>` shares a folder and prints the `agent-share 🐝…`
-/// command; `agent-share <🐝…> <mountpoint>` mounts it through a loopback `NFSv3`
-/// bridge (the OS's built-in NFS client — no FUSE, no kernel extension).
-/// The directory tree is a snapshot from when `serve` started; file bytes
-/// are fetched on demand as they are read. Writes fail (read-only).
+/// command; `agent-share <🐝…> <target>` creates `agent-share-…/` under the
+/// target and mounts through a loopback `NFSv3` bridge (the OS's built-in NFS
+/// client — no FUSE, no kernel extension). File bytes are fetched on demand
+/// as they are read. Writes fail (read-only).
 #[derive(Parser, Debug)]
 #[command(name = "agent-share", version, args_conflicts_with_subcommands = true)]
 pub(crate) struct Cli {
@@ -31,8 +31,8 @@ pub(crate) struct Cli {
     /// The `🐝…` ticket printed by `agent-share serve`.
     pub ticket: Option<String>,
 
-    /// Where to mount the shared folder (created if missing; an existing
-    /// directory must be empty). Unmounted on Ctrl-C.
+    /// Parent directory for the mount. Creates `agent-share-YYYY-MM-DDTHHMM/`
+    /// inside it (target may be non-empty). Unmounted on Ctrl-C.
     pub mountpoint: Option<PathBuf>,
 
     /// Start the loopback NFS bridge but skip the OS mount step; prints

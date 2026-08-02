@@ -11,3 +11,12 @@ task = "run --package tasks --"
 # is switched by its `js` feature where it is depended on directly.
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg", 'getrandom_backend="wasm_js"']
+# `cargo test --target wasm32-unknown-unknown` runs the harness through
+# wasm-bindgen's runner (node by default). Nothing else targets wasm32 with
+# `cargo test`, so this only affects the wasm test suite.
+#
+# That suite exists because `cargo check` cannot see a *runtime* failure, and
+# this crate's wasm breakages are all runtime: `Instant::now` panics on
+# wasm32-unknown-unknown, `tokio::time` has no driver, and `tokio::spawn` has no
+# reactor. Each one compiled cleanly and then panicked in a browser.
+runner = "wasm-bindgen-test-runner"

@@ -22,12 +22,12 @@ use std::time::Duration;
 use agent_share_proto::framing::{self, MAX_MANIFEST_BYTES, MOUNT_ALPN, WEBRTC_SIGNAL_ALPN};
 use agent_share_proto::manifest::MountManifest;
 use agent_share_proto::ticket::MountTicket;
-use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 use fofoca_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, WebRtcTransport, custom_addr,
     offer_with,
 };
+use iroh::endpoint::{Connection, presets};
+use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 
 /// Kills the child on drop, so a failing assert does not leave a daemon behind.
 struct Serving(Child);
@@ -66,7 +66,7 @@ async fn the_real_cli_serves_over_webrtc() {
     let stdout = child.stdout.take().expect("piped stdout");
     let serving = Serving(child);
 
-    // Scrape the ticket off the `Mount agent-share 🐝… ./dir` line.
+    // Scrape the ticket off the `Mount agent-share 🐝… .` line.
     let ticket = tokio::task::spawn_blocking(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Some(start) = line.find('🐝') {

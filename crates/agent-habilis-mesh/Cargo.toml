@@ -91,6 +91,21 @@ iroh-mainline-address-lookup = { version = "0.4", optional = true }
 # we only need the raw `hash_password_into` KDF.
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 futures-util = "0.3"
+# The crate's clock, re-exported from `util::clock`. Unconditional because the
+# crate is `pub use std::time::*` off wasm32 and pulls in nothing there; only a
+# browser gets the `Performance.now()`/`Date.now()` implementation. Without it
+# every `Instant::now()`/`SystemTime::now()` in the portable core panics on
+# `wasm32-unknown-unknown` — a runtime failure `cargo check` cannot see.
+web-time = "1.1"
+# Timers and task spawning, the other half of the portability story: `web-time`
+# fixes `Instant`, but `tokio::time` still panics on wasm32 because there is no
+# timer driver, and `tokio::spawn` needs a runtime nothing can `block_on` on a
+# browser main thread. Off wasm32 this is a verbatim re-export of
+# `tokio::{time, spawn}`, so host behaviour is unchanged — note in particular
+# that `n0_future::time::Instant` *is* `tokio::time::Instant` there, and stays
+# distinct from `util::clock::Instant`. Taken as a direct dependency rather than
+# leaned on transitively through iroh, so the API surface is ours to pin.
+n0-future = "0.3"
 # End-to-end sealing of directed frames: a NaCl-style sealed box (ephemeral
 # X25519 ECDH → ChaCha20-Poly1305) so only the addressed recipient can read a
 # directed body. The AEAD key is derived from the ECDH secret via the in-tree
@@ -128,11 +143,21 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # `uuid` v4 needs its own randomness source named on wasm32.
 uuid = { version = "1", features = ["v4", "js"] }
 
-[dev-dependencies]
+# Scoped to non-wasm on purpose. The workspace `tokio` turns on `net`, which
+# drags in `mio` — and `mio` refuses to build for wasm32. Dev-dependencies are
+# resolved for test targets too, so leaving these unscoped makes
+# `cargo test --target wasm32-unknown-unknown` fail before it reaches any test
+# of ours. Everything here backs host unit tests, which never run on wasm.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 proptest.workspace = true
 insta.workspace = true
 tokio.workspace = true
 divan.workspace = true
+
+# The wasm test harness. Only a browser/node target runs it, and only
+# `tests/wasm_runtime.rs` uses it — see that file for why it has to exist.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 # Stamps the build's git short hash + dirty flag into the version
 # (`util::version::VERSION`), so every build self-identifies its commit in

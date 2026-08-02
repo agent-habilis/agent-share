@@ -136,11 +136,12 @@ fn serves_a_ticket_and_the_bridge_binds() {
     // Consumer with --no-mount: redeems the ticket, fetches the manifest,
     // builds the tree, binds the NFS bridge, and prints the OS mount command
     // (json mode: the bare command) — everything except the privileged step.
-    let mountpoint = TempDir::new("mnt");
+    // The CLI arg is the parent target; the real mount dir is agent-share-…/.
+    let target = TempDir::new("mnt");
     let mut consumer_cmd = test_cmd();
     consumer_cmd.args([
         &ticket,
-        mountpoint.path.to_str().expect("utf-8 mountpoint"),
+        target.path.to_str().expect("utf-8 mount target"),
         "--no-mount",
         "--output",
         "json",
@@ -153,8 +154,9 @@ fn serves_a_ticket_and_the_bridge_binds() {
         "expected an NFS mount command, got: {command_line}"
     );
     assert!(
-        command_line.contains(mountpoint.path.to_str().unwrap()),
-        "mount command names the mountpoint, got: {command_line}"
+        command_line.contains(target.path.to_str().unwrap())
+            && command_line.contains("agent-share-"),
+        "mount command names the agent-share child under the target, got: {command_line}"
     );
 }
 
@@ -171,25 +173,35 @@ fn real_mount_round_trip() {
 
     let (_producer, ticket) = spawn_producer(&root, LOOPBACK_SWARM_ID);
 
-    let mountpoint = TempDir::new("mnt");
+    let target = TempDir::new("mnt");
     let mut consumer_cmd = test_cmd();
-    consumer_cmd.args([&ticket, mountpoint.path.to_str().expect("utf-8 mountpoint")]);
+    consumer_cmd.args([&ticket, target.path.to_str().expect("utf-8 mount target")]);
     let (_consumer, consumer_rx) = spawn_piped(consumer_cmd);
     recv_line_containing(&consumer_rx, "Mounted").expect("consumer never reported Mounted");
 
-    let mounted_file = mountpoint.path.join("hello.txt");
+    let mountpoint = std::fs::read_dir(&target.path)
+        .expect("read target")
+        .map(|entry| entry.expect("dir entry").path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("agent-share-"))
+        })
+        .expect("consumer created agent-share-* under target");
+
+    let mounted_file = mountpoint.join("hello.txt");
     assert_eq!(
         std::fs::read(&mounted_file).expect("read through the mount"),
         b"hello from the other side"
     );
     assert!(
-        std::fs::write(mountpoint.path.join("new.txt"), b"nope").is_err(),
+        std::fs::write(mountpoint.join("new.txt"), b"nope").is_err(),
         "the mount must be read-only"
     );
 
     // Unmount before the guards kill the processes, so the tempdir can drop.
     let _ = Command::new("umount")
-        .arg(&mountpoint.path)
+        .arg(&mountpoint)
         .output()
         .expect("run umount");
 }

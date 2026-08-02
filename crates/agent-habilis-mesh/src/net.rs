@@ -8,7 +8,7 @@ pub use crate::gossip::conn_path;
 #[cfg(feature = "host")]
 pub use crate::lookup::{NetworkCapability, capability_probe};
 pub use crate::lookup::{
-    TransportHandles, add_peer_addr, build_endpoint, build_peer_endpoint, probe_connect,
-    probe_ladder, relay_ladder,
+    TransportHandles, TransportOpts, add_peer_addr, build_endpoint, build_peer_endpoint,
+    check_injected_identity, probe_connect, probe_ladder, relay_ladder,
 };
 pub use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};

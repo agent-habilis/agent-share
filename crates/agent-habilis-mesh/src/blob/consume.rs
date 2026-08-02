@@ -4,7 +4,7 @@
 //! memory — nothing is buffered whole. Standalone: it builds its own peer
 //! endpoint and never touches the daemon.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use iroh::Endpoint;
@@ -14,6 +14,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 
 use crate::lookup::{add_peer_addr, build_peer_endpoint};
 use crate::protocol::crypto::{Password, TicketAuth};
+use crate::util::clock::Instant;
 use crate::util::consts::MAX_BLOB_BYTES;
 
 use super::ticket::BlobTicket;
@@ -122,7 +123,7 @@ async fn dial(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
             Ok(conn) => return Ok(conn),
             Err(error) if started.elapsed() < DISCOVERY_DEADLINE => {
                 tracing::debug!(%error, "blob dial retrying while the address propagates");
-                tokio::time::sleep(RETRY_DELAY).await;
+                n0_future::time::sleep(RETRY_DELAY).await;
             }
             Err(error) => bail!("connecting to the blob producer failed: {error}"),
         }

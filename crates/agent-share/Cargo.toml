@@ -38,6 +38,11 @@ path = "src/main.rs"
 # The wire format, shared verbatim with the browser client. Anything both
 # ends must agree on lives there, not here.
 agent-share-proto = { path = "../agent-share-proto" }
+# The gossip engine. A share joins a mesh derived from its own ticket secret, so
+# everyone holding the link becomes a peer of everyone else rather than only of
+# the producer. Note this pulls the vendored mesh into `default-members`, which
+# the root manifest previously avoided — it is a real build-time cost.
+agent-habilis-mesh = { path = "../agent-habilis-mesh" }
 # The WebRTC lane. `host` here — the browser client takes the same crate with
 # `web` instead.
 fofoca-iroh-webrtc-transport = { path = "../fofoca-iroh-webrtc-transport", features = ["host"] }
@@ -68,3 +73,4 @@ async-trait = "0.1.89"
 # ReadDirectoryChangesW) instead of the portable poll-every-N-seconds
 # fallback, which on a 70k-file share would cost a full stat sweep per tick.
 notify = "8"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }

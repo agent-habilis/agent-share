@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::time::Instant;
 
 use crate::protocol::{Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
+use crate::util::clock::Instant;
 use crate::util::consts::{
     LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES,
     REASSEMBLY_MAX_GROUP_LIFETIME_SECS, REASSEMBLY_REPAIR_IDLE_SECS, REASSEMBLY_REPAIR_MAX_IDXS,
@@ -376,7 +376,8 @@ pub(crate) fn synthesize_from(
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use crate::util::clock::Instant;
+    use std::time::Duration;
 
     use super::{ReassemblyStore, ShardIngest};
     use crate::protocol::{

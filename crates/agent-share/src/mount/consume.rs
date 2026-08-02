@@ -28,16 +28,18 @@ const DISCOVERY_DEADLINE: Duration = Duration::from_secs(90);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
 
 /// Consumer: redeem `ticket`, expose the remote tree through a loopback `NFSv3`
-/// bridge, and mount it at `mountpoint` (read-only). Serves until Ctrl-C,
-/// then unmounts. With `no_mount` (or when the OS mount fails) the bridge
-/// stays up and the exact mount command is printed to run manually.
+/// bridge, and mount it under `target` (read-only). Creates
+/// `agent-share-YYYY-MM-DDTHHMM/` inside `target`, mounts there, and on Ctrl-C
+/// unmounts and removes that empty folder. With `no_mount` (or when the OS
+/// mount fails) the bridge stays up and the exact mount command is printed to
+/// run manually.
 ///
 /// # Errors
-/// A malformed ticket, an unreachable producer, a hostile manifest, a
-/// non-empty mountpoint, or the NFS bridge failing to bind.
+/// A malformed ticket, an unreachable producer, a hostile manifest, a bad
+/// target directory, or the NFS bridge failing to bind.
 pub(crate) async fn attach(
     ticket: &str,
-    mountpoint: &Path,
+    target: &Path,
     no_mount: bool,
     json: bool,
 ) -> Result<()> {
@@ -68,8 +70,8 @@ pub(crate) async fn attach(
     let mut ids = TreeIds::default();
     let nodes = build_tree(&mut ids, &manifest)?;
 
-    prepare_mountpoint(mountpoint)?;
-    let (uid, gid) = mountpoint_owner(mountpoint)?;
+    let mountpoint = prepare_mount_dir(target)?;
+    let (uid, gid) = mountpoint_owner(&mountpoint)?;
     let remote_fs = RemoteFs::new(nodes, Arc::clone(&client), uid, gid);
     // Taken before the server consumes the filesystem: this is the watch
     // task's only way back to the tree.
@@ -86,7 +88,7 @@ pub(crate) async fn attach(
         }
     });
 
-    let command = mount_command(nfs_port, mountpoint);
+    let command = mount_command(nfs_port, &mountpoint);
     let mounted = !no_mount && try_mount(&command).await;
     if mounted {
         if !json {
@@ -122,8 +124,10 @@ pub(crate) async fn attach(
         .await
         .context("waiting for Ctrl-C failed")?;
     if mounted {
-        unmount(mountpoint).await;
+        unmount(&mountpoint).await;
     }
+    // Best-effort: leave nothing behind when the folder is empty / unused.
+    let _ = std::fs::remove_dir(&mountpoint);
     endpoint.close().await;
     Ok(())
 }
@@ -387,25 +391,44 @@ impl ByteSource for RemoteClient {
     }
 }
 
-/// Create the mountpoint if missing; an existing one must be an empty
-/// directory (never removed on exit).
-fn prepare_mountpoint(mountpoint: &Path) -> Result<()> {
-    if mountpoint.exists() {
-        if !mountpoint.is_dir() {
-            bail!("mountpoint {} is not a directory", mountpoint.display());
+/// Ensure `target` is a directory, then create `agent-share-YYYY-MM-DDTHHMM/`
+/// under it (local clock, minute precision). On name collision, retry with
+/// seconds, then numeric suffixes.
+fn prepare_mount_dir(target: &Path) -> Result<std::path::PathBuf> {
+    if target.exists() {
+        if !target.is_dir() {
+            bail!("mount target {} is not a directory", target.display());
         }
-        let occupied = mountpoint
-            .read_dir()
-            .with_context(|| format!("reading {}", mountpoint.display()))?
-            .next()
-            .is_some();
-        if occupied {
-            bail!("mountpoint {} is not empty", mountpoint.display());
-        }
-        return Ok(());
+    } else {
+        std::fs::create_dir_all(target)
+            .with_context(|| format!("creating {}", target.display()))?;
     }
-    std::fs::create_dir_all(mountpoint)
-        .with_context(|| format!("creating {}", mountpoint.display()))
+    let now = chrono::Local::now();
+    for name in mount_folder_candidates(now) {
+        let path = target.join(&name);
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("creating {}", path.display()));
+            }
+        }
+    }
+    bail!(
+        "could not create a unique agent-share folder under {}",
+        target.display()
+    )
+}
+
+/// Folder-name candidates for `now`, in collision-retry order.
+fn mount_folder_candidates(now: chrono::DateTime<chrono::Local>) -> Vec<String> {
+    let minute = now.format("agent-share-%Y-%m-%dT%H%M").to_string();
+    let second = now.format("agent-share-%Y-%m-%dT%H%M%S").to_string();
+    let mut names = vec![minute, second.clone()];
+    for suffix in 2..=99 {
+        names.push(format!("{second}-{suffix}"));
+    }
+    names
 }
 
 /// The uid/gid the served attrs report — the owner of the mountpoint, read
@@ -533,4 +556,45 @@ async fn run_quiet(program: &str, args: &[&std::ffi::OsStr]) -> bool {
         .output()
         .await
         .is_ok_and(|output| output.status.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn mount_folder_name_is_iso_local_minute() {
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 1, 1, 16, 20, 45)
+            .single()
+            .expect("valid local time");
+        let names = mount_folder_candidates(now);
+        assert_eq!(names[0], "agent-share-2026-01-01T1620");
+        assert_eq!(names[1], "agent-share-2026-01-01T162045");
+        assert_eq!(names[2], "agent-share-2026-01-01T162045-2");
+    }
+
+    #[test]
+    fn prepare_mount_dir_creates_under_non_empty_target() {
+        let target = std::env::temp_dir().join(format!(
+            "agent-share-target-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&target).expect("create target");
+        std::fs::write(target.join("keep.txt"), b"x").expect("occupy target");
+        let mount = prepare_mount_dir(&target).expect("prepare");
+        let name = mount
+            .file_name()
+            .and_then(|os| os.to_str())
+            .expect("utf-8");
+        assert!(
+            name.starts_with("agent-share-") && name.contains('T'),
+            "unexpected mount folder name: {name}"
+        );
+        assert!(mount.is_dir());
+        assert!(target.join("keep.txt").is_file());
+        let _ = std::fs::remove_dir_all(&target);
+    }
 }

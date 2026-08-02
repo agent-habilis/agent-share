@@ -16,25 +16,24 @@
 //! target: `crate::gossip`, `crate::lifecycle`, `crate::beacon`,
 //! `crate::lookup`.
 
-#[cfg(feature = "host")]
+// The node runtime is portable. What is *not* is gated inside these modules,
+// pocket by pocket — signals, the orphan watch, the control socket, the state
+// file, the multihop handle — rather than by gating the modules wholesale. A
+// browser runs the same event loop as the CLI; it just has fewer inputs to it.
 pub(crate) mod app;
 mod bounded_id_set;
-#[cfg(feature = "host")]
 pub(crate) mod config;
 pub(crate) mod ctx;
-#[cfg(feature = "host")]
 pub(crate) mod node;
 // In-memory accounting stores owned by `EventLoopState`. `pub(crate)` so
 // the gossip anti-entropy layer (and its tests) can name `MessageLog` /
 // `DigestWindow`; still crate-internal.
 pub(crate) use crate::doc;
 pub(crate) mod message_log;
-#[cfg(feature = "host")]
 pub(crate) mod params;
 // Dedicated, byte-budgeted buffer for partial multipart bodies — reassembly
 // no longer reads the message log, so log eviction can't break it.
 pub(crate) use crate::reassembly;
-#[cfg(feature = "host")]
 pub(crate) mod setup;
 pub(crate) mod state;
 
@@ -42,15 +41,11 @@ pub(crate) mod state;
 // sole writer). Daemon-session state, not a generic `util` helper.
 #[cfg(feature = "host")]
 pub(crate) mod state_file;
-#[cfg(feature = "host")]
 pub(crate) mod timers;
 
-#[cfg(feature = "host")]
 pub(crate) mod event_loop;
 
 // Crate-internal shorthands. The public spelling of all of these is
 // `crate::runtime`, which is what a consumer imports.
-#[cfg(feature = "host")]
 pub(crate) use config::{CoHostPolicy, DriverMode, EventLoopConfig};
-#[cfg(feature = "host")]
 pub(crate) use event_loop::run;

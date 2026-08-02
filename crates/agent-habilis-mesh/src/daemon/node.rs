@@ -1,11 +1,14 @@
 use std::fmt;
 use std::time::Duration;
 
+// `n0_future::task` is `tokio::task` verbatim off wasm32, and a
+// `wasm-bindgen-futures` shim in a browser — where there is no runtime to
+// `block_on` and `tokio::spawn` would panic. Its `JoinHandle` carries `abort()`
+// on both, so `Drop` below needs no target-specific handling.
+use n0_future::task::JoinHandle;
 use tokio::sync::{broadcast, mpsc};
-use tokio::task::JoinHandle;
 
 use crate::daemon::app::NodeDriver;
-#[cfg(feature = "host")]
 use crate::daemon::config::{DriverMode, EventLoopConfig};
 use crate::protocol::mesh::MeshName;
 use crate::protocol::{MeshId, Message, Nickname};
@@ -66,7 +69,7 @@ impl<A: NodeDriver + 'static> Node<A> {
         let mesh_id = cfg.mesh.clone();
         let name = cfg.name.clone();
         let nickname = cfg.author.clone();
-        let task = tokio::spawn(crate::daemon::run(cfg, app, Some(req_rx), None));
+        let task = n0_future::task::spawn(crate::daemon::run(cfg, app, Some(req_rx), None));
         Self {
             mesh_id,
             name,
@@ -115,7 +118,7 @@ impl<A: NodeDriver + 'static> Node<A> {
     pub async fn leave(mut self) -> anyhow::Result<()> {
         let _ = self.quit_tx.send(()).await;
         if let Some(task) = self.task.take() {
-            let timeout = tokio::time::sleep(Duration::from_secs(3));
+            let timeout = n0_future::time::sleep(Duration::from_secs(3));
             tokio::select! {
                 joined = task => {
                     joined

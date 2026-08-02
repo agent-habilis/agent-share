@@ -142,6 +142,86 @@ async function runBench(
   log('report', report)
 }
 
+type MeshPeer = Awaited<ReturnType<WasmModule['MeshPeer']['create']>>
+
+let meshPeer: MeshPeer | null = null
+let meshPoll: number | null = null
+
+/** The link that drops another tab straight into this mesh. */
+function meshUrl(id: string): string {
+  return `${location.origin}${location.pathname}#mesh=${encodeURIComponent(id)}`
+}
+
+/**
+ * Poll the two counters.
+ *
+ * Polling rather than a callback because both numbers are lock-free reads on
+ * the wasm side — the roster is an atomic the event loop stores into, and the
+ * direct count is a map length on the transport. Neither needs a hop into the
+ * loop, so a timer is cheaper than plumbing an event channel out.
+ */
+function startMeshPoll(counts: HTMLElement) {
+  if (meshPoll !== null) window.clearInterval(meshPoll)
+  meshPoll = window.setInterval(() => {
+    if (!meshPeer) return
+    counts.textContent = `gossip ${meshPeer.peers_gossip} · direct ${meshPeer.peers_direct}/${meshPeer.max_direct}`
+  }, 500)
+}
+
+async function meshStart(
+  raw: string,
+  log: (...parts: unknown[]) => void,
+  ui: {
+    idBox: HTMLTextAreaElement
+    transport: HTMLSelectElement
+    counts: HTMLElement
+    nick: HTMLElement
+    leave: HTMLButtonElement
+    copy: HTMLButtonElement
+  },
+): Promise<void> {
+  if (meshPeer) {
+    log('already on a mesh — leave first')
+    return
+  }
+  log('loading wasm…')
+  const wasm = await loadWasm()
+  const id = raw.trim()
+  log(id ? 'joining…' : 'creating…')
+  // Binding the endpoint and reaching a relay takes a few seconds; the button
+  // stays live rather than freezing, and the log narrates.
+  // `undefined` ⇒ every transport this target has; 'webrtc' pins the data
+  // plane so a fallback shows up as a failure instead of passing quietly.
+  const mode = ui.transport.value === 'dynamic' ? undefined : ui.transport.value
+  meshPeer = id ? await wasm.MeshPeer.join(id, mode) : await wasm.MeshPeer.create(mode)
+  ui.idBox.value = meshPeer.mesh_id
+  ui.nick.textContent = `as <${meshPeer.nickname}>`
+  ui.leave.disabled = false
+  ui.copy.disabled = false
+  startMeshPoll(ui.counts)
+  log('up —', meshPeer.mesh_id)
+  log('join URL —', meshUrl(meshPeer.mesh_id))
+}
+
+async function meshLeave(
+  log: (...parts: unknown[]) => void,
+  ui: { leave: HTMLButtonElement; copy: HTMLButtonElement; counts: HTMLElement },
+) {
+  if (!meshPeer) return
+  const current = meshPeer
+  meshPeer = null
+  ui.leave.disabled = true
+  ui.copy.disabled = true
+  if (meshPoll !== null) {
+    window.clearInterval(meshPoll)
+    meshPoll = null
+  }
+  ui.counts.textContent = 'gossip 0 · direct 0/0'
+  // Broadcasts `Left` so peers drop us now rather than on a silence timeout.
+  await current.leave()
+  log('left')
+}
+
 function main() {
   const txLog = logger(el('tx-log'))
   const rxLog = logger(el('rx-log'))
@@ -174,6 +254,45 @@ function main() {
     void runBench(rxTicket.value, rxLog).catch((error) => {
       rxLog('FAILED', jsError(error))
     })
+  }
+
+  const meshLog = logger(el('mesh-log'))
+  const meshUi = {
+    idBox: el<HTMLTextAreaElement>('mesh-id'),
+    transport: el<HTMLSelectElement>('mesh-transport'),
+    counts: el<HTMLElement>('mesh-counts'),
+    nick: el<HTMLElement>('mesh-nick'),
+    leave: el<HTMLButtonElement>('mesh-leave'),
+    copy: el<HTMLButtonElement>('mesh-copy'),
+  }
+  const meshGo = (raw: string) => {
+    void meshStart(raw, meshLog, meshUi).catch((error) => {
+      meshLog('FAILED', jsError(error))
+    })
+  }
+  el<HTMLButtonElement>('mesh-create').onclick = () => meshGo('')
+  el<HTMLButtonElement>('mesh-join').onclick = () => meshGo(meshUi.idBox.value)
+  meshUi.leave.onclick = () => {
+    void meshLeave(meshLog, meshUi).catch((error) => {
+      meshLog('FAILED', jsError(error))
+    })
+  }
+  meshUi.copy.onclick = async () => {
+    if (!meshPeer) return
+    await navigator.clipboard.writeText(meshUrl(meshPeer.mesh_id))
+    meshLog('join URL copied')
+  }
+
+  // `#mesh=💬://…` joins on load, which is what makes the link shareable —
+  // open it in another tab, or on another machine, and that peer joins.
+  const fragment = decodeURIComponent(location.hash.replace(/^#/, ''))
+  if (fragment.startsWith('mesh=')) {
+    const id = fragment.slice('mesh='.length).trim()
+    if (id) {
+      meshUi.idBox.value = id
+      meshLog('joining from URL fragment…')
+      meshGo(id)
+    }
   }
 }
 

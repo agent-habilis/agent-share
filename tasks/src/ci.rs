@@ -88,6 +88,13 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
                     // avoidable from it. Without this gate the wasm target rots
                     // on the next edit that reaches for a file or a socket.
                     "check --target wasm32-unknown-unknown -p agent-habilis-mesh --no-default-features",
+                    // …and must *run* there. Every wasm break this crate has had
+                    // compiled cleanly and then panicked: `Instant::now` is
+                    // unimplemented on wasm32, `tokio::time` has no driver,
+                    // `tokio::spawn` has no reactor. The check above cannot see
+                    // any of them — one shipped and killed the browser peer on
+                    // load. This suite executes those primitives under node.
+                    "test --target wasm32-unknown-unknown -p agent-habilis-mesh --no-default-features --test wasm_runtime",
                 ] {
                     let args = args.split(' ');
                     cmd!(sh, "cargo {args...}")

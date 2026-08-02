@@ -36,11 +36,12 @@ across an update.
 Mount it (consumer):
 
 ```
-agent-share <🐝…> <mountpoint>
+agent-share <🐝…> <target>
 ```
 
-The mountpoint is created if missing (an existing directory must be empty) and
-unmounted on Ctrl-C. Writes fail — the mount is read-only.
+Creates `agent-share-YYYY-MM-DDTHHMM/` under `<target>` (which may already have
+other files), mounts there, and unmounts on Ctrl-C. Writes fail — the mount is
+read-only.
 
 ### Discovery
 

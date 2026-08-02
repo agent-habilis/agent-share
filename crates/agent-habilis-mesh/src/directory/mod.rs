@@ -18,13 +18,14 @@
 //! primitives here.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::crypto::derive_secret;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
 use crate::protocol::{MeshId, MessageBody};
+use crate::util::clock::Instant;
 
 /// Domain-separation seed for every directory. The directory name is
 /// the `derive_secret` *label*; this is the *seed*, so a directory's
@@ -244,7 +245,8 @@ impl Listings {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use crate::util::clock::Instant;
+    use std::time::Duration;
 
     use super::{Ad, ListingChange, Listings, directory_mesh};
     use crate::protocol::MeshId;

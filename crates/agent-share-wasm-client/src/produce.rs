@@ -46,7 +46,9 @@ type Shared = Rc<RefCell<ProducerShared>>;
 pub struct ShareProducer {
     ticket: String,
     shared: Shared,
-    stop_tx: Option<oneshot::Sender<()>>,
+    /// This tab's mesh membership. It also owns the Router serving the share's
+    /// own ALPNs, so dropping it stops the share serving.
+    mesh: Option<crate::mesh::MeshPeer>,
     _endpoint: Endpoint,
     hub: Arc<BrowserHubTransport>,
 }
@@ -92,14 +94,35 @@ impl ShareProducer {
         let mut secret = [0u8; SECRET_LEN];
         getrandom::fill(&mut secret).map_err(|error| err("mint secret", &error))?;
 
-        // Accept before the ticket is shown so a fast joiner is not raced.
-        let (stop_tx, stop_rx) = oneshot::channel::<()>();
-        let accept_endpoint = endpoint.clone();
-        let accept_hub = Arc::clone(&hub);
-        let accept_shared = Rc::clone(&shared);
-        wasm_bindgen_futures::spawn_local(async move {
-            accept_loop(accept_endpoint, accept_hub, secret, accept_shared, stop_rx).await;
-        });
+        // The mesh's Router owns `accept()` now, and it is up before the
+        // ticket exists — so a fast joiner still is not raced. Injecting the
+        // endpoint keeps `setup_mesh` cheap: no key to mint, no second bind,
+        // and no second relay registration.
+        let protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> = vec![
+            (
+                MOUNT_ALPN.to_vec(),
+                Box::new(MountHandler {
+                    shared: send_wrapper::SendWrapper::new(Rc::clone(&shared)),
+                    secret,
+                }),
+            ),
+            (
+                WEBRTC_SIGNAL_ALPN.to_vec(),
+                Box::new(SignalHandler {
+                    local,
+                    hub: send_wrapper::SendWrapper::new(Arc::clone(&hub)),
+                }),
+            ),
+        ];
+        // One identity for this tab: the mount peer and the mesh peer are the
+        // same node, so a viewer counts this producer once rather than twice.
+        let mesh = crate::mesh::MeshPeer::join_share_with(
+            &secret,
+            endpoint.clone(),
+            handle.clone(),
+            protocols,
+        )
+        .await?;
 
         // Ticket must carry a relay URL — the browser consumer has no mdns/dht
         // and dials the signal ALPN from `ticket.addr` alone.
@@ -115,7 +138,7 @@ impl ShareProducer {
         Ok(ShareProducer {
             ticket: ticket_str,
             shared,
-            stop_tx: Some(stop_tx),
+            mesh: Some(mesh),
             _endpoint: endpoint,
             hub,
         })
@@ -172,15 +195,113 @@ impl ShareProducer {
         self.shared.borrow().state.live_counts().1
     }
 
+    /// Members on this share's mesh, including us.
+    #[wasm_bindgen(getter)]
+    pub fn peers_gossip(&self) -> u32 {
+        self.mesh
+            .as_ref()
+            .map_or(0, crate::mesh::MeshPeer::peers_gossip)
+    }
+
+    /// Peers we hold a direct `WebRTC` data channel with — viewers of this
+    /// share included, since the mount sessions now live in the same hub.
+    #[wasm_bindgen(getter)]
+    pub fn peers_direct(&self) -> u32 {
+        self.mesh
+            .as_ref()
+            .map_or(0, crate::mesh::MeshPeer::peers_direct)
+    }
+
+    /// The direct-session ceiling this tab negotiates up to.
+    #[wasm_bindgen(getter)]
+    pub fn max_direct(&self) -> u32 {
+        self.mesh
+            .as_ref()
+            .map_or(0, crate::mesh::MeshPeer::max_direct)
+    }
+
     /// Stop accepting peers. Idempotent.
+    ///
+    /// Leaving the mesh is what stops the share serving now: the mesh's Router
+    /// owns the accept loop for this tab's ALPNs, so dropping it is the
+    /// shutdown. It also broadcasts `Left`, which the old stop channel never
+    /// did — peers used to wait out a silence timeout.
     pub async fn stop(mut self) -> Result<(), JsValue> {
-        if let Some(tx) = self.stop_tx.take() {
-            let _ = tx.send(());
+        if let Some(mesh) = self.mesh.take() {
+            mesh.leave().await?;
         }
         // Close live WebRTC sessions before the endpoint: dropping them clears
         // their browser handlers and closes the peer connections.
         self.hub.detach_all();
         self._endpoint.close().await;
+        Ok(())
+    }
+}
+
+/// The producer's two protocols, as `ProtocolHandler`s on the mesh's Router.
+///
+/// The producer tab used to own `endpoint.accept()`. It cannot any more: the
+/// share and the mesh share one endpoint, and iroh allows exactly one accept
+/// loop per endpoint — `Router::spawn` overrides the ALPN list, and two loops
+/// race for one queue.
+///
+/// Both handlers must be `Send + Sync + 'static` to live in the Router, while
+/// the producer's state holds `FileSystemFileHandle`s and the JSEP path holds
+/// web-sys closures — all `!Send`. `SendWrapper` bridges that: it is sound
+/// because wasm is single-threaded, and it panics loudly rather than silently
+/// if that ever stops being true. The actual work is then spawned with
+/// `n0_future::task::spawn`, which is `spawn_local` here, so the `!Send` future
+/// never has to satisfy the Router's `Send` accept signature.
+#[derive(Clone)]
+pub(crate) struct MountHandler {
+    shared: send_wrapper::SendWrapper<Shared>,
+    secret: [u8; SECRET_LEN],
+}
+
+impl std::fmt::Debug for MountHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MountHandler")
+            .finish_non_exhaustive()
+    }
+}
+
+impl iroh::protocol::ProtocolHandler for MountHandler {
+    async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
+        let shared = Rc::clone(&*self.shared);
+        let secret = self.secret;
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(error) = serve_mount(conn, secret, shared).await {
+                web_sys::console::debug_1(&error);
+            }
+        });
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SignalHandler {
+    local: iroh::EndpointId,
+    hub: send_wrapper::SendWrapper<Arc<BrowserHubTransport>>,
+}
+
+impl std::fmt::Debug for SignalHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SignalHandler")
+            .finish_non_exhaustive()
+    }
+}
+
+impl iroh::protocol::ProtocolHandler for SignalHandler {
+    async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
+        let local = self.local;
+        let hub = Arc::clone(&*self.hub);
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(error) = serve_signal(&conn, local, &hub).await {
+                web_sys::console::debug_1(&error);
+            }
+        });
         Ok(())
     }
 }
@@ -493,49 +614,6 @@ fn safe_rel_path(path: &str) -> bool {
     path.split('/')
         .all(|part| !part.is_empty() && part != "." && part != "..")
 }
-
-async fn accept_loop(
-    endpoint: Endpoint,
-    hub: Arc<BrowserHubTransport>,
-    secret: [u8; SECRET_LEN],
-    shared: Shared,
-    mut stop_rx: oneshot::Receiver<()>,
-) {
-    loop {
-        let incoming = futures::future::select(Box::pin(endpoint.accept()), &mut stop_rx).await;
-        match incoming {
-            futures::future::Either::Right((_, _)) => break,
-            futures::future::Either::Left((None, _)) => break,
-            futures::future::Either::Left((Some(incoming), _)) => {
-                let hub = Arc::clone(&hub);
-                let shared = Rc::clone(&shared);
-                let local = endpoint.id();
-                wasm_bindgen_futures::spawn_local(async move {
-                    if let Err(error) = accept_one(incoming, local, &hub, secret, shared).await {
-                        web_sys::console::error_1(&error);
-                    }
-                });
-            }
-        }
-    }
-}
-
-async fn accept_one(
-    incoming: iroh::endpoint::Incoming,
-    local: iroh::EndpointId,
-    hub: &BrowserHubTransport,
-    secret: [u8; SECRET_LEN],
-    shared: Shared,
-) -> Result<(), JsValue> {
-    let conn = incoming
-        .await
-        .map_err(|error| err("incoming connection", &error))?;
-    if conn.alpn() == WEBRTC_SIGNAL_ALPN {
-        return serve_signal(&conn, local, hub).await;
-    }
-    serve_mount(conn, secret, shared).await
-}
-
 async fn serve_signal(
     conn: &Connection,
     local: iroh::EndpointId,
@@ -652,10 +730,7 @@ async fn serve_stream(
     Ok(())
 }
 
-async fn write_ok_body(
-    send: &mut iroh::endpoint::SendStream,
-    body: &[u8],
-) -> Result<(), JsValue> {
+async fn write_ok_body(send: &mut iroh::endpoint::SendStream, body: &[u8]) -> Result<(), JsValue> {
     send.write_all(&[ReadStatus::Ok.to_byte()])
         .await
         .map_err(|error| err("write status", &error))?;
@@ -677,12 +752,7 @@ async fn write_watch_frame(
     write_ok_body(send, frame).await
 }
 
-async fn answer_read(
-    shared: &Shared,
-    index: u32,
-    offset: u64,
-    len: u32,
-) -> (ReadStatus, Vec<u8>) {
+async fn answer_read(shared: &Shared, index: u32, offset: u64, len: u32) -> (ReadStatus, Vec<u8>) {
     if len > MAX_READ_LEN {
         return (ReadStatus::LenOverCap, Vec::new());
     }
@@ -761,4 +831,3 @@ async fn wait_until_dialable(endpoint: &Endpoint) -> Result<(), JsValue> {
     }
     Ok(())
 }
-

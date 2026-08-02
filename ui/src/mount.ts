@@ -3,7 +3,7 @@
  *
  * One-way and read-only from the peer's point of view: local edits are
  * overwritten on the next sync. Matches the CLI NFS mount's semantics, with
- * the browser picking the mountpoint through `showDirectoryPicker`.
+ * the browser picking a parent target and creating `agent-share-…/` under it.
  */
 
 import { safeSplit, type FileNode, type ManifestDir } from './tree.ts'
@@ -28,6 +28,13 @@ export interface SyncedState {
   dirs: Set<string>
 }
 
+/** A live mount: sync root plus enough to remove the folder on unmount. */
+export interface MountSession {
+  root: FileSystemDirectoryHandle
+  parent: FileSystemDirectoryHandle
+  folderName: string
+}
+
 export function canMount(): boolean {
   return typeof window.showDirectoryPicker === 'function'
 }
@@ -39,28 +46,85 @@ export class MountError extends Error {
   }
 }
 
-/** True when the directory has no entries (CLI requires an empty mountpoint). */
-async function isEmpty(root: FileSystemDirectoryHandle): Promise<boolean> {
-  for await (const _ of root.keys()) return false
-  return true
+/** Pad a number to two digits. */
+function pad2(n: number): string {
+  return n.toString().padStart(2, '0')
 }
 
 /**
- * Ask the user for a writable directory and refuse a non-empty one.
+ * Folder-name candidates for local `date`, in collision-retry order.
+ * Matches the CLI: `agent-share-YYYY-MM-DDTHHMM`, then with seconds, then `-N`.
+ */
+export function mountFolderCandidates(date: Date = new Date()): string[] {
+  const y = date.getFullYear()
+  const mo = pad2(date.getMonth() + 1)
+  const d = pad2(date.getDate())
+  const h = pad2(date.getHours())
+  const mi = pad2(date.getMinutes())
+  const s = pad2(date.getSeconds())
+  const minute = `agent-share-${y}-${mo}-${d}T${h}${mi}`
+  const second = `agent-share-${y}-${mo}-${d}T${h}${mi}${s}`
+  const names = [minute, second]
+  for (let n = 2; n <= 99; n++) names.push(`${second}-${n}`)
+  return names
+}
+
+/** True when `parent` already has an entry named `name`. */
+async function hasEntry(parent: FileSystemDirectoryHandle, name: string): Promise<boolean> {
+  try {
+    await parent.getDirectoryHandle(name)
+    return true
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'NotFoundError') {
+      try {
+        await parent.getFileHandle(name)
+        return true
+      } catch (inner) {
+        if (inner instanceof DOMException && inner.name === 'NotFoundError') return false
+        throw inner
+      }
+    }
+    throw error
+  }
+}
+
+/** Create `agent-share-…/` under `parent`; retry on name collision. */
+async function createMountFolder(
+  parent: FileSystemDirectoryHandle,
+): Promise<{ root: FileSystemDirectoryHandle; folderName: string }> {
+  for (const folderName of mountFolderCandidates()) {
+    if (await hasEntry(parent, folderName)) continue
+    const root = await parent.getDirectoryHandle(folderName, { create: true })
+    return { root, folderName }
+  }
+  throw new MountError('Could not create a unique agent-share folder')
+}
+
+/**
+ * Ask the user for a writable parent directory and create `agent-share-…/`
+ * under it. The parent may already contain other files.
  *
  * AbortError from the picker is rethrown so the caller can treat cancel as a
  * no-op; everything else becomes a MountError.
  */
-export async function pickMountRoot(): Promise<FileSystemDirectoryHandle> {
+export async function pickMountRoot(): Promise<MountSession> {
   const picker = window.showDirectoryPicker
   if (!picker) {
     throw new MountError('This browser cannot mount folders')
   }
-  const root = await picker({ mode: 'readwrite' })
-  if (!(await isEmpty(root))) {
-    throw new MountError('Mount directory must be empty')
+  const parent = await picker({ mode: 'readwrite' })
+  const { root, folderName } = await createMountFolder(parent)
+  return { root, parent, folderName }
+}
+
+/** Remove the mount folder from its parent. Best-effort. */
+export async function disposeMount(session: MountSession): Promise<void> {
+  try {
+    await session.parent.removeEntry(session.folderName, { recursive: true })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'NotFoundError') return
+    console.warn('[share] failed to remove mount folder', error)
   }
-  return root
 }
 
 export function emptySyncedState(): SyncedState {

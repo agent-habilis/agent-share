@@ -163,7 +163,17 @@ pub struct EventLoopConfig {
     /// The multi-hop transport handle when `--multihop` registered it on the
     /// peer endpoint; `run()` moves it into `EventLoopState::multihop`.
     /// `None` when multihop is off. Built in `setup_mesh`.
+    ///
+    /// Host-only: multihop forwards real UDP packets, so the crate that provides
+    /// `MultihopHandle` is not in the wasm dependency table at all. The *field*
+    /// has to disappear rather than just hold `None` — its type does not exist
+    /// there.
+    #[cfg(feature = "host")]
     pub(crate) multihop: Option<iroh_multihop_transport::MultihopHandle>,
+    /// This peer's `WebRTC` transport handle. Portable: it is the browser's
+    /// only direct path onto the mesh, and an extra candidate path for a native
+    /// peer. `run()` moves it into `EventLoopState::webrtc`.
+    pub(crate) webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
     /// Inbound unicast frames from the `UNICAST_ALPN` acceptor. The event loop
     /// drains this into `gossip::ingest` (the same path as gossip), so both
     /// transports share signature-verify + dedup. Built in `setup_mesh`.
@@ -191,6 +201,32 @@ impl EventLoopConfig {
     #[must_use]
     pub fn mesh_id(&self) -> &MeshId {
         &self.mesh
+    }
+
+    /// This peer's `WebRTC` transport handle.
+    ///
+    /// Handed out so a consumer can read its own live direct-peer count
+    /// (`transport().session_count()`) with no request/response hop into the
+    /// event loop — the loop owns `EventLoopState` exclusively, but the
+    /// transport is shared by design. Cheap to clone; every clone shares one
+    /// session registry.
+    #[must_use]
+    pub fn webrtc_handle(&self) -> fofoca_iroh_webrtc_transport::WebRtcHandle {
+        self.webrtc.clone()
+    }
+
+    /// The Router serving this endpoint's ALPNs — gossip, unicast, the mesh
+    /// JSEP signal, and any protocol the caller registered.
+    ///
+    /// Handed out so a caller sharing its endpoint can keep the accept loop
+    /// alive past `Node::spawn`, which consumes the config. Hold the clone;
+    /// dropping every one aborts the accept task and the process stops
+    /// answering. Avoid `Router::shutdown` unless you mean it — it closes the
+    /// endpoint, which on a shared endpoint takes the caller's protocol down
+    /// too.
+    #[must_use]
+    pub fn router(&self) -> Router {
+        self.router.clone()
     }
 
     /// This member's nickname, as resolved by setup.

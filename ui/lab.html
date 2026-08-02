@@ -126,6 +126,35 @@
         </div>
         <pre id="rx-log"></pre>
       </section>
+      <section>
+        <h2>Mesh peer</h2>
+        <p class="hint">
+          This tab as a full <code>agent-habilis-mesh</code> member — the same
+          engine the CLI runs. <b>direct</b> counts live WebRTC data channels,
+          <b>gossip</b> is the roster (including self). A
+          <code>#mesh=💬://…</code> fragment joins on load, so the link is
+          shareable.
+        </p>
+        <textarea id="mesh-id" placeholder="💬://… (blank ⇒ create a new mesh)"></textarea>
+        <div class="row">
+          <label>
+            transport
+            <select id="mesh-transport">
+              <option value="dynamic">dynamic</option>
+              <option value="webrtc">webrtc-only</option>
+            </select>
+          </label>
+          <button type="button" id="mesh-create">Create mesh</button>
+          <button type="button" id="mesh-join">Join mesh</button>
+          <button type="button" id="mesh-leave" disabled>Leave</button>
+          <button type="button" id="mesh-copy" disabled>Copy join URL</button>
+        </div>
+        <div class="row">
+          <strong id="mesh-counts">gossip 0 · direct 0/0</strong>
+          <span id="mesh-nick" class="hint"></span>
+        </div>
+        <pre id="mesh-log"></pre>
+      </section>
     </div>
     <script type="module" src="/src/lab.ts"></script>
   </body>

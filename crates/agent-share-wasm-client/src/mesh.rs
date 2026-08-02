@@ -1,0 +1,326 @@
+//! A mesh peer, in a browser tab.
+//!
+//! This is the same engine the CLI runs — `agent-habilis-mesh` with its `host`
+//! feature off — so a tab is a first-class member rather than a client of one.
+//! It creates or joins a mesh, appears on every other member's roster, and
+//! negotiates direct `WebRTC` data channels with them, CLI peers included.
+//!
+//! Two numbers come back out, and they describe different layers:
+//!
+//! - `peers_gossip` — the mesh roster: everyone we know is a member, however
+//!   they are reached. Includes self, so a lone peer reads 1.
+//! - `peers_direct` — live `WebRTC` sessions, i.e. peers we hold a direct data
+//!   channel with. Always ≤ the roster, and the two converge once every peer
+//!   has been negotiated with.
+//!
+//! Discovery needs no lookup service, which is what makes this work in a tab at
+//! all: the mesh id carries a seed, the seed derives a rendezvous identity, and
+//! every peer pre-registers that identity at a known relay rung. A browser has
+//! no mDNS and no DHT; it does not need them.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use agent_habilis_mesh::embed::{
+    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink,
+};
+use agent_habilis_mesh::net::TransportOpts;
+use agent_habilis_mesh::protocol::{
+    DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message,
+};
+use agent_habilis_mesh::runtime::{
+    CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh,
+    setup_mesh,
+};
+use agent_share_proto::framing::SECRET_LEN;
+use agent_share_proto::mesh_key::share_mesh_key;
+use wasm_bindgen::prelude::*;
+
+/// The most direct peers a tab will hold sessions with.
+///
+/// Mirrors the engine's own cap. Each session is one `RTCPeerConnection` plus,
+/// on the way up, a full ICE gathering budget — so this is a real ceiling on a
+/// tab, not a formality.
+const MAX_DIRECT_PEERS: usize = 16;
+
+/// Presence-only driver: enough to be a member, nothing more.
+///
+/// Application payloads are a separate concern — a peer that carries none still
+/// joins, shows up on every roster, and holds direct sessions. That separation
+/// is what lets this file be short.
+struct Probe;
+
+#[agent_habilis_mesh::async_trait]
+impl NodeApp for Probe {
+    fn classify(&self, _message: &Message) -> AppClass {
+        AppClass {
+            loggable: false,
+            beat: true,
+            valid: true,
+            chained: false,
+            sealed: false,
+        }
+    }
+
+    async fn on_app_frame(
+        &mut self,
+        _frame: InboundApp<'_>,
+        _state: &mut EventLoopState,
+        _ctx: &HandlerCtx<'_>,
+    ) -> bool {
+        false
+    }
+}
+
+#[agent_habilis_mesh::async_trait]
+impl NodeDriver for Probe {
+    type Session = ();
+    type Http = ();
+    type Ipc = serde_json::Value;
+}
+
+/// A live mesh membership held by this tab.
+#[wasm_bindgen]
+pub struct MeshPeer {
+    mesh_id: String,
+    nickname: String,
+    /// Roster size, mirrored out of the event loop on every membership change
+    /// and on its periodic refresh. Lock-free, so the UI can poll it per frame
+    /// without a request/response hop into the loop.
+    live: Arc<AtomicUsize>,
+    hub: Arc<fofoca_iroh_webrtc_transport::BrowserHubTransport>,
+    node: Option<Node<Probe>>,
+}
+
+#[wasm_bindgen]
+impl MeshPeer {
+    /// Mint a new mesh and join it. The returned peer's `mesh_id` is what other
+    /// peers — browser or CLI — pass to [`MeshPeer::join`].
+    ///
+    /// # Errors
+    /// Endpoint bind failure, or no reachable relay.
+    pub async fn create(transport: Option<String>) -> Result<MeshPeer, JsValue> {
+        console_error_panic_hook::set_once();
+        let transports = parse_transport(transport.as_deref())?;
+        let resolved = CreateParams {
+            name: MeshName::random(),
+            nickname: None,
+            // The relay ladder is the load-bearing leg: it is the only one a tab
+            // has, and the rendezvous homes on it. mDNS and DHT are simply
+            // absent off a host, so asking for them costs nothing and buys
+            // nothing here — but a CLI peer on the same mesh does use them.
+            config: MeshConfig {
+                lookups: LookupOpts::public_preset(),
+                password: None,
+                issuer_pubkey: None,
+            },
+            advertise: DirectorySelection::Unset,
+            password: None,
+            invite_only: false,
+        }
+        .resolve()
+        .map_err(|error| err("resolve create params", &error))?;
+        spawn_peer(resolved, transports, None).await
+    }
+
+    /// Join an existing mesh by its `💬://…` id.
+    ///
+    /// # Errors
+    /// Unparseable id, endpoint bind failure, or no reachable relay.
+    pub async fn join(mesh_id: String, transport: Option<String>) -> Result<MeshPeer, JsValue> {
+        console_error_panic_hook::set_once();
+        let transports = parse_transport(transport.as_deref())?;
+        let target = mesh_id
+            .trim()
+            .parse::<JoinTarget>()
+            .map_err(|error| err("parse mesh id", &error))?;
+        let resolved = JoinParams {
+            target,
+            nickname: None,
+            password: None,
+        }
+        .resolve()
+        .map_err(|error| err("resolve join params", &error))?;
+        spawn_peer(resolved, transports, None).await
+    }
+
+    /// Join the mesh a *share* belongs to, derived from its ticket secret.
+    ///
+    /// Not exposed to JS: a caller holding the ticket already gets this for
+    /// free from `ShareClient`/`ShareProducer`, and handing out a
+    /// secret-taking constructor would invite passing the bearer token around
+    /// by hand.
+    ///
+    /// Hashes before deriving for the same reason the CLI does — the engine
+    /// carries the topic string into user-facing surfaces, so it must not be
+    /// the secret. Both ends call `share_mesh_key`, which is why they agree.
+    /// Join a share's mesh on an endpoint the caller already owns, registering
+    /// the caller's ALPNs on the Router that comes with it.
+    ///
+    /// The producer's path. Unlike a viewer, a producer *serves* protocols, and
+    /// iroh permits one accept loop per endpoint — so its ALPNs must ride the
+    /// mesh's Router rather than a loop of its own.
+    pub(crate) async fn join_share_with(
+        secret: &[u8; SECRET_LEN],
+        endpoint: iroh::Endpoint,
+        webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
+        protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    ) -> Result<MeshPeer, JsValue> {
+        let resolved = resolve_share(secret)?;
+        spawn_peer_inner(
+            resolved,
+            TransportOpts::default(),
+            Some(InjectedEndpoint { endpoint, webrtc }),
+            protocols,
+        )
+        .await
+    }
+
+    pub(crate) async fn join_share(
+        secret: &[u8; SECRET_LEN],
+        shared: Option<(iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
+    ) -> Result<MeshPeer, JsValue> {
+        let resolved = resolve_share(secret)?;
+        spawn_peer(resolved, TransportOpts::default(), shared).await
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn mesh_id(&self) -> String {
+        self.mesh_id.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn nickname(&self) -> String {
+        self.nickname.clone()
+    }
+
+    /// Members on the gossip roster, including self — so a lone peer reads 1.
+    #[wasm_bindgen(getter)]
+    pub fn peers_gossip(&self) -> u32 {
+        u32::try_from(self.live.load(Ordering::Relaxed)).unwrap_or(u32::MAX)
+    }
+
+    /// Peers we hold a live `WebRTC` data channel with. Excludes self.
+    #[wasm_bindgen(getter)]
+    pub fn peers_direct(&self) -> u32 {
+        u32::try_from(self.hub.session_count()).unwrap_or(u32::MAX)
+    }
+
+    /// The direct-session ceiling this peer negotiates up to.
+    #[wasm_bindgen(getter)]
+    pub fn max_direct(&self) -> u32 {
+        u32::try_from(MAX_DIRECT_PEERS).unwrap_or(u32::MAX)
+    }
+
+    /// Leave the mesh: broadcast `Left` so peers drop us now rather than on a
+    /// silence timeout, then wind the loop down. Idempotent.
+    ///
+    /// # Errors
+    /// The event loop returned an error while shutting down.
+    pub async fn leave(mut self) -> Result<(), JsValue> {
+        if let Some(node) = self.node.take() {
+            node.leave()
+                .await
+                .map_err(|error| err("leave mesh", &error))?;
+        }
+        Ok(())
+    }
+}
+
+/// Stand the node up from resolved params. Shared by create and join — the only
+/// difference between them is the `SetupKind` that lands here.
+/// The mesh a share's secret derives, resolved for joining.
+///
+/// Hashes before deriving: the engine carries the topic string into its state
+/// file and user-facing lines, so it must not be the bearer secret.
+fn resolve_share(secret: &[u8; SECRET_LEN]) -> Result<Resolved, JsValue> {
+    let mesh = derive_topic_mesh(&share_mesh_key(secret))
+        .map_err(|error| err("derive the share mesh", &error))?;
+    let target = mesh
+        .to_string()
+        .parse::<JoinTarget>()
+        .map_err(|error| err("parse the share mesh id", &error))?;
+    JoinParams {
+        target,
+        nickname: None,
+        password: None,
+    }
+    .resolve()
+    .map_err(|error| err("resolve the share mesh join", &error))
+}
+
+/// `None` / `"dynamic"` ⇒ everything available; `"webrtc"` ⇒ WebRTC-only data
+/// plane. A tab has no IP transports either way, so this mostly matters for
+/// symmetry with the CLI flag — and so a browser-side test can *state* the
+/// contract it is asserting rather than relying on the target implying it.
+fn parse_transport(mode: Option<&str>) -> Result<TransportOpts, JsValue> {
+    match mode.map(str::trim).filter(|mode| !mode.is_empty()) {
+        None | Some("dynamic") => Ok(TransportOpts::default()),
+        Some("webrtc") => Ok(TransportOpts::webrtc_only()),
+        Some(other) => Err(JsValue::from_str(&format!(
+            "unknown transport {other:?}; expected `webrtc` or `dynamic`"
+        ))),
+    }
+}
+
+async fn spawn_peer(
+    resolved: Resolved,
+    transports: TransportOpts,
+    shared: Option<(iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
+) -> Result<MeshPeer, JsValue> {
+    let injected = shared.map(|(endpoint, webrtc)| InjectedEndpoint { endpoint, webrtc });
+    spawn_peer_inner(resolved, transports, injected, Vec::new()).await
+}
+
+async fn spawn_peer_inner(
+    resolved: Resolved,
+    transports: TransportOpts,
+    injected: Option<InjectedEndpoint>,
+    protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+) -> Result<MeshPeer, JsValue> {
+    let Resolved { kind, author, .. } = resolved;
+    let live = Arc::new(AtomicUsize::new(0));
+    let config = setup_mesh(
+        kind,
+        SetupParams {
+            author: author.clone(),
+            max_peers: MAX_DIRECT_PEERS,
+            // Share the mount's endpoint when there is one, so this tab has a
+            // single identity and a single hub. That is what lets the mount
+            // session show up in `peers_direct` immediately, instead of the
+            // count sitting at 0 while files are visibly loading.
+            endpoint: injected,
+            protocols,
+            transports,
+            // A tab writes no files and binds no socket. Both are already
+            // optional on the engine, so this is configuration rather than a
+            // special case.
+            runtime_base: None,
+            state_file: None,
+            sink: Arc::new(SilentSink),
+            multihop: false,
+            per_peer_gate: None,
+            cohost: None,
+            live_count: Some(Arc::clone(&live)),
+        },
+    )
+    .await
+    .map_err(|error| err("set up mesh", &error))?;
+
+    let mesh_id = config.mesh_id().as_str().to_owned();
+    let hub = config.webrtc_handle().transport();
+    // `handle_signals: false` — there are no process signals in a tab, and the
+    // engine's signal registration is host-only anyway.
+    let node = Node::spawn(config, Probe, None, false);
+    Ok(MeshPeer {
+        mesh_id,
+        nickname: author.to_string(),
+        live,
+        hub,
+        node: Some(node),
+    })
+}
+
+fn err(context: &str, error: &impl std::fmt::Display) -> JsValue {
+    JsValue::from_str(&format!("{context}: {error}"))
+}

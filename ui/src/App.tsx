@@ -23,10 +23,12 @@ import { ColumnView } from './ColumnView.tsx'
 import { saveStream, singleFileStream, zipStream, type Progress } from './download.ts'
 import {
   canMount,
+  disposeMount,
   emptySyncedState,
   MountError,
   pickMountRoot,
   syncMount,
+  type MountSession,
   type SyncedState,
 } from './mount.ts'
 import { canProduce, pickShareRoot, startProducer, type ShareProducer } from './produce.ts'
@@ -42,6 +44,13 @@ import {
 
 interface Client {
   readonly transport: string
+  /** Announce departure from the share's mesh. Safe to call more than once. */
+  leave_mesh(): void
+  /** Members on the share's mesh, including us. 0 when the mesh is not up. */
+  readonly peers_gossip: number
+  /** Peers we hold a direct WebRTC data channel with. */
+  readonly peers_direct: number
+  readonly max_direct: number
   manifest(): Promise<Manifest>
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
   /** Subscribe to tree changes. Each call delivers the whole manifest. */
@@ -376,20 +385,36 @@ function transferLabel(kind: Transfer['kind']): string {
 
 const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
   const state = signal<State>({ phase: 'connecting' })
+  // The peer counts are lock-free reads on the wasm side (an atomic the mesh
+  // event loop stores into, and a map length on the transport), so a timer is
+  // cheaper than plumbing an event channel out through wasm-bindgen. This
+  // signal exists only to make the header recompute; the values are read live.
+  const peerTick = signal(0)
+  const peerTimer = window.setInterval(() => {
+    peerTick.value = peerTick.peek() + 1
+  }, 1000)
+  ctx.aborted.addEventListener('abort', () => window.clearInterval(peerTimer))
   const path = signal<string[]>([])
   const transfer = signal<Transfer | null>(null)
   const mountError = signal<string | null>(null)
   /** Non-null while a host directory is mounted for this session. */
-  const mountRoot = signal<FileSystemDirectoryHandle | null>(null)
+  const mountSession = signal<MountSession | null>(null)
 
   let synced: SyncedState = emptySyncedState()
   let syncing = false
   let syncDirty = false
 
+  async function clearMount(): Promise<void> {
+    const session = mountSession.peek()
+    mountSession.value = null
+    synced = emptySyncedState()
+    if (session) await disposeMount(session)
+  }
+
   async function runSync(label: 'mounting' | 'syncing'): Promise<void> {
-    const root = mountRoot.peek()
+    const session = mountSession.peek()
     const current = state.peek()
-    if (!root || current.phase !== 'ready') return
+    if (!session || current.phase !== 'ready') return
     if (syncing) {
       syncDirty = true
       return
@@ -401,12 +426,12 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
         // Re-read the latest ready state each pass — a watch may have landed
         // while the previous write was in flight.
         const latest = state.peek()
-        if (latest.phase !== 'ready' || mountRoot.peek() !== root) break
+        if (latest.phase !== 'ready' || mountSession.peek() !== session) break
         const latestTree = buildTree(latest.manifest)
         const latestFiles = filesUnder(latestTree.root)
         transfer.value = { kind: label, progress: { done: 0, total: 0 } }
         synced = await syncMount(
-          root,
+          session.root,
           latest.client,
           latestFiles,
           latest.manifest.dirs,
@@ -417,12 +442,11 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
         )
         // After the first full mirror, later passes are incremental syncs.
         label = 'syncing'
-      } while (syncDirty && mountRoot.peek() === root && !ctx.aborted.aborted)
+      } while (syncDirty && mountSession.peek() === session && !ctx.aborted.aborted)
     } catch (error) {
       if (!ctx.aborted.aborted) {
         mountError.value = error instanceof MountError ? error.message : String(error)
-        mountRoot.value = null
-        synced = emptySyncedState()
+        await clearMount()
       }
     } finally {
       syncing = false
@@ -440,11 +464,27 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
       if (ctx.aborted.aborted) return
       path.value = prunePath(path.peek(), manifest)
       state.value = { phase: 'ready', client, manifest }
+      // Announce departure while the page still exists. Without this the tab
+      // lingers on every peer's roster until the silence sweeper evicts it —
+      // which showed up immediately in testing as a share reporting more
+      // members than there were processes.
+      //
+      // `pagehide`, not `beforeunload`: the latter is unreliable on mobile and
+      // is skipped entirely on the bfcache path.
+      const onHide = () => client.leave_mesh()
+      window.addEventListener('pagehide', onHide)
+      ctx.aborted.addEventListener('abort', () => {
+        window.removeEventListener('pagehide', onHide)
+        // A ticket change unmounts this session; the mesh membership belongs to
+        // it, so it goes too. Otherwise navigating between shares accumulates
+        // ghosts exactly the way a closed tab did.
+        client.leave_mesh()
+      })
       await client.watch((next) => {
         if (ctx.aborted.aborted) return
         path.value = prunePath(path.peek(), next)
         state.value = { phase: 'ready', client, manifest: next }
-        if (mountRoot.peek()) void runSync('syncing')
+        if (mountSession.peek()) void runSync('syncing')
       })
     } catch (error) {
       if (!ctx.aborted.aborted) state.value = { phase: 'failed', reason: String(error) }
@@ -453,8 +493,7 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
 
   // Drop the mount when the session unmounts (ticket change / leave).
   ctx.aborted.addEventListener('abort', () => {
-    mountRoot.value = null
-    synced = emptySyncedState()
+    void clearMount()
   })
 
   const tree = computed(() => {
@@ -509,10 +548,9 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
   }
 
   async function mount(): Promise<void> {
-    if (mountRoot.peek()) {
-      mountRoot.value = null
-      synced = emptySyncedState()
+    if (mountSession.peek()) {
       mountError.value = null
+      await clearMount()
       return
     }
     if (!canMount()) {
@@ -522,17 +560,19 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     if (transfer.peek()) return
     mountError.value = null
     try {
-      const root = await pickMountRoot()
-      if (ctx.aborted.aborted) return
-      mountRoot.value = root
+      const session = await pickMountRoot()
+      if (ctx.aborted.aborted) {
+        await disposeMount(session)
+        return
+      }
+      mountSession.value = session
       synced = emptySyncedState()
       await runSync('mounting')
     } catch (error) {
       // User dismissed the picker — not an error worth surfacing.
       if (error instanceof DOMException && error.name === 'AbortError') return
       mountError.value = error instanceof MountError ? error.message : String(error)
-      mountRoot.value = null
-      synced = emptySyncedState()
+      await clearMount()
     }
   }
 
@@ -558,9 +598,22 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     const files = filesUnder(built.root)
     const total = files.reduce((sum, file) => sum + file.size, 0)
     const active = transfer.value
-    const mounted = mountRoot.value !== null
+    const mounted = mountSession.value !== null
     const err = mountError.value
     const hasSelection = nodeAtPath(built.root, path.value) !== undefined
+    // Read through the tick so this recomputes each second. `max_direct` is 0
+    // exactly when the mesh failed to start, which is also when there is
+    // nothing worth showing — so that doubles as the "hide it" signal rather
+    // than reporting a misleading `0/0`.
+    peerTick.value
+    const peers =
+      current.client.max_direct === 0
+        ? null
+        : {
+            gossip: current.client.peers_gossip,
+            direct: current.client.peers_direct,
+            max: current.client.max_direct,
+          }
 
     return (
       <div
@@ -612,6 +665,9 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
                   </Badge>
                   <Text color="fgMuted">
                     {files.length} files · {humanBytes(total)}
+                    {peers === null
+                      ? ''
+                      : ` · ${peers.direct}/${peers.max} direct · ${peers.gossip} on mesh`}
                   </Text>
                 </Stack>
                 {/* No `disabled={busy}` needed — this branch only renders when idle. */}
