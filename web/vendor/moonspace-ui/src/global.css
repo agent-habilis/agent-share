@@ -13,6 +13,10 @@
  * }
  */
 
+/* Order the layers up front, so `base` sorts below the `components` layer that
+ * visage-style creates later from injected component styles. */
+@layer base, components;
+
 *, *::before, *::after {
   box-sizing: border-box;
 }
@@ -51,7 +55,22 @@ body {
 button, input, select, textarea {
   font: inherit;
   font-feature-settings: inherit;
-  color: inherit;
+}
+
+/*
+ * `color` is the one part of that reset that must be layered. Component styles
+ * are emitted into `@layer components` on purpose — see visage-style's compile
+ * config: layered rules lose to un-layered author CSS, so an app stylesheet
+ * wins without `!important`. Un-layered, this `inherit` collected that same
+ * privilege and beat every Button colour: each variant's, and `:disabled`'s,
+ * silently lost to it, so no button could ever look anything but default.
+ * In `base` it sits below `components` and still covers a bare control, which
+ * is all it was ever for.
+ */
+@layer base {
+  button, input, select, textarea {
+    color: inherit;
+  }
 }
 
 ::selection {

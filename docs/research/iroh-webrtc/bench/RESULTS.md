@@ -32,7 +32,7 @@ Reading:
   and loss; loopback is its *best* case, so WAN gains should be larger. A
   lossy-link run (dnctl/pfctl) was not performed in this pass.
 
-Not measured here: the browser leg (`ui` lab page). The session-leak fix is
+Not measured here: the browser leg (`web/lab.html`). The session-leak fix is
 behavioral (reconnect to a browser producer now succeeds; before it failed
 with "a live WebRTC session already exists") and the TURN cache means at most
 one credential fetch per tab per ~TTL instead of one per connect.

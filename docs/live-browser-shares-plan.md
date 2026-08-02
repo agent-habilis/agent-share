@@ -9,7 +9,7 @@ Sharing a folder is supposed to be live (adds/edits/deletes on the producer
 reach receivers without remount — see `README.md` and commit ff93f3a). The
 native CLI producer is live; **sharing from the browser never was**:
 
-1. **One-time scan.** `ui/src/produce.ts:57-84` walks the picked directory
+1. **One-time scan.** `web/src/produce.ts:57-84` walks the picked directory
    once, calls `handle.getFile()` per file, and keeps only the resulting
    `File` snapshots — both the per-file `FileSystemFileHandle`s and the root
    `FileSystemDirectoryHandle` are discarded. Nothing can ever re-scan.
@@ -24,7 +24,7 @@ native CLI producer is live; **sharing from the browser never was**:
    (`produce.rs:642-669`) gets a rejected `array_buffer()` promise
    (`NotReadableError`) → `ReadStatus::Io`. The receiving browser escalates
    any read error during mirror-sync into a full unmount
-   (`ui/src/App.tsx:414-419`), so one edited file tears the receiver down.
+   (`web/src/App.tsx:414-419`), so one edited file tears the receiver down.
 5. **Consumer watch is one-shot.** The browser consumer's subscription
    (`crates/agent-share-wasm-client/src/lib.rs:143-191`) permanently ends on
    ANY error — read, decode, serde, or a throwing JS callback at `:184` —
@@ -48,7 +48,7 @@ as EOS, uncapped debounce) are known but deferred.
   (`crates/agent-share/src/mount/live.rs:161-263`) keeps
   `index_of: HashMap<path, u32>`, reuses a path's slot, appends new files,
   and tombstones vanished slots (`FileEntry::tombstone()`, empty rel_path).
-  `ui/src/tree.ts:110` skips tombstones; `ui/src/mount.ts:134-141` diffs per
+  `web/src/tree.ts:110` skips tombstones; `web/src/mount.ts:134-141` diffs per
   file on `(size, mtime, index)`.
 - `FileEntry.mtime` is **seconds** since epoch (`manifest.rs` doc); browser
   `File.lastModified` is milliseconds — divide by 1000 or native NFS
@@ -145,7 +145,7 @@ native `LiveTree` wrap it.
   `"FileSystemHandle", "FileSystemFileHandle"`. Do NOT touch
   `fofoca-iroh-webrtc-transport`'s web-sys block.
 
-## Step 3 — producer JS, `ui/src/produce.ts`
+## Step 3 — producer JS, `web/src/produce.ts`
 
 - `scanDirectory` keeps handles:
   `{rel_path, size, mtime: Math.floor(file.lastModified / 1000), handle}`;
@@ -216,7 +216,7 @@ OP_WATCH request, frame loop) with three behavior changes:
 Optional cheap addition: a second `Option<js_sys::Function>` status callback
 (`"live" | "retrying" | "ended"`); leave `App.tsx` unwired for now.
 
-## Step 5 — mirror resilience, `ui/src/mount.ts`
+## Step 5 — mirror resilience, `web/src/mount.ts`
 
 In `syncMount` (`:185-190`), wrap the per-file `writeFile` in try/catch: on
 failure `console.warn`, delete that path from `nextFiles` (so the next pass
@@ -242,15 +242,15 @@ landing mid-sync; no changes there.
 
 - Host tests: `cd crates/agent-share-wasm-client && cargo test` — the new
   `live_state` suite (ported `live.rs` tests + dedupe + oversize-refusal).
-- `cd ui && bun run typecheck && bun test`.
+- `cd web && bun run typecheck && bun test`.
 - Build: `cargo task web-wasm` (regenerates `dist/{web,nodejs}` that
-  `ui/src/produce.ts` imports; needs wasm32 target + wasm-bindgen CLI +
+  `web/src/produce.ts` imports; needs wasm32 target + wasm-bindgen CLI +
   Homebrew LLVM clang). Native suites must stay green:
   `cargo test -p agent-share` (note: `relay_mode_rejects_loopback_ticket_...`
   has a pre-existing environment-dependent failure, not a regression) and
   `cargo test -p fofoca-iroh-webrtc-transport --features host`.
 - Manual (required — `showDirectoryPicker` needs a user gesture; dev server:
-  `cd ui && bun run dev` → localhost:5173): tab A shares a folder, tab B
+  `cd web && bun run dev` → localhost:5173): tab A shares a folder, tab B
   joins via the ticket URL. Then:
   - edit a file → tab B's tree updates within ~2-4 s and a download serves
     the NEW bytes (this was the `NotReadableError` repro);

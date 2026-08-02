@@ -2,6 +2,9 @@
  * Lab: synthetic OP_BENCH producer + consumer (transport set by producer).
  */
 
+// First, before anything can build a Disposable. See the file for why.
+import './compat.ts'
+
 import { parseShareInput } from './ticket.ts'
 
 function importWasm() {

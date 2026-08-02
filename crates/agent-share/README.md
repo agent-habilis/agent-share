@@ -26,7 +26,7 @@ has no transport flag. After connect the consumer measures for **30s** by defaul
 (`--duration`). `relay` dials **only** the iroh relay URL (direct IPs stripped);
 `webrtc` dials **only** the WebRTC custom addr. Same-machine WebRTC still uses
 host ICE (localhost), so compare against a forced relay to see a real gap. The
-web lab at `ui/lab.html` and `npx agent-share bench` expose the same pair.
+browser lab at `web/lab.html` and `npx agent-share bench` expose the same pair.
 
 ## Where things live
 
@@ -37,7 +37,7 @@ a peer with no IP path reach it. The pieces it shares with the browser live else
 |---|---|
 | `agent-share-proto` | the wire format — ticket, manifest, framing |
 | `fofoca-iroh-webrtc-transport` | the iroh custom transport (`host` feature here) |
-| `agent-share-wasm-client` | the same protocol, compiled to wasm for `ui/` and `node/` |
+| `agent-share-wasm-client` | the same protocol, compiled to wasm for `web/` and `node/` |
 
 See the repository README for the web client and the overall layout.
 

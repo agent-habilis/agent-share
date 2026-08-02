@@ -291,7 +291,7 @@ remains future work.
 
 ### 8. Replace polling with platform events — medium ROI
 
-**What:** In `web/jsep.rs`, replace the 50 ms `setTimeout` polls with `icegatheringstatechange`, `onopen`/`onclose`, and `bufferedamountlow` for the send pump. While restructuring, return a typed failure phase (gathering / no-candidates / ice-failed / channel-timeout) so the UI stops regex-matching Rust error prose (`ui/src/App.tsx` sniffs `/ice_connection_state|ondatachannel|ICE failed|…/i`) to pick a hint.
+**What:** In `web/jsep.rs`, replace the 50 ms `setTimeout` polls with `icegatheringstatechange`, `onopen`/`onclose`, and `bufferedamountlow` for the send pump. While restructuring, return a typed failure phase (gathering / no-candidates / ice-failed / channel-timeout) so the UI stops regex-matching Rust error prose (`web/src/App.tsx` sniffs `/ice_connection_state|ondatachannel|ICE failed|…/i`) to pick a hint.
 
 **Why:** Events shave up to 50 ms per state transition during setup, remove wakeup churn, and are the API the platform intends; the typed-phase change removes a brittle string coupling between React and transport error text.
 
@@ -375,8 +375,8 @@ Small, low-risk fixes; none blocks the recommendations above.
 - Stale comments in `host/stun.rs` and `host/driver.rs` still promise a relay *data* fallback the design forbids (relay is signaling-only); `docs/web-plan.md` cites `webrtc-browser/src/lib.rs`, a path that no longer exists.
 - Browser producer `OP_WATCH` is an MVP stub that leaks a `std::future::pending()` task per watch stream (`agent-share-wasm-client/src/produce.rs`).
 - Browser producer clones the manifest bytes and the whole `Vec<ServeFile>` per accepted bi-stream, i.e. per 256 KiB read.
-- Three separate wasm-loader memos (`ui/src/App.tsx`, `ui/src/produce.ts`, `ui/src/ice-lab.ts`) defeat the double-`__wbg_init` guard the App.tsx comment describes — share one memo.
-- `MAX_READ_LEN` re-declared as a literal in `ui/src/download.ts`, `ui/src/mount.ts`, `node/src/cli.js`.
+- Three separate wasm-loader memos (`web/src/App.tsx`, `web/src/produce.ts`, `web/src/ice-lab.ts`) defeat the double-`__wbg_init` guard the App.tsx comment describes — share one memo.
+- `MAX_READ_LEN` re-declared as a literal in `web/src/download.ts`, `web/src/mount.ts`, `node/src/cli.js`.
 - `[patch.crates-io]` fork pins duplicated across the two workspaces (root `Cargo.toml`, `crates/agent-share-wasm-client/Cargo.toml`) — must be bumped in lockstep; cross-reference them in comments.
 - `sleep_ms` / `wait_ms` written twice (`web/jsep.rs`, `produce.rs`).
 

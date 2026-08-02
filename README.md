@@ -104,10 +104,10 @@ connect at all. That is the price of the guarantee.
 
 ```
 cargo task web-wasm          # crates/agent-share-wasm-client/dist/{web,nodejs}
-cd ui && bun install && bun run dev
+cd web && bun install && bun run dev
 ```
 
-`ui/` is the browser app, `node/` the `npx agent-share <🐝…>` receiver.
+`web/` is the browser app, `node/` the `npx agent-share <🐝…>` receiver.
 Both consume the same `.wasm`; only the wasm-bindgen glue differs.
 
 Note `npx` needs a native WebRTC addon (`node-datachannel`), because Node has

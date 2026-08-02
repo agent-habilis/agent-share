@@ -83,8 +83,8 @@ component — usable primitives are `Box`, `Stack`, `Text`, `Table`, `MiddleTrun
 font files** — the `@font-face` block in `src/styles/GlobalStyle.ts` is commented out.
 
 > **Superseded:** moonspace-ui and visage (`visage-dom` / `visage-style` / `visage-router`)
-> are now vendored under `ui/vendor/`. The UI is rewritten on visage (no React /
-> styled-components); see `ui/vendor/moonspace-ui/src/global.css` for the former GlobalStyle.
+> are now vendored under `web/vendor/`. The UI is rewritten on visage (no React /
+> styled-components); see `web/vendor/moonspace-ui/src/global.css` for the former GlobalStyle.
 
 ## Architecture
 
@@ -130,7 +130,7 @@ close. The UI must say so plainly instead of hanging.
 | Transport | WebRTC for all data; iroh relay as signaling carrier only |
 | URL | `share.agent-habilis.com/#<🐝ticket>` — fragment, so the secret never reaches the server |
 | Listing | Full manifest one-shot; no new op |
-| Design system | `moonspace-ui` local path dep; column view built in `agent-share` *(superseded: vendored under `ui/vendor/`, UI on visage)* |
+| Design system | `moonspace-ui` local path dep; column view built in `agent-share` *(superseded: vendored under `web/vendor/`, UI on visage)* |
 | NAT fallback | STUN both sides. No TURN, and **no relay data fallback** — relay is rendezvous only |
 | Web sharing | On by default; `--no-web` opts out |
 | Relay default | `relay.agent-habilis.com` **prepended to the ladder**, n0 defaults retained |
@@ -153,7 +153,7 @@ crates/agent-habilis-mesh/        vendored gossip engine, `host` feature gates w
 crates/fofoca-iroh-webrtc-transport/          one crate: core + `host` (str0m) + `web` (web-sys)
 crates/iroh-multihop-transport/   vendored with mesh
 tasks/                            cargo task runner
-ui/                               React + Vite + Bun SPA
+web/                              React + Vite + Bun SPA
 node/                             npx agent-share <🐝…> receiver
 ```
 
@@ -173,7 +173,7 @@ Being excluded, it keeps its own `[workspace]` and therefore its own duplicated
 the CLI does.
 
 The single `.wasm` it produces feeds both front ends, differing only in wasm-bindgen glue:
-`dist/web/` for `ui/`, `dist/nodejs/` for `node/`.
+`dist/web/` for the `web/` SPA, `dist/nodejs/` for `node/`.
 
 ### What can honestly be shared, and what cannot
 
@@ -316,7 +316,7 @@ passes `"relay"` so it never pays an ICE timeout it cannot win.
 **One library, two consumers.** `crates/agent-share-wasm-client/` is the single shared wasm target:
 the browser UI and the `npx agent-share` CLI link the same `.wasm`, differing
 only in wasm-bindgen glue. `cargo task web-wasm` emits both from one build —
-`dist/web/` (`--target web`, for `ui/`) and `dist/nodejs/`
+`dist/web/` (`--target web`, for the `web/` SPA) and `dist/nodejs/`
 (`--target nodejs`, for the npm package). Same crate, same exports.
 
 Deliberately **not** on the surface, agreed with the npx work: no progress
@@ -341,11 +341,11 @@ Vite transpiles its raw `.ts` directly (`moduleResolution: "bundler"`,
 `.storybook/preview.tsx`. Read the ticket from `location.hash`; empty hash → a landing page
 showing the `agent-share serve` command.
 
-> **Superseded:** the app is now visage + vendored `moonspace-ui` under `ui/vendor/`
+> **Superseded:** the app is now visage + vendored `moonspace-ui` under `web/vendor/`
 > (Bun workspaces). No React / styled-components; `Theme(T)` + `global.css` replace
 > ThemeProvider/GlobalStyle. Hash ticket routing is unchanged.
 
-**Column view** (`ui/ColumnView.tsx`) — Finder-style Miller columns from `Box`,
+**Column view** (`web/ColumnView.tsx`) — Finder-style Miller columns from `Box`,
 `Stack direction="row"`, `Text`, `MiddleTruncate`:
 
 - Build the tree once from the manifest, reusing the shape of `nfs::build_tree`
@@ -381,8 +381,8 @@ The relay does rendezvous; the ticket never leaves the client. Deploy `web/dist`
 | new | `crates/agent-share-proto/` (from `src/mount/{wire,ticket}.rs`, `src/protocol/**`) |
 | new | `crates/fofoca-iroh-webrtc-transport/` (protocol at the root, `host`/`web` backends) |
 | new | `crates/agent-share-wasm-client/` (from `webrtc-browser/`, minus the duplicated types) |
-| new | `ui/` React app |
-| edit | `Cargo.toml` — members, iroh bump, `unstable-custom-transports`, `exclude` `ui/` |
+| new | `web/` React app |
+| edit | `Cargo.toml` — members, iroh bump, `unstable-custom-transports`, `exclude` `web/` |
 | edit | `src/mount/produce.rs` — second ALPN, signal handler, WebRTC transport |
 | edit | `src/mount/mod.rs` — `announce()` URL; consts move to proto |
 | edit | `src/mount/consume.rs` — WebRTC as a third dial path; else `use` lines |
@@ -423,7 +423,7 @@ mounting successfully — proving one crate serves both consumers.
 
 **End to end, same machine:**
 ```
-cargo task web-wasm && cd ui && bun run dev
+cargo task web-wasm && cd web && bun run dev
 agent-share serve ./fixture      # open the printed URL against the dev server
 ```
 Confirm the column view lists the fixture tree, a ranged read returns correct bytes, and

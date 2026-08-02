@@ -7,7 +7,7 @@ crates/agent-share-wasm-client/target/
 
 # Front-end dependencies and build output.
 node_modules/
-ui/dist/
+web/dist/
 
 # wasm-bindgen output, rebuilt by `cargo task web-wasm`. Checked-in build
 # artifacts drift from the source they were generated from, and this one is

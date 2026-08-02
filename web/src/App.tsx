@@ -61,13 +61,19 @@ type State =
   | { phase: 'idle' }
   | { phase: 'connecting' }
   | { phase: 'ready'; client: Client; manifest: Manifest }
-  | { phase: 'failed'; reason: string }
+  | { phase: 'failed'; reason: string; kind?: FailureKind }
 
 type HomeState =
   | { phase: 'landing' }
   | { phase: 'creating' }
   | { phase: 'serving'; producer: ShareProducer }
-  | { phase: 'failed'; reason: string }
+  | { phase: 'failed'; reason: string; kind?: FailureKind }
+
+/**
+ * `unsupported` is a missing browser capability, not a connection problem —
+ * retrying or opening a firewall will never help, so it gets its own copy.
+ */
+type FailureKind = 'unsupported'
 
 function importWasm() {
   return import('../../crates/agent-share-wasm-client/dist/web/agent_share_wasm_client.js')
@@ -127,6 +133,35 @@ function connect(ticket: string): Promise<Client> {
     clients.set(ticket, client)
   }
   return client
+}
+
+/**
+ * Give up this ticket's client: leave the share's mesh and evict the entry.
+ *
+ * Awaits the in-flight connect rather than skipping it. `ShareClient.connect`
+ * joins the share's mesh *before* it resolves, so a session abandoned while
+ * still connecting already has a live membership broadcasting heartbeats — and
+ * the silence sweeper will never evict it, because it is not silent. Every
+ * other viewer of that share counts a member with no UI behind it, forever.
+ * Changing the hash mid-connect was enough to leave one.
+ *
+ * Evicting is the other half. `leave_mesh` is one-way (it takes the mesh out
+ * of the client), so a cached entry that has been left is a client that can
+ * never rejoin: revisiting the ticket would hand back `max_direct === 0`, hide
+ * the peer row for good, and start a second `watch` subscription against a
+ * connection that already has one running and no way to cancel it.
+ *
+ * `owned` is the promise the caller was handed, and it is checked against the
+ * cache before evicting: if a later session for the same ticket has already
+ * replaced the entry, this one is releasing something it no longer owns.
+ */
+function release(ticket: string, owned: Promise<Client>): void {
+  if (clients.get(ticket) !== owned) return
+  clients.delete(ticket)
+  void owned.then(
+    (client) => client.leave_mesh(),
+    () => {},
+  )
 }
 
 function readHash(): string | null {
@@ -209,8 +244,10 @@ function LoadingBody({ label }: { label: string }) {
   )
 }
 
-function FailedBody({ reason }: { reason: string }) {
+function FailedBody({ reason, kind }: { reason: string; kind?: FailureKind }) {
+  const unsupported = kind === 'unsupported'
   const iceHint =
+    !unsupported &&
     /ice_connection_state|ondatachannel|ICE failed|no ICE candidates/i.test(reason)
   return (
     <Centered>
@@ -218,12 +255,14 @@ function FailedBody({ reason }: { reason: string }) {
         <Box border="line" padX={2} padY={1}>
           <Stack direction="column" gap={1}>
             <Text weight="bold" color="danger">
-              Could not connect
+              {unsupported ? 'Not supported in this browser' : 'Could not connect'}
             </Text>
             <Text color="fgMuted">
-              {iceHint
-                ? 'WebRTC could not open a path between the two browsers (LAN/mDNS and TURN both failed). On macOS, allow Local Network for this browser under System Settings → Privacy & Security → Local Network, hard-refresh both tabs, and retry.'
-                : 'A direct connection to this peer could not be established. Both ends may be behind restrictive NATs.'}
+              {unsupported
+                ? 'Sharing a folder needs the File System Access API, which Safari and Firefox do not implement. Receiving a share works here; to send one, use Chrome, Edge, or another Chromium browser.'
+                : iceHint
+                  ? 'WebRTC could not open a path between the two browsers (LAN/mDNS and TURN both failed). On macOS, allow Local Network for this browser under System Settings → Privacy & Security → Local Network, hard-refresh both tabs, and retry.'
+                  : 'A direct connection to this peer could not be established. Both ends may be behind restrictive NATs.'}
             </Text>
             <Text color="fgSubtle">{reason}</Text>
           </Stack>
@@ -240,6 +279,7 @@ const Home = component(function* (_props, ctx: Ctx) {
     if (!canProduce()) {
       state.value = {
         phase: 'failed',
+        kind: 'unsupported',
         reason: 'This browser cannot share folders (File System Access API required)',
       }
       return
@@ -273,10 +313,17 @@ const Home = component(function* (_props, ctx: Ctx) {
   async function stopServing(): Promise<void> {
     const current = state.peek()
     if (current.phase !== 'serving') return
+    // Leave 'serving' before awaiting, not after. The teardown takes a mesh
+    // departure broadcast and an endpoint close; while that runs the button is
+    // still on screen, and a second click used to re-read 'serving' and call
+    // `stop()` again.
+    state.value = { phase: 'landing' }
     try {
       await current.producer.stop()
-    } finally {
-      if (!ctx.aborted.aborted) state.value = { phase: 'landing' }
+    } catch (error) {
+      // Nothing left to recover: the share is already off the UI. Report it
+      // rather than surfacing an unhandled rejection.
+      console.warn('[share] stopping the share failed', error)
     }
   }
 
@@ -305,7 +352,7 @@ const Home = component(function* (_props, ctx: Ctx) {
             </Button>
           }
         >
-          <FailedBody reason={current.reason} />
+          <FailedBody reason={current.reason} kind={current.kind} />
         </AppShell>
       )
     }
@@ -456,9 +503,16 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     }
   }
 
+  // Dial now, and register the release before the first await. A ticket change
+  // unmounts this session; the mesh membership belongs to it, so it goes too —
+  // and it has to go even when the abort lands *during* the connect, which is
+  // why this holds the promise rather than a client we may not have yet.
+  const pending = connect(props.ticket)
+  ctx.aborted.addEventListener('abort', () => release(props.ticket, pending))
+
   void (async () => {
     try {
-      const client = await connect(props.ticket)
+      const client = await pending
       if (ctx.aborted.aborted) return
       const manifest = await client.manifest()
       if (ctx.aborted.aborted) return
@@ -469,16 +523,19 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
       // which showed up immediately in testing as a share reporting more
       // members than there were processes.
       //
-      // `pagehide`, not `beforeunload`: the latter is unreliable on mobile and
-      // is skipped entirely on the bfcache path.
-      const onHide = () => client.leave_mesh()
+      // `pagehide`, not `beforeunload`: the latter is unreliable on mobile.
+      const onHide = (event: PageTransitionEvent) => {
+        // `persisted` means the page is going into the bfcache, and may come
+        // straight back on Back with its JS state intact — no remount, no
+        // hashchange, nothing that would rejoin. Leaving here took the tab off
+        // every roster while it still looked fully connected, and the peer row
+        // silently disappeared because `max_direct` fell to 0.
+        if (event.persisted) return
+        client.leave_mesh()
+      }
       window.addEventListener('pagehide', onHide)
       ctx.aborted.addEventListener('abort', () => {
         window.removeEventListener('pagehide', onHide)
-        // A ticket change unmounts this session; the mesh membership belongs to
-        // it, so it goes too. Otherwise navigating between shares accumulates
-        // ghosts exactly the way a closed tab did.
-        client.leave_mesh()
       })
       await client.watch((next) => {
         if (ctx.aborted.aborted) return
@@ -553,10 +610,9 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
       await clearMount()
       return
     }
-    if (!canMount()) {
-      mountError.value = 'This browser cannot mount folders'
-      return
-    }
+    // No `canMount()` guard: the button is disabled when it returns false, so
+    // this is unreachable without one — and reporting it after the click was
+    // exactly the thing worth fixing.
     if (transfer.peek()) return
     mountError.value = null
     try {
@@ -588,7 +644,7 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     if (current.phase === 'failed') {
       return (
         <AppShell>
-          <FailedBody reason={current.reason} />
+          <FailedBody reason={current.reason} kind={current.kind} />
         </AppShell>
       )
     }
@@ -599,6 +655,12 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     const total = files.reduce((sum, file) => sum + file.size, 0)
     const active = transfer.value
     const mounted = mountSession.value !== null
+    const mountable = canMount()
+    const mountButton = () => (
+      <Button variant="secondary" onclick={() => void mount()} disabled={!mountable}>
+        {mounted ? 'Unmount' : 'Mount'}
+      </Button>
+    )
     const err = mountError.value
     const hasSelection = nodeAtPath(built.root, path.value) !== undefined
     // Read through the tick so this recomputes each second. `max_direct` is 0
@@ -672,9 +734,23 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
                 </Stack>
                 {/* No `disabled={busy}` needed — this branch only renders when idle. */}
                 <Stack direction="row" gap={1}>
-                  <Button variant="secondary" onclick={() => void mount()}>
-                    {mounted ? 'Unmount' : 'Mount'}
-                  </Button>
+                  {mountable ? (
+                    mountButton()
+                  ) : (
+                    /*
+                      The `title` goes on a wrapper, not on the button: a disabled
+                      control is an unreliable tooltip host, since browsers suppress
+                      pointer delivery to it. `inline-flex` keeps the wrapper exactly
+                      `oneRow` tall — a default `inline` span adds line-box leading
+                      and would break the invariant this row is built on.
+                    */
+                    <span
+                      title="Mounting needs the File System Access API, which this browser lacks. Use Chrome or Edge — or run `npx agent-share <ticket>` to receive the folder locally."
+                      style={{ display: 'inline-flex' }}
+                    >
+                      {mountButton()}
+                    </span>
+                  )}
                   <Button
                     variant="primary"
                     onclick={() => void downloadSelected()}

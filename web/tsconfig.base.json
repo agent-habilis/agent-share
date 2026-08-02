@@ -1,4 +1,4 @@
-// Shared compiler options for the ui/ Bun workspace (app + vendor packages).
+// Shared compiler options for the web/ Bun workspace (app + vendor packages).
 // Adapted from visage's tsconfig.base.json.
 //
 // Deliberately no `references` and no `composite`. Project references would

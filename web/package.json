@@ -1,5 +1,5 @@
 {
-  "name": "agent-share-ui",
+  "name": "agent-share-web",
   "private": true,
   "type": "module",
   "workspaces": ["vendor/*"],
@@ -11,6 +11,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@oxc-project/runtime": "^0.142.0",
     "client-zip": "^2.4.5",
     "moonspace-ui": "workspace:*",
     "visage-dom": "workspace:*",

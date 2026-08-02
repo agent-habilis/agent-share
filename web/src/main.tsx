@@ -1,3 +1,6 @@
+// First, before anything can build a Disposable. See the file for why.
+import './compat.ts'
+
 import { T, Theme } from 'moonspace-ui'
 import { component, render } from 'visage-dom'
 
