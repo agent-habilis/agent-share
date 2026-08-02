@@ -31,11 +31,23 @@ export interface Progress {
  *
  * Stops on a short read: past-EOF is a valid empty read in this protocol, so
  * an empty chunk means the file ended, not that something failed.
+ *
+ * `signal` is checked per chunk rather than left to `pipeTo` alone: the Blob
+ * fallback in `saveStream` has no pipe to abort, so this is the only place a
+ * cancel can reach it.
  */
-function fileStream(reader: Reader, file: FileNode): ReadableStream<Uint8Array> {
+function fileStream(
+  reader: Reader,
+  file: FileNode,
+  signal?: AbortSignal,
+): ReadableStream<Uint8Array> {
   let offset = 0
   return new ReadableStream({
     async pull(controller) {
+      if (signal?.aborted) {
+        controller.error(signal.reason)
+        return
+      }
       if (offset >= file.size) {
         controller.close()
         return
@@ -62,6 +74,7 @@ export function zipStream(
   reader: Reader,
   files: FileNode[],
   onProgress?: (progress: Progress) => void,
+  signal?: AbortSignal,
 ): ReadableStream<Uint8Array> {
   const total = files.reduce((sum, file) => sum + file.size, 0)
   const counted = countingReader(reader, total, onProgress)
@@ -72,7 +85,7 @@ export function zipStream(
       // A zero mtime means "unknown" on the wire; passing it through would
       // date every such file to 1970.
       lastModified: file.mtime > 0 ? new Date(file.mtime * 1000) : new Date(),
-      input: fileStream(counted, file),
+      input: fileStream(counted, file, signal),
     })),
   ).body as ReadableStream<Uint8Array>
 }
@@ -88,8 +101,9 @@ export function singleFileStream(
   reader: Reader,
   file: FileNode,
   onProgress?: (progress: Progress) => void,
+  signal?: AbortSignal,
 ): ReadableStream<Uint8Array> {
-  return fileStream(countingReader(reader, file.size, onProgress), file)
+  return fileStream(countingReader(reader, file.size, onProgress), file, signal)
 }
 
 /** Wrap `reader` so every chunk advances a shared progress counter. */
@@ -112,12 +126,16 @@ function countingReader(
 /**
  * Save the stream, preferring a direct-to-disk pipe.
  *
+ * Aborting `signal` tears down the pipe, which aborts the writable rather than
+ * closing it — so a cancelled download never commits a partial file.
+ *
  * @returns `true` when it streamed to disk, `false` when it fell back to a
  * Blob (and therefore held the whole download in memory).
  */
 export async function saveStream(
   stream: ReadableStream<Uint8Array>,
   suggestedName: string,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const picker = (
     window as unknown as {
@@ -130,7 +148,7 @@ export async function saveStream(
   if (picker) {
     const handle = await picker({ suggestedName })
     const writable = await handle.createWritable()
-    await stream.pipeTo(writable)
+    await stream.pipeTo(writable, signal ? { signal } : undefined)
     return true
   }
 

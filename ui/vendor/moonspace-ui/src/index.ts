@@ -24,6 +24,7 @@ export {
 
 // Hooks
 export { middleTruncate } from './hooks/middleTruncate.ts'
+export { measureCells } from './hooks/measureCells.ts'
 
 // Primitives
 export * from './components/Box/index.ts'

@@ -363,9 +363,16 @@ const Home = component(function* (_props, ctx: Ctx) {
  * fragment changes so the previous watch/dial is disposed through ctx.aborted.
  */
 type Transfer =
-  | { kind: 'download'; progress: Progress }
+  // Only a download is cancellable — a half-written mount would leave the
+  // host folder in a state the next sync has no record of.
+  | { kind: 'download'; progress: Progress; abort: AbortController }
   | { kind: 'mounting'; progress: Progress }
   | { kind: 'syncing'; progress: Progress }
+
+/** What the top bar says while `kind` is in flight. */
+function transferLabel(kind: Transfer['kind']): string {
+  return kind === 'download' ? 'downloading' : kind === 'mounting' ? 'mounting' : 'syncing'
+}
 
 const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
   const state = signal<State>({ phase: 'connecting' })
@@ -458,23 +465,30 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
   async function downloadFiles(files: FileNode[], baseName: string): Promise<void> {
     const current = state.peek()
     if (current.phase !== 'ready' || transfer.peek() || files.length === 0) return
+    const abort = new AbortController()
     transfer.value = {
       kind: 'download',
       progress: {
         done: 0,
         total: files.reduce((sum, file) => sum + file.size, 0),
       },
+      abort,
     }
     try {
       const onProgress = (progress: Progress) => {
-        transfer.value = { kind: 'download', progress }
+        transfer.value = { kind: 'download', progress, abort }
       }
       // One file travels as itself; only a multi-file selection needs a ZIP.
       const single = files.length === 1 ? files[0] : null
       const stream = single
-        ? singleFileStream(current.client, single, onProgress)
-        : zipStream(current.client, files, onProgress)
-      await saveStream(stream, single ? single.name : `${baseName}.zip`)
+        ? singleFileStream(current.client, single, onProgress, abort.signal)
+        : zipStream(current.client, files, onProgress, abort.signal)
+      await saveStream(stream, single ? single.name : `${baseName}.zip`, abort.signal)
+    } catch (error) {
+      // Cancelling is a decision, not a failure — and the callers only ever
+      // `void` this, so an unswallowed abort would surface as an unhandled
+      // rejection. Anything else still propagates.
+      if (!abort.signal.aborted) throw error
     } finally {
       if (transfer.peek()?.kind === 'download') transfer.value = null
     }
@@ -545,7 +559,6 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     const total = files.reduce((sum, file) => sum + file.size, 0)
     const active = transfer.value
     const mounted = mountRoot.value !== null
-    const busy = active !== null
     const err = mountError.value
     const hasSelection = nodeAtPath(built.root, path.value) !== undefined
 
@@ -567,46 +580,59 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
             gap: 'calc(1 * var(--ms-row))',
           }}
         >
+          {/*
+            One row, always. A transfer takes the row over rather than adding
+            one below it — every child here is exactly `oneRow` tall, so the
+            file browser underneath never moves.
+          */}
           <Stack direction="row" gap={2} justify="between">
-            <Stack direction="row" gap={1}>
-              <Text weight="bold">agent-share</Text>
-              <Badge tone="success" variant="outline">
-                {current.client.transport}
-              </Badge>
-              <Text color="fgMuted">
-                {files.length} files · {humanBytes(total)}
-              </Text>
-            </Stack>
-            <Stack direction="row" gap={1}>
-              <Button variant="secondary" onclick={() => void mount()} disabled={busy}>
-                {mounted ? 'Unmount' : 'Mount'}
-              </Button>
-              <Button
-                variant="primary"
-                onclick={() => void downloadSelected()}
-                disabled={busy || !hasSelection}
-              >
-                Download
-              </Button>
-              <Button variant="secondary" onclick={() => void downloadAll()} disabled={busy}>
-                Download all
-              </Button>
-            </Stack>
+            {active ? (
+              <>
+                <Text color="fgMuted">{transferLabel(active.kind)}</Text>
+                <ProgressBar
+                  fluid
+                  showValue
+                  value={
+                    active.progress.total === 0 ? 0 : active.progress.done / active.progress.total
+                  }
+                  label={transferLabel(active.kind)}
+                />
+                {active.kind === 'download' ? (
+                  <Button variant="danger" onclick={() => active.abort.abort()}>
+                    Cancel
+                  </Button>
+                ) : null}
+              </>
+            ) : (
+              <>
+                <Stack direction="row" gap={1}>
+                  <Text weight="bold">agent-share</Text>
+                  <Badge tone="success" variant="outline">
+                    {current.client.transport}
+                  </Badge>
+                  <Text color="fgMuted">
+                    {files.length} files · {humanBytes(total)}
+                  </Text>
+                </Stack>
+                {/* No `disabled={busy}` needed — this branch only renders when idle. */}
+                <Stack direction="row" gap={1}>
+                  <Button variant="secondary" onclick={() => void mount()}>
+                    {mounted ? 'Unmount' : 'Mount'}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    onclick={() => void downloadSelected()}
+                    disabled={!hasSelection}
+                  >
+                    Download
+                  </Button>
+                  <Button variant="secondary" onclick={() => void downloadAll()}>
+                    Download all
+                  </Button>
+                </Stack>
+              </>
+            )}
           </Stack>
-
-          {active ? (
-            <ProgressBar
-              value={active.progress.total === 0 ? 0 : active.progress.done / active.progress.total}
-              label={
-                active.kind === 'download'
-                  ? 'downloading'
-                  : active.kind === 'mounting'
-                    ? 'mounting'
-                    : 'syncing'
-              }
-              showValue
-            />
-          ) : null}
 
           {err ? <Text color="danger">{err}</Text> : null}
 
