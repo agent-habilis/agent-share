@@ -9,8 +9,9 @@ no FUSE, no kernel extension.
 Extracted from [agent-habilis/swarm](https://github.com/agent-habilis/swarm)'s
 `ahsw mount`, and since forked: `agent-share` negotiates its own QUIC ALPN, so
 it no longer mounts against `ahsw mount` in either direction. Both ends must
-run `agent-share`. The `🐝…` ticket encoding itself is still shared with the
-rest of the agent-habilis tooling.
+run `agent-share`. The ticket *framing* (Base58Check over `version ‖ type ‖
+payload`) is still shared with the rest of the agent-habilis tooling, but
+agent-share's tokens carry no glyph prefix — they are bare ASCII Base58.
 
 ## Usage
 
@@ -20,7 +21,7 @@ Share a folder (producer):
 agent-share serve <dir>
 ```
 
-This prints the consumer's ready-to-run command, carrying a `🐝…` bearer
+This prints the consumer's ready-to-run command, carrying a bearer
 ticket. The scan is metadata-only; peers fetch file bytes on demand as they
 read them. The folder is watched, so edits, new files and deletions reach
 connected peers without anyone remounting. Serve keeps running until
@@ -36,7 +37,7 @@ across an update.
 Mount it (consumer):
 
 ```
-agent-share <🐝…> <target>
+agent-share <ticket> <target>
 ```
 
 Creates `agent-share-YYYY-MM-DDTHHMM/` under `<target>` (which may already have
@@ -48,7 +49,7 @@ read-only.
 By default a share is reachable across machines (mDNS + mainline DHT + the
 default relay ladder). To restrict it, either name lookup flags explicitly
 (`--mdns`, `--dht`, `--relay [<url>,…]` — naming any uses only those) or pass
-`--swarm <🐝…>` to reuse an existing swarm id's discovery config (a loopback
+`--swarm <id>` to reuse an existing swarm id's discovery config (a loopback
 swarm id keeps everything on one host).
 
 ## Platform support
@@ -74,9 +75,9 @@ tickets and with peers running an older build.
 ## The web client
 
 `share.agent-habilis.com` is a **pure static site**: no backend, no signalling
-server, no database. Open `share.agent-habilis.com/files/<🐝ticket>` and the
+server, no database. Open `share.agent-habilis.com/files/<ticket>` and the
 browser connects straight to the producer. Session info is at
-`/info/<🐝ticket>`.
+`/info/<ticket>`.
 
 The ticket is a bearer capability in the path so those views are ordinary
 shareable URLs. The static host must fall back to `index.html` for deep links.
@@ -106,7 +107,7 @@ cargo task web-wasm          # crates/agent-share-wasm-client/dist/{web,nodejs}
 cd web && bun install && bun run dev
 ```
 
-`web/` is the browser app, `node/` the `npx agent-share <🐝…>` receiver.
+`web/` is the browser app, `node/` the `npx agent-share <ticket>` receiver.
 Both consume the same `.wasm`; only the wasm-bindgen glue differs.
 
 Note `npx` needs a native WebRTC addon (`node-datachannel`), because Node has

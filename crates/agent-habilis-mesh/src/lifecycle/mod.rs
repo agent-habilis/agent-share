@@ -24,7 +24,7 @@ use crate::util::clock::Instant;
 /// `RUST_LOG`); the operator JSON/human event is unchanged.
 ///
 /// Logs the derived **`TopicId`** (a one-way hash of the seed), never the full
-/// `💬…` id. The id carries the seed and *is* the bearer credential, and this
+/// mesh id. The id carries the seed and *is* the bearer credential, and this
 /// log file is written under a shared path — logging the id would leak full
 /// mesh membership to anyone who can read the file. The topic hash is enough
 /// to correlate a run without exposing the secret.

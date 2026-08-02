@@ -2,7 +2,7 @@
 //! down").
 //!
 //! A mesh created with `--advertise[=<name>]` re-broadcasts its own
-//! `💬…` id into a **directory**; a consumer's discovery command browses it. A directory
+//! mesh id into a **directory**; a consumer's discovery command browses it. A directory
 //! is not a server — it is itself a well-known public [`Mesh`] derived
 //! deterministically from its name, so a publisher and a discoverer that
 //! name the same directory derive the same mesh and mesh over the
@@ -70,7 +70,7 @@ pub(crate) fn directory_config(lookups: LookupOpts) -> MeshConfig {
     }
 }
 
-/// A directory advertisement: the advertised mesh's `💬…` id plus its
+/// A directory advertisement: the advertised mesh's id plus its
 /// live peer count. The id already encodes the mesh name and
 /// network mode, so a discoverer decodes those locally — nothing else need
 /// be on the wire. Serialized as a JSON object (room for future fields;
@@ -136,7 +136,7 @@ pub enum ListingChange {
 }
 
 /// Upper bound on tracked listings. The directory is an open public mesh
-/// (anyone can mint and broadcast valid `💬…` ids), so the map is
+/// (anyone can mint and broadcast valid mesh ids), so the map is
 /// capped — a new id past the cap evicts the stalest entry — mirroring
 /// the bounded-set discipline the rest of the daemon follows for
 /// adversary-reachable collections.

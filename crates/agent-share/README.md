@@ -3,8 +3,8 @@
 The CLI: share a directory read-only over iroh QUIC, or consume one.
 
 - **Produce** — `agent-share serve <dir>` scans the tree once (metadata only) and
-  serves file bytes on demand, printing a `🐝…` bearer ticket.
-- **Consume** — `agent-share <🐝…> <target>` creates `agent-share-…/` under the
+  serves file bytes on demand, printing a bearer ticket.
+- **Consume** — `agent-share <ticket> <target>` creates `agent-share-…/` under the
   target and mounts through a loopback NFSv3 bridge, so the OS's own NFS client
   does the filesystem work. No FUSE, no kernel extension, no daemon.
 
@@ -17,8 +17,8 @@ Synthetic throughput / latency over `OP_BENCH` (no real directory):
 ```bash
 agent-share bench --transport webrtc                 # producer
 agent-share bench --transport relay
-agent-share bench '<🐝ticket>'                       # consumer (30s)
-agent-share bench '<🐝ticket>' --duration 30
+agent-share bench '<ticket>'                         # consumer (30s)
+agent-share bench '<ticket>' --duration 30
 ```
 
 `--transport` is set on the **producer** and encoded in the ticket; the consumer
@@ -43,5 +43,5 @@ See the repository README for the web client and the overall layout.
 
 ## Not published
 
-`publish = false`. The `🐝` ticket format and the `agent-share/mount/1` ALPN are pinned
+`publish = false`. The ticket format and the `agent-share/mount/1` ALPN are pinned
 by golden tests; both ends of a mount must run the same build.

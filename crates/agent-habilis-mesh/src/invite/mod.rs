@@ -1,4 +1,4 @@
-//! Creator-issued invites to an **invite-only** mesh. An invite is a `🎟️`
+//! Creator-issued invites to an **invite-only** mesh. An invite is a
 //! bearer ticket that carries the mesh's published hash, the invite **root**
 //! (the derivation secret that the bare hash withholds), an expiry (TTL), and
 //! the creator's signature over those fields. Only the creator — who alone

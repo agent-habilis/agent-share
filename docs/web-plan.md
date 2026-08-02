@@ -2,8 +2,8 @@
 
 ## Context
 
-`agent-share` today is CLI-only: `agent-share serve <dir>` prints a `🐝…` ticket, and
-`agent-share <🐝…> <mnt>` mounts it via a loopback NFSv3 bridge. Both ends need the binary.
+`agent-share` today is CLI-only: `agent-share serve <dir>` prints a ticket, and
+`agent-share <ticket> <mnt>` mounts it via a loopback NFSv3 bridge. Both ends need the binary.
 
 We want a browser to be a first-class consumer. User A shares a folder from the CLI and
 sends a link; user B opens it, browses the tree in a macOS-Finder-style column view, and
@@ -36,7 +36,7 @@ grep -n "MOUNT_ALPN: " src/mount/mod.rs:18 → b"agent-share/mount/1"
 - Manifest wire (LE): `dir_count(u32)[len(u16)‖path‖mode(u32)‖mtime(i64)]… file_count(u32)…`
   (`src/mount/wire.rs:31-33`). A file's **index is its READ address**; no content hashes,
   deliberately (`src/mount/wire.rs:14-16`).
-- Ticket: `secret(32) ‖ flags(1) ‖ lookups ‖ addr-json` as a `🐝` Base58Check token, Mount =
+- Ticket: `secret(32) ‖ flags(1) ‖ lookups ‖ addr-json` as a Base58Check token, Mount =
   type byte 5 (`src/mount/ticket.rs:11-14`, `src/protocol/token.rs:44-46`). Self-contained —
   a browser can dial from the ticket alone.
 - `RemoteClient` (`src/mount/consume.rs:105-112`) implements `ByteSource`
@@ -94,7 +94,7 @@ signaling authenticated and E2E-encrypted by iroh rather than a bearer-token mai
 
 ```
 Browser                                             CLI producer
-  │ 1. decode 🐝 ticket from URL fragment                 │
+  │ 1. decode the ticket from the URL                     │
   │    → EndpointAddr, 32-byte secret, relay ladder       │
   │ 2. iroh wasm endpoint, relay transport ────────────── relay.agent-habilis.com
   │    dial ALPN agent-share/webrtc-signal/1              │
@@ -128,7 +128,7 @@ close. The UI must say so plainly instead of hanging.
 | Question | Decision |
 |---|---|
 | Transport | WebRTC for all data; iroh relay as signaling carrier only |
-| URL | `share.agent-habilis.com/#<🐝ticket>` — fragment, so the secret never reaches the server |
+| URL | `share.agent-habilis.com/#<ticket>` — fragment, so the secret never reaches the server |
 | Listing | Full manifest one-shot; no new op |
 | Design system | `moonspace-ui` local path dep; column view built in `agent-share` *(superseded: vendored under `web/vendor/`, UI on visage)* |
 | NAT fallback | STUN both sides. No TURN, and **no relay data fallback** — relay is rendezvous only |
@@ -154,7 +154,7 @@ crates/fofoca-iroh-webrtc-transport/          one crate: core + `host` (str0m) +
 crates/iroh-multihop-transport/   vendored with mesh
 tasks/                            cargo task runner
 web/                              React + Vite + Bun SPA
-node/                             npx agent-share <🐝…> receiver
+node/                             npx agent-share <ticket> receiver
 ```
 
 Two keys on the root manifest are load-bearing and easy to lose:
@@ -202,7 +202,7 @@ bound would force two signatures and defeat the sharing.
 | Mount wire format | `proto` | `proto` | `proto` |
 | WebRTC backend | `fofoca-iroh-webrtc-transport` (`host`) | `fofoca-iroh-webrtc-transport` (`host`) | `fofoca-iroh-webrtc-transport` (`web`) |
 
-`agent-share <🐝…> <mnt>` gains WebRTC by linking the same `fofoca-iroh-webrtc-transport` (`host`) the producer
+`agent-share <ticket> <mnt>` gains WebRTC by linking the same `fofoca-iroh-webrtc-transport` (`host`) the producer
 does. Since `ByteSource` is already the seam, neither the NFS layer nor the mount logic
 changes.
 
@@ -279,7 +279,8 @@ Then close the LAN-only gap:
   already authenticates it.
 - WebRTC transport added *additively*, leaving CLI-to-CLI untouched.
 - `announce()` (`src/mount/mod.rs:68`) prints a third line: the
-  `https://share.agent-habilis.com/#🐝…` URL, percent-encoded.
+  `https://share.agent-habilis.com/#<ticket>` URL. Tickets are bare ASCII
+  Base58, so nothing needs percent-encoding.
 - `--no-web` on `MountAction::Serve` (`src/cli/args/mount.rs`).
 - `src/lookup/relay.rs:27` — `RelayChoice::Pinned` becomes a **ladder** with
   `relay.agent-habilis.com` first and iroh's defaults retained. **Not a single pin**: the

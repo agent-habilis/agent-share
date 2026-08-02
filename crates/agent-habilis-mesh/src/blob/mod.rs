@@ -1,6 +1,6 @@
 //! The blob channel — direct point-to-point transfer of payloads too large for a
 //! gossip frame, off the gossip plane entirely. The producer serves the content,
-//! content-addressed by SHA-256, over a dedicated QUIC endpoint and mints a `💬`
+//! content-addressed by SHA-256, over a dedicated QUIC endpoint and mints a
 //! [`ticket::BlobTicket`] referencing it. The consumer dials the producer,
 //! presents the ticket's bearer secret, and streams the bytes — verified against
 //! the advertised hash.

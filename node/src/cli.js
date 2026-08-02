@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * `npx agent-share <🐝…> [dir]` — receive a shared folder.
+ * `npx agent-share <ticket> [dir]` — receive a shared folder.
  * `npx agent-share bench --transport webrtc|relay` — synthetic OP_BENCH producer.
- * `npx agent-share bench <🐝…>` — bench consumer (transport from ticket).
+ * `npx agent-share bench <ticket>` — bench consumer (transport from ticket).
  *
  * Folder receive writes real files rather than mounting: NFS is native-only.
  * Folder produce stays on the native binary (scan order is the READ index).
@@ -21,9 +21,9 @@ const CHUNK = 256 * 1024
 
 function usage() {
   console.error('usage:')
-  console.error('  npx agent-share <🐝ticket> [destination]')
+  console.error('  npx agent-share <ticket> [destination]')
   console.error('  npx agent-share bench --transport webrtc|relay')
-  console.error('  npx agent-share bench <🐝ticket>')
+  console.error('  npx agent-share bench <ticket>')
   console.error()
   console.error('  Receive writes into `destination` (default: ./share).')
   console.error('  Produce a share with the native binary: agent-share serve <dir>')

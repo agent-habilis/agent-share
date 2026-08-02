@@ -29,16 +29,11 @@ pub mod version;
 /// identifier. The stem of every per-mesh file (socket / log / state), so it
 /// lives here rather than in any one module. See [`mesh_runtime_dir`].
 ///
-/// The canonical id carries a `💬://` separator; the `://` is stripped first so
-/// it never lands in a path (the `💬` sigil is filesystem-safe and kept, which
-/// also keeps the stem identical to a legacy bare `💬<base58>` id).
+/// An id is bare Base58, so the stem is plain ASCII and needs no escaping or
+/// separator-stripping before it lands in a path.
 #[must_use]
 pub fn mesh_prefix(mesh_id: &str) -> String {
-    mesh_id
-        .replace(crate::protocol::mesh::SEPARATOR, "")
-        .chars()
-        .take(16)
-        .collect()
+    mesh_id.chars().take(16).collect()
 }
 
 /// The per-user runtime base for `product` — every per-mesh folder lives under
@@ -281,12 +276,14 @@ mod tests {
     }
 
     #[test]
-    fn strips_uri_separator_and_matches_legacy_stem() {
-        // The `💬://` and legacy bare `💬` forms of the same id must produce an
-        // identical, `/`-free filesystem stem.
-        let uri = mesh_prefix("💬://abcdefghijkmnpqrs");
-        let bare = mesh_prefix("💬abcdefghijkmnpqrs");
-        assert_eq!(uri, bare);
-        assert!(!uri.contains('/'));
+    fn stem_is_path_safe_ascii() {
+        // The stem goes straight into a path, so it must carry no separator
+        // and nothing needing escaping. Fed a *real* id (bare Base58), not the
+        // short labels the cases above use.
+        let stem = mesh_prefix("2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAG");
+        assert!(
+            stem.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+            "{stem}"
+        );
     }
 }

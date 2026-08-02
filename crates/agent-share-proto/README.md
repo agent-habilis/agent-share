@@ -1,6 +1,6 @@
 # agent-share-proto
 
-The `agent-share` wire format: the `🐝` ticket codec, the mount manifest, and
+The `agent-share` wire format: the ticket codec, the mount manifest, and
 the request/response framing.
 
 This crate exists so the CLI producer, the CLI (NFS) consumer, and the browser

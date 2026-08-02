@@ -64,7 +64,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     // `serve` subcommand shares the slot), so require them here.
     let (Some(ticket), Some(mountpoint)) = (cli.ticket, cli.mountpoint) else {
         anyhow::bail!(
-            "usage: agent-share <🐝…> <target>, agent-share serve <dir>, or agent-share bench"
+            "usage: agent-share <ticket> <target>, agent-share serve <dir>, or agent-share bench"
         );
     };
     crate::mount::attach(&ticket, &mountpoint, cli.no_mount, json).await

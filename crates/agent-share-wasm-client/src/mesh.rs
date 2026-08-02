@@ -328,7 +328,7 @@ impl MeshPeer {
         spawn_peer(resolved, transports, None, parts).await
     }
 
-    /// Join an existing mesh by its `💬://…` id.
+    /// Join an existing mesh by its id.
     ///
     /// # Errors
     /// Unparseable id, endpoint bind failure, or no reachable relay.

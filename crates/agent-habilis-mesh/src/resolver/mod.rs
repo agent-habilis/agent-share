@@ -6,18 +6,17 @@ use anyhow::{Result, anyhow, bail};
 use crate::invite::InviteTicket;
 use crate::protocol::MeshId;
 use crate::protocol::mesh::{Mesh, MeshIdError};
-use crate::util::consts::MESH_GLYPH;
 
-/// What a join accepts: a literal `💬…` mesh id, or a creator-minted `🎟️`
-/// invite to an invite-only mesh. A shared *string* is not a join target — it
-/// derives its own mesh through the topic path. Classified and validated
-/// **once**, at the boundary (clap `FromStr` / MCP entry), so `resolve` matches
-/// the variant instead of re-sniffing a `String`.
+/// What a join accepts: a literal mesh id, or a creator-minted invite to an
+/// invite-only mesh. A shared *string* is not a join target — it derives its
+/// own mesh through the topic path. Classified and validated **once**, at the
+/// boundary (clap `FromStr` / MCP entry), so `resolve` matches the variant
+/// instead of re-sniffing a `String`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JoinTarget {
-    /// A literal `💬…` id — resolves with no I/O.
+    /// A literal mesh id — resolves with no I/O.
     Mesh(MeshId),
-    /// A `🎟️` invite to an invite-only mesh — redeemed (signature + expiry
+    /// An invite to an invite-only mesh — redeemed (signature + expiry
     /// checked, root unwrapped) in `JoinParams`, which holds the password.
     Invite(InviteTicket),
 }
@@ -30,10 +29,12 @@ pub enum JoinTarget {
 /// [`Unrecognized`]: JoinTargetError::Unrecognized
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JoinTargetError {
-    /// Branded `💬` but malformed. Wraps the id's own reason, so the rendered
-    /// text is unchanged from parsing a [`MeshId`] directly.
+    /// Well-formed as an id string, but its payload doesn't decode. Wraps the
+    /// id's own reason, so the rendered text is unchanged from parsing a
+    /// [`MeshId`] directly.
     MalformedMeshId(MeshIdError),
-    /// Matched neither brand. Carries the trimmed input to echo back.
+    /// Not a token at all — wrong length or outside the Base58 charset.
+    /// Carries the trimmed input to echo back.
     Unrecognized(String),
 }
 
@@ -41,10 +42,9 @@ impl fmt::Display for JoinTargetError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JoinTargetError::MalformedMeshId(error) => error.fmt(formatter),
-            JoinTargetError::Unrecognized(input) => write!(
-                formatter,
-                "`{input}` is not a mesh id or invite (expected a {MESH_GLYPH}… or 🎟️… token)"
-            ),
+            JoinTargetError::Unrecognized(input) => {
+                write!(formatter, "`{input}` is not a mesh id or an invite token")
+            }
         }
     }
 }
@@ -56,18 +56,23 @@ impl FromStr for JoinTarget {
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let trimmed = input.trim();
-        if trimmed.starts_with(MESH_GLYPH) {
-            return trimmed
-                .parse::<MeshId>()
-                .map(JoinTarget::Mesh)
-                .map_err(JoinTargetError::MalformedMeshId);
-        }
-        // The two token brands never collide, so only non-mesh input reaches
-        // the invite decoder.
+        // Neither token is branded, so classification is try-decode. The
+        // invite goes first because it is the more specific parse: its payload
+        // carries a kind byte, and its checksum makes a false positive on a
+        // mesh id a ~2^-32 event. Only then does the id decoder see the input.
         if let Ok(invite) = InviteTicket::decode(trimmed) {
             return Ok(JoinTarget::Invite(invite));
         }
-        Err(JoinTargetError::Unrecognized(trimmed.to_owned()))
+        match trimmed.parse::<MeshId>() {
+            Ok(id) => Ok(JoinTarget::Mesh(id)),
+            // Wrong length or wrong charset means it was never a token; a
+            // payload that decodes far enough to fail on its *contents* is a
+            // real id the user mistyped, and keeps its specific reason.
+            Err(MeshIdError::Length(_) | MeshIdError::Charset(_)) => {
+                Err(JoinTargetError::Unrecognized(trimmed.to_owned()))
+            }
+            Err(other) => Err(JoinTargetError::MalformedMeshId(other)),
+        }
     }
 }
 
@@ -79,7 +84,7 @@ pub(crate) fn resolve(target: &JoinTarget) -> Result<Mesh> {
                 .parse::<Mesh>()
                 .map_err(|error| anyhow!("invalid mesh id: {error}"))?;
             if mesh.requires_invite() {
-                bail!("this mesh is invite-only — join with a 🎟️ invite token, not the bare hash");
+                bail!("this mesh is invite-only — join with an invite token, not the bare hash");
             }
             Ok(mesh)
         }

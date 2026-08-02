@@ -6,7 +6,7 @@
 //! that drift. It is deliberately transport-free: no `iroh::Endpoint`, no
 //! `tokio`, no filesystem. Callers own the streams and hand slices here.
 //!
-//! - [`token`]: the branded `🐝` Base58Check framing every agent-habilis
+//! - [`token`]: the Base58Check framing every agent-habilis
 //!   token shares.
 //! - [`ticket`]: the mount ticket — a bearer secret plus how to reach the
 //!   producer.

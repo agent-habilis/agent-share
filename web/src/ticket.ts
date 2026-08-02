@@ -6,7 +6,8 @@
  * - `/files/<ticket>` — file browser
  * - `/info/<ticket>` — session info
  *
- * The ticket is a bearer capability in one path segment.
+ * The ticket is a bearer capability in one path segment. It is bare ASCII
+ * Base58, so it survives a URL path verbatim — no percent-encoding.
  */
 
 export type ShareView = 'files' | 'info'

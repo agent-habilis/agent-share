@@ -31,7 +31,7 @@
 //! File shape (keys are serialized in sorted order — `serde_json::Map` is a
 //! `BTreeMap` here, no `preserve_order` feature):
 //! ```json
-//! {"last_updated":1776720604,"name":"cool-team","nickname":"treat-empire","peer_count":3,"pid":34299,"ready":true,"gossip":"💬..."}
+//! {"last_updated":1776720604,"name":"cool-team","nickname":"treat-empire","peer_count":3,"pid":34299,"ready":true,"gossip":"..."}
 //! ```
 //!
 //! Writes are atomic (tempfile + rename on the same filesystem), so a

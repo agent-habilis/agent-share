@@ -290,7 +290,7 @@ function main() {
     meshLog('join URL copied')
   }
 
-  // `#mesh=💬://…` joins on load, which is what makes the link shareable —
+  // `#mesh=<id>` joins on load, which is what makes the link shareable —
   // open it in another tab, or on another machine, and that peer joins.
   const fragment = decodeURIComponent(location.hash.replace(/^#/, ''))
   if (fragment.startsWith('mesh=')) {

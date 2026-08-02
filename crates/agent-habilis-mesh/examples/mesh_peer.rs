@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! cargo run -p agent-habilis-mesh --example mesh_peer              # create, print the id
-//! cargo run -p agent-habilis-mesh --example mesh_peer -- 💬://…    # join that mesh
-//! MESH_TRANSPORT=webrtc cargo run … --example mesh_peer -- 💬://…  # WebRTC-only data plane
+//! cargo run -p agent-habilis-mesh --example mesh_peer -- <id>    # join that mesh
+//! MESH_TRANSPORT=webrtc cargo run … --example mesh_peer -- <id>  # WebRTC-only data plane
 //! ```
 //!
 //! `MESH_TRANSPORT=webrtc` clears IP transports, so any data path that is not

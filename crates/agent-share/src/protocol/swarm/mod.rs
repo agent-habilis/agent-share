@@ -1,4 +1,4 @@
-//! The `🐝…` swarm identifier, vendored from agent-habilis/swarm's
+//! The swarm identifier, vendored from agent-habilis/swarm's
 //! `src/protocol/swarm/mod.rs` — trimmed to what mount needs from a
 //! `--swarm` id: its embedded lookup allowlist. The full `Swarm` type
 //! (seed, name semantics, password crypto, topic derivation) stays in
@@ -17,8 +17,6 @@ pub(crate) use lookup::{
     LookupOpts, LookupSet, RelayChoice, RelayLadder, RelaySelection, resolve_transfer_lookups,
 };
 
-pub(crate) const PREFIX: &str = "🐝";
-
 /// Version byte leading the id payload; bumped on incompatible layout changes.
 const VERSION: u8 = 1;
 const SEED_LEN: usize = 32;
@@ -30,18 +28,15 @@ const FEATURE_PASSWORD: u8 = 0b0001;
 /// Length of the password verifier that follows the feature byte.
 const PASSWORD_VERIFIER_LEN: usize = 16;
 
-/// Extract the lookup allowlist embedded in a `🐝…` swarm id, skipping the
+/// Extract the lookup allowlist embedded in a swarm id, skipping the
 /// seed/name/password semantics mount has no use for. Mirrors swarm's
 /// `Swarm::decode_bytes` framing byte-for-byte: `version u8 ‖ seed[32] ‖
-/// name-len u8 ‖ name ‖ config-len u16 LE ‖ config`, all base58check-encoded
-/// after the `🐝` prefix. One deliberate laxity: the name's *charset* is not
-/// re-validated (only length + UTF-8) — a checksummed id with an invalid
-/// charset cannot be minted by a real `ahsw`.
+/// name-len u8 ‖ name ‖ config-len u16 LE ‖ config`, all base58check-encoded.
+/// One deliberate laxity: the name's *charset* is not re-validated (only
+/// length + UTF-8) — a checksummed id with an invalid charset cannot be
+/// minted by a real `ahsw`.
 pub(crate) fn swarm_id_lookups(id: &str) -> Result<LookupOpts> {
-    let payload = id
-        .strip_prefix(PREFIX)
-        .context("Invalid swarm prefix: expected '🐝'")?;
-    let bytes = base58check_decode(payload)?;
+    let bytes = base58check_decode(id)?;
     let mut pos = 0usize;
     let version = *bytes.get(pos).context("Swarm identifier too short")?;
     pos += 1;
@@ -130,7 +125,7 @@ fn base58check_decode(encoded: &str) -> Result<Vec<u8>> {
     Ok(payload.to_vec())
 }
 
-/// Mint a structurally valid `🐝…` swarm id for tests — the same framing a
+/// Mint a structurally valid swarm id for tests — the same framing a
 /// real `ahsw create` produces (fixed dummy seed, no password).
 #[cfg(test)]
 pub(crate) fn encode_test_swarm_id(name: &str, lookups: &LookupOpts) -> String {
@@ -149,7 +144,7 @@ pub(crate) fn encode_test_swarm_id(name: &str, lookups: &LookupOpts) -> String {
     buf.extend_from_slice(&config);
     let mut with_checksum = buf.clone();
     with_checksum.extend_from_slice(&checksum(&buf));
-    format!("{PREFIX}{}", bs58::encode(with_checksum).into_string())
+    bs58::encode(with_checksum).into_string()
 }
 
 #[cfg(test)]
@@ -172,7 +167,7 @@ mod tests {
         // test; if this ever changes, cross-repo interop broke.
         assert_eq!(
             encode_test_swarm_id("test", &LookupOpts::loopback()),
-            "🐝2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2Msw3sco"
+            "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2Msw3sco"
         );
     }
 
@@ -205,10 +200,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_missing_prefix_and_a_bad_checksum() {
+    fn rejects_a_bad_checksum() {
         let id = encode_test_swarm_id("test", &LookupOpts::loopback());
-        let unprefixed = id.strip_prefix(super::PREFIX).unwrap();
-        assert!(swarm_id_lookups(unprefixed).is_err());
         // Flip the last character to corrupt the checksum.
         let mut corrupted: String = id.chars().collect();
         let last = corrupted.pop().unwrap();

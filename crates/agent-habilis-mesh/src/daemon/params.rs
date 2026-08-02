@@ -36,7 +36,7 @@ pub struct CreateParams {
     /// id at setup (the salt is the seed, minted there).
     pub password: Option<Password>,
     /// `--invite-only`: the mesh's issuer keypair + invite root are minted at
-    /// setup and only creator-signed `🎟️` invites can join.
+    /// setup and only creator-signed invites can join.
     pub invite_only: bool,
 }
 
@@ -109,7 +109,7 @@ impl CreateParams {
 }
 
 impl JoinParams {
-    /// Resolve the `💬…` id target into a [`Mesh`], verify the password
+    /// Resolve the mesh id target into a [`Mesh`], verify the password
     /// against the id's verifier (locally — a wrong password fails here,
     /// before any network), and default the nickname. `join` never
     /// advertises.
@@ -195,7 +195,7 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
 /// The canonical [`Mesh`] a topic string derives **at a stated reach**.
 ///
 /// The lookups are part of the mesh id — `MeshConfig` is mixed into the topic
-/// derivation and encoded into the `💬…` payload — so they are also part of
+/// derivation and encoded into the id payload — so they are also part of
 /// what the peers on this mesh agree to. A loopback caller derives a loopback
 /// mesh: a rendezvous on the seed-derived port ladder, and no external network
 /// call.

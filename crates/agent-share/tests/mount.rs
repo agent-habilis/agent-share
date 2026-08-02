@@ -97,7 +97,7 @@ fn recv_line_containing(rx: &Receiver<String>, needle: &str) -> Option<String> {
 }
 
 /// Serve `root` over a loopback swarm and return the producer guard plus the
-/// `🐝…` mount ticket parsed from its stdout.
+/// mount ticket parsed from its stdout.
 fn spawn_producer(root: &Path, swarm: &str) -> (ChildGuard, String) {
     let mut producer_cmd = test_cmd();
     producer_cmd.args([
@@ -109,7 +109,7 @@ fn spawn_producer(root: &Path, swarm: &str) -> (ChildGuard, String) {
         "json",
     ]);
     let (producer, producer_rx) = spawn_piped(producer_cmd);
-    // json mode prints the bare `agent-share 🐝… <mountpoint-hint>` command;
+    // json mode prints the bare `agent-share <ticket> <mountpoint-hint>` command;
     // the ticket is its second word.
     let ticket_line = recv_line_containing(&producer_rx, "agent-share")
         .expect("producer never printed a mount command");
@@ -131,7 +131,10 @@ fn serves_a_ticket_and_the_bridge_binds() {
     write_file(&root.join("data/blob.bin"), &vec![7u8; 10_000]);
 
     let (_producer, ticket) = spawn_producer(&root, LOOPBACK_SWARM_ID);
-    assert!(ticket.starts_with("🐝"), "ticket token, got: {ticket}");
+    assert!(
+        !ticket.is_empty() && ticket.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+        "ticket token must be bare ASCII Base58, got: {ticket}"
+    );
 
     // Consumer with --no-mount: redeems the ticket, fetches the manifest,
     // builds the tree, binds the NFS bridge, and prints the OS mount command

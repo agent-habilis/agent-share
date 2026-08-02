@@ -1,4 +1,4 @@
-//! [`MeshId`] — the validated `💬…` string. Raw strings stay outside
+//! [`MeshId`] — the validated mesh id string. Raw strings stay outside
 //! the type until their checksum and complete payload have been validated.
 
 use std::borrow::Borrow;
@@ -7,23 +7,22 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{Mesh, PREFIX, SEPARATOR};
+use super::Mesh;
 
-const MIN_LEN: usize = 7;
+const MIN_LEN: usize = 3;
 const MAX_LEN: usize = 512;
 
-/// A mesh identifier — the encoded `💬...` Base58Check string.
+/// A mesh identifier — the encoded Base58Check string.
 ///
-/// Construction validates the prefix, length, Base58 charset, checksum,
-/// version, and complete payload. Consequently every `MeshId` can be decoded
-/// as a [`Mesh`].
+/// Construction validates length, Base58 charset, checksum, version, and
+/// complete payload. Consequently every `MeshId` can be decoded as a
+/// [`Mesh`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct MeshId(String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeshIdError {
-    MissingPrefix,
     Length(usize),
     Charset(String),
     InvalidHash,
@@ -32,7 +31,6 @@ pub enum MeshIdError {
 impl fmt::Display for MeshIdError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MeshIdError::MissingPrefix => write!(formatter, "mesh id must start with '{PREFIX}'"),
             MeshIdError::Length(len) => {
                 write!(
                     formatter,
@@ -62,26 +60,17 @@ impl MeshId {
     /// Returns an error if the inputs are invalid or the operation fails.
     pub fn new(value: impl Into<String>) -> Result<Self, MeshIdError> {
         let value = value.into();
-        let Some(rest) = value.strip_prefix(PREFIX) else {
-            return Err(MeshIdError::MissingPrefix);
-        };
-        // The `://` is optional on input; normalize both `💬<payload>` and
-        // `💬://<payload>` to the canonical form below.
-        let payload = rest.strip_prefix(SEPARATOR).unwrap_or(rest);
-        // Length is measured on the bare `💬<payload>` form so the bounds
-        // don't shift with the optional separator.
-        let bare_len = PREFIX.len() + payload.len();
-        if !(MIN_LEN..=MAX_LEN).contains(&bare_len) {
-            return Err(MeshIdError::Length(bare_len));
+        // The id is its own canonical form — bare Base58, nothing to strip.
+        if !(MIN_LEN..=MAX_LEN).contains(&value.len()) {
+            return Err(MeshIdError::Length(value.len()));
         }
-        if !payload.chars().all(is_base58_char) {
+        if !value.chars().all(is_base58_char) {
             return Err(MeshIdError::Charset(value));
         }
-        let canonical = format!("{PREFIX}{SEPARATOR}{payload}");
-        canonical
+        value
             .parse::<Mesh>()
             .map_err(|_| MeshIdError::InvalidHash)?;
-        Ok(Self(canonical))
+        Ok(Self(value))
     }
 
     #[must_use]
@@ -127,9 +116,7 @@ impl From<&str> for MeshId {
         if let Ok(id) = Self::new(label) {
             return id;
         }
-        let bare = label.strip_prefix(PREFIX).unwrap_or(label);
-        let topic = bare.strip_prefix(SEPARATOR).unwrap_or(bare);
-        let mesh = Mesh::from_topic(topic, super::MeshConfig::loopback());
+        let mesh = Mesh::from_topic(label, super::MeshConfig::loopback());
         Self::new(mesh.to_string()).expect("generated test mesh id must be valid")
     }
 }
@@ -150,7 +137,7 @@ impl Borrow<str> for MeshId {
 mod mesh_id_tests {
     use super::{Mesh, MeshId, MeshIdError};
 
-    const VALID: &str = "💬://2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2NgrWBn1";
+    const VALID: &str = "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2NgrWBn1";
 
     #[test]
     fn new_accepts_well_formed_id() {
@@ -158,32 +145,20 @@ mod mesh_id_tests {
     }
 
     #[test]
-    fn new_normalizes_to_canonical_uri_form() {
-        // Bare and `💬://` inputs collapse to the same canonical string.
-        let bare = MeshId::new(VALID.replace("://", "")).unwrap();
-        let uri = MeshId::new(VALID).unwrap();
-        assert_eq!(bare.as_str(), VALID);
-        assert_eq!(bare, uri);
-    }
-
-    #[test]
-    fn new_rejects_missing_prefix() {
-        assert!(matches!(
-            MeshId::new("noprefix12345"),
-            Err(MeshIdError::MissingPrefix)
-        ));
-    }
-
-    #[test]
     fn new_rejects_too_short() {
-        assert!(matches!(MeshId::new("💬a"), Err(MeshIdError::Length(_))));
+        assert!(matches!(MeshId::new("a"), Err(MeshIdError::Length(_))));
     }
 
     #[test]
     fn new_rejects_invalid_base58_chars() {
-        // `0`, `O`, `I`, `l` are not in the Base58 alphabet.
+        // `0`, `O`, `I`, `l` are not in the Base58 alphabet — and neither is
+        // the glyph prefix ids used to carry, so a stale paste lands here too.
         assert!(matches!(
-            MeshId::new("💬AbCdEf0xyz"),
+            MeshId::new("AbCdEf0xyz"),
+            Err(MeshIdError::Charset(_))
+        ));
+        assert!(matches!(
+            MeshId::new("💬AbCdEf1234"),
             Err(MeshIdError::Charset(_))
         ));
     }
@@ -207,7 +182,7 @@ mod mesh_id_tests {
 
     #[test]
     fn serde_rejects_an_invalid_hash() {
-        let invalid = serde_json::to_string("💬://AbCdEf1234").unwrap();
+        let invalid = serde_json::to_string("AbCdEf1234").unwrap();
         let error = serde_json::from_str::<MeshId>(&invalid).unwrap_err();
         assert!(error.to_string().contains("invalid gossip hash"));
     }

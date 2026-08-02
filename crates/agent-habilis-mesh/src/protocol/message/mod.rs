@@ -448,7 +448,7 @@ fn empty_body() -> MessageBody {
 ///
 /// Wire format (compact JSON, one line):
 /// ```json
-/// {"v":"12.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"💬...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
+/// {"v":"12.0","id":"<uuid>","type":"app","tag":"app_msg","mesh":"...","author":"word-word","ts":1234567890,"body":"{\"messageId\":\"<uuid>\",\"role\":\"ROLE_USER\",...}","ext":{}}
 /// ```
 ///
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.
@@ -1127,7 +1127,7 @@ mod tests {
     /// A valid UUID for the hand-written wire-JSON fixtures below (the
     /// validating `MessageId` deserialize rejects non-UUID ids).
     const FIXTURE_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
-    const FIXTURE_MESH: &str = "💬://2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2NgrWBn1";
+    const FIXTURE_MESH: &str = "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2NgrWBn1";
 
     #[test]
     fn test_unknown_ext_fields_ignored() {
@@ -1403,7 +1403,7 @@ mod tests {
             let body = concat!(
                 "{\"id\":\"00000000-0000-0000-0000-000000000001\",",
                 "\"role\":\"sender\",\"parts\":[{\"text\":\"What is Rust?\"}],",
-                "\"scope\":\"💬://test\"}"
+                "\"scope\":\"💬test\"}"
             );
             Message::fixture(MessageKind::app_broadcast("app_msg"), body)
         }
@@ -1423,7 +1423,7 @@ mod tests {
         fn snap_wire_directed_uncorrelated() {
             let body = concat!(
                 "{\"ref\":\"00000000-0000-0000-0000-000000000001\",",
-                "\"scope\":\"💬://test\",\"progress\":{\"phase\":\"running\"}}"
+                "\"scope\":\"💬test\",\"progress\":{\"phase\":\"running\"}}"
             );
             let msg = Message::fixture(
                 MessageKind::app_to("app_status", Nickname::from("addressed-nick"), None),

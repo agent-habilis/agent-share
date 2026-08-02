@@ -38,7 +38,7 @@ pub struct MountTicket {
 }
 
 impl MountTicket {
-    /// Encode as a `🐝` token (`type = mount`).
+    /// Encode as a token (`type = mount`).
     ///
     /// # Panics
     /// If the embedded [`LookupOpts`] exceeds its wire bounds — see
@@ -55,10 +55,10 @@ impl MountTicket {
         token::encode(TokenType::Mount, &payload)
     }
 
-    /// Decode a `🐝` mount ticket.
+    /// Decode a mount ticket.
     ///
     /// # Errors
-    /// Not a `🐝` token, the wrong token type, or a malformed payload.
+    /// Not a valid token, the wrong token type, or a malformed payload.
     pub fn decode(ticket: &str) -> Result<Self> {
         let (kind, payload) = token::decode(ticket.trim())?;
         if kind != TokenType::Mount {
@@ -108,7 +108,10 @@ mod tests {
     fn ticket_round_trips() {
         let ticket = sample();
         let encoded = ticket.encode();
-        assert!(encoded.starts_with("🐝"));
+        assert!(
+            encoded.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+            "ticket must be ASCII Base58: {encoded}"
+        );
         let decoded = MountTicket::decode(&encoded).expect("decode");
         assert_eq!(decoded.addr.id, ticket.addr.id);
         assert_eq!(decoded.secret, ticket.secret);
@@ -137,7 +140,7 @@ mod tests {
 
     #[test]
     fn rejects_another_token_type() {
-        // A `🐝` token of the wrong kind is valid framing but must not decode
+        // A token of the wrong kind is valid framing but must not decode
         // as a mount ticket — that is what the type byte is for.
         let swarm = token::encode(TokenType::Swarm, &[0u8; 64]);
         assert!(MountTicket::decode(&swarm).is_err());

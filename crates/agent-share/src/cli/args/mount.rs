@@ -8,11 +8,11 @@ use super::output::OutputFormat;
 use crate::protocol::SwarmId;
 
 /// The `agent-share serve` / `bench` actions. The consumer side is the bare
-/// `agent-share <🐝…> <target>` form (positionals on the root command),
-/// so a `🐝…` ticket can never collide with the `serve` / `bench` literals.
+/// `agent-share <ticket> <target>` form (positionals on the root command),
+/// so a ticket can never collide with the `serve` / `bench` literals.
 #[derive(Subcommand, Debug)]
 pub(crate) enum MountAction {
-    /// Share a folder read-only; prints the `agent-share 🐝…` command on stdout.
+    /// Share a folder read-only; prints the `agent-share <ticket>` command on stdout.
     ///
     /// Lazy: the tree is scanned for metadata only (nothing is hashed or
     /// transferred up front) and peers fetch file bytes on demand as they read
@@ -33,7 +33,7 @@ pub(crate) enum MountAction {
         #[command(flatten)]
         lookups: PublicLookupArgs,
         /// Output format: human (default) — a cargo-style status + hint — or
-        /// json, a single direct `agent-share 🐝…` line for machines.
+        /// json, a single direct `agent-share <ticket>` line for machines.
         #[arg(long, default_value = "human")]
         output: OutputFormat,
     },
@@ -75,9 +75,9 @@ mod tests {
 
     #[test]
     fn mount_ticket_form_parses() {
-        let cli = Cli::parse_from(["agent-share", "🐝abc", "./mnt", "--output", "json"]);
+        let cli = Cli::parse_from(["agent-share", "abc", "./mnt", "--output", "json"]);
         assert!(cli.action.is_none());
-        assert_eq!(cli.ticket.as_deref(), Some("🐝abc"));
+        assert_eq!(cli.ticket.as_deref(), Some("abc"));
         assert_eq!(cli.mountpoint, Some(std::path::PathBuf::from("./mnt")));
         assert!(!cli.no_mount);
         assert!(matches!(cli.output, super::OutputFormat::Json));
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn mount_bench_consumer_parses() {
-        let cli = Cli::parse_from(["agent-share", "bench", "🐝abc", "--duration", "5"]);
+        let cli = Cli::parse_from(["agent-share", "bench", "abc", "--duration", "5"]);
         let Some(super::MountAction::Bench {
             ticket,
             transport,
@@ -156,7 +156,7 @@ mod tests {
         else {
             panic!("expected Bench");
         };
-        assert_eq!(ticket.as_deref(), Some("🐝abc"));
+        assert_eq!(ticket.as_deref(), Some("abc"));
         assert!(transport.is_none());
         assert_eq!(duration, 5);
     }

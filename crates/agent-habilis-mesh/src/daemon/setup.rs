@@ -40,7 +40,7 @@ pub enum SetupKind {
         password: Option<Password>,
         /// `--invite-only`: mint an invite root + issuer keypair here (the
         /// issuer pubkey is baked into the id) so the bare hash can't join —
-        /// only creator-minted `🎟️` invites can.
+        /// only creator-minted invites can.
         invite_only: bool,
     },
     Join {
@@ -614,7 +614,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     }
     if mesh.requires_invite() {
         sink.emit(NodeEvent::Info(
-            "invite-only — joiners need a minted 🎟️ invite".to_owned(),
+            "invite-only — joiners need a minted invite".to_owned(),
         ));
     }
     if let Some(directory) = &advertise {

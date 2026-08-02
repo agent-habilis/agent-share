@@ -9,7 +9,7 @@ import {
   shareUrl,
 } from './ticket.ts'
 
-const TICKET = '🐝testTicketAbc123'
+const TICKET = 'testTicketAbc123'
 
 describe('sharePath / shareUrl', () => {
   test('encodes the ticket as one path segment', () => {
@@ -43,7 +43,10 @@ describe('parseRoute', () => {
     })
   })
 
-  test('accepts an unencoded bee ticket segment', () => {
+  test('a bare ticket segment needs no decoding', () => {
+    // Tickets are ASCII Base58, so encodeURIComponent is a no-op on them —
+    // the encoded and raw forms of a route must parse identically.
+    expect(sharePath(TICKET)).toBe(`/files/${TICKET}`)
     expect(parseRoute(`/files/${TICKET}`)).toEqual({
       view: 'files',
       ticket: TICKET,

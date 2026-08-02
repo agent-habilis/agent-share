@@ -76,7 +76,7 @@ fn resolve_lookups(public: bool, lookups: LookupSet) -> LookupOpts {
 }
 
 /// Resolve a transfer command's discovery config from its two alternative
-/// sources: a `--swarm 🐝…` id (whose embedded lookups win) or the
+/// sources: a `--swarm <id>` (whose embedded lookups win) or the
 /// create-style `--mdns/--dht/--relay` flags (naming any uses only
 /// those). Naming **nothing** is the all-on public preset — a transfer is
 /// inherently networked. The `--swarm`-vs-flags exclusivity is enforced

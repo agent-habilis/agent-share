@@ -1,6 +1,6 @@
 //! End to end against the **real binary**.
 //!
-//! Spawns `agent-share serve` as a subprocess, scrapes the `🐝` ticket it
+//! Spawns `agent-share serve` as a subprocess, scrapes the ticket it
 //! prints, and reads the share back over a `WebRTC` data channel — the same path
 //! the browser takes, minus the browser.
 //!
@@ -66,13 +66,21 @@ async fn the_real_cli_serves_over_webrtc() {
     let stdout = child.stdout.take().expect("piped stdout");
     let serving = Serving(child);
 
-    // Scrape the ticket off the `Mount agent-share 🐝… .` line.
+    // Scrape the ticket off the `Mount agent-share <ticket> .` line. The
+    // ticket is bare Base58 with nothing to grep for, so the anchor is the
+    // literal command word and the proof is that the next word decodes.
     let ticket = tokio::task::spawn_blocking(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Some(start) = line.find('🐝') {
-                let rest = &line[start..];
-                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-                return Some(rest[..end].to_owned());
+            let mut words = line.split_whitespace();
+            while let Some(word) = words.next() {
+                if word != "agent-share" {
+                    continue;
+                }
+                if let Some(candidate) = words.next()
+                    && MountTicket::decode(candidate).is_ok()
+                {
+                    return Some(candidate.to_owned());
+                }
             }
         }
         None
@@ -81,7 +89,7 @@ async fn the_real_cli_serves_over_webrtc() {
     .expect("scrape task")
     .expect("serve printed a ticket");
 
-    let ticket = MountTicket::decode(&ticket).expect("the printed ticket decodes");
+    let ticket = MountTicket::decode(&ticket).expect("the scraped ticket decodes");
     let producer = ticket.addr.id;
 
     // A consumer whose only custom transport is WebRTC.

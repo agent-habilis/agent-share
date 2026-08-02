@@ -1,28 +1,23 @@
-//! The branded `🐝` token codec shared by every agent-habilis token — here
-//! the mount ticket ([`crate::ticket`]); in agent-habilis/swarm also the
-//! swarm id and the pipe/port/file/sh tickets. One wire shape for every
-//! token, so a `🐝…` string self-describes its kind via a 1-byte type tag
-//! and the namespaces never collide. The full [`TokenType`] enum is kept
-//! (not trimmed to `Mount`) as wire documentation, and so a non-mount
-//! token decodes to a clean "wrong token type" error rather than an
-//! "unknown type" one.
+//! The token codec shared by every agent-habilis token — here the mount
+//! ticket ([`crate::ticket`]); in agent-habilis/swarm also the swarm id and
+//! the pipe/port/file/sh tickets. One wire shape for every token, so a token
+//! string self-describes its kind via a 1-byte type tag and the namespaces
+//! never collide. The full [`TokenType`] enum is kept (not trimmed to
+//! `Mount`) as wire documentation, and so a non-mount token decodes to a
+//! clean "wrong token type" error rather than an "unknown type" one.
 //!
-//! Wire: `🐝` + Base58Check(`version ‖ type ‖ payload`) with a `SHA256d`
-//! checksum. The emoji is the brand; everything after it is ASCII Base58
-//! (so `util::swarm_prefix` strips the `🐝` to keep file paths ASCII).
+//! Wire: Base58Check(`version ‖ type ‖ payload`) with a `SHA256d` checksum.
+//! Unprefixed and entirely ASCII, so a token drops into a URL path segment
+//! or a file path verbatim — no percent-encoding, no escaping.
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
-
-/// Branding prefix on every token — a single emoji (4 UTF-8 bytes); the
-/// remainder of the string is ASCII Base58Check.
-pub const PREFIX: &str = "🐝";
 
 /// Token framing version. Bumped only on a breaking framing change; an
 /// unknown version is rejected on decode.
 const VERSION: u8 = 1;
 
-/// Which kind of token this is — the byte that lets one `🐝…` namespace
+/// Which kind of token this is — the byte that lets one token namespace
 /// carry both swarm ids and pipe tickets without ambiguity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenType {
@@ -61,27 +56,24 @@ impl TokenType {
     }
 }
 
-/// Encode `payload` as a `🐝` token of the given `kind`.
+/// Encode `payload` as a token of the given `kind`.
 #[must_use]
 pub fn encode(kind: TokenType, payload: &[u8]) -> String {
     let mut framed = Vec::with_capacity(2 + payload.len());
     framed.push(VERSION);
     framed.push(kind.to_byte());
     framed.extend_from_slice(payload);
-    format!("{PREFIX}{}", base58check_encode(&framed))
+    base58check_encode(&framed)
 }
 
-/// Decode a `🐝` token into its kind and raw payload, validating the
-/// prefix, the Base58Check checksum, and the version byte.
+/// Decode a token into its kind and raw payload, validating the Base58Check
+/// checksum and the version byte.
 ///
 /// # Errors
-/// A missing/wrong `🐝` prefix, invalid Base58, a bad checksum, an unknown
-/// version, or an unknown type byte.
+/// Invalid Base58, a bad checksum, an unknown version, or an unknown type
+/// byte.
 pub fn decode(token: &str) -> Result<(TokenType, Vec<u8>)> {
-    let body = token
-        .strip_prefix(PREFIX)
-        .context("token must start with 🐝")?;
-    let framed = base58check_decode(body)?;
+    let framed = base58check_decode(token)?;
     let version = *framed.first().context("token too short")?;
     if version != VERSION {
         bail!("unsupported token version: {version}");
@@ -133,7 +125,12 @@ mod tests {
             TokenType::Sh,
         ] {
             let token = encode(kind, b"payload-bytes");
-            assert!(token.starts_with("🐝"));
+            // A token is unprefixed ASCII Base58, so it needs no escaping in
+            // a URL path segment or a filename.
+            assert!(
+                token.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+                "token must be ASCII Base58: {token}"
+            );
             let (decoded_kind, payload) = decode(&token).expect("decode");
             assert_eq!(decoded_kind, kind);
             assert_eq!(payload, b"payload-bytes");
@@ -158,13 +155,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_prefix() {
-        let token = encode(TokenType::Swarm, b"x");
-        let body = token.strip_prefix("🐝").unwrap();
-        assert!(decode(body).is_err(), "a bare body has no 🐝 prefix");
-    }
-
-    #[test]
     fn rejects_bad_checksum() {
         let mut token = encode(TokenType::Swarm, b"payload");
         let last = token.pop().unwrap();
@@ -174,13 +164,13 @@ mod tests {
 
     #[test]
     fn rejects_unknown_version() {
-        let token = format!("🐝{}", base58check_encode(&[9u8, 1u8, 0u8]));
+        let token = base58check_encode(&[9u8, 1u8, 0u8]);
         assert!(decode(&token).is_err());
     }
 
     #[test]
     fn rejects_unknown_type() {
-        let token = format!("🐝{}", base58check_encode(&[VERSION, 9u8, 0u8]));
+        let token = base58check_encode(&[VERSION, 9u8, 0u8]);
         assert!(decode(&token).is_err());
     }
 }

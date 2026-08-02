@@ -1,7 +1,7 @@
-//! Wire: the `🎟️` ticket brand + Base58Check(`version ‖ kind ‖ payload`) with a
-//! `SHA256d` checksum. The `🎟️` brand is shared with the blob and application-bridge
-//! tickets and told apart by the `kind` byte; the mesh id's `💬` is a different
-//! glyph, so a mesh id fails invite decode on the prefix alone.
+//! Wire: unprefixed Base58Check(`version ‖ kind ‖ payload`) with a `SHA256d`
+//! checksum. The framing is shared with the blob and application-bridge tickets
+//! and with the mesh id; the `kind` byte is what tells them apart, so a token
+//! of the wrong kind fails decode on the payload rather than on sight.
 //!
 //! Payload: `expiry(8, LE i64) ‖ flags(1) ‖ sig(64) ‖ hash_len(2, LE u16) ‖
 //! mesh_hash(UTF-8) ‖ root_field`. Bit 0 of `flags` marks a password-protected
@@ -20,12 +20,6 @@ use crate::protocol::identity;
 use crate::protocol::mesh::Mesh;
 use crate::protocol::seal;
 use crate::util::clock;
-use crate::util::consts::{MESH_URI_SEPARATOR, TICKET_GLYPH};
-
-/// Branding prefix on every ticket — the `🎟️` ticket glyph; the remainder of
-/// the string is ASCII Base58Check. Shared with the blob and application-bridge tickets and
-/// told apart by [`KIND`]; the mesh id's `💬` is a different glyph entirely.
-const PREFIX: &str = TICKET_GLYPH;
 
 /// Framing version. Bumped only on a breaking framing change.
 const VERSION: u8 = 1;
@@ -81,7 +75,7 @@ fn signing_bytes(mesh_hash: &str, root: &[u8; 32], expiry: i64) -> Vec<u8> {
     bytes
 }
 
-/// Mint a `🎟️` invite for `mesh`. `ttl_secs` `None`/`Some(0)` ⇒ no expiry,
+/// Mint an invite for `mesh`. `ttl_secs` `None`/`Some(0)` ⇒ no expiry,
 /// else the invite expires `ttl_secs` from now. `password` (the mesh's, if it
 /// has one) wraps the root so a scraped invite still needs it.
 ///
@@ -140,21 +134,16 @@ impl InviteTicket {
         framed.push(VERSION);
         framed.push(KIND);
         framed.extend_from_slice(&payload);
-        format!(
-            "{PREFIX}{MESH_URI_SEPARATOR}{}",
-            base58check_encode(&framed)
-        )
+        base58check_encode(&framed)
     }
 
-    /// Decode a `🎟️` invite ticket — structural parse only.
+    /// Decode an invite ticket — structural parse only.
     ///
     /// # Errors
-    /// Not a `🎟️` token, the wrong kind, a bad checksum/version, or a malformed
+    /// Invalid Base58, the wrong kind, a bad checksum/version, or a malformed
     /// payload.
     pub(crate) fn decode(token: &str) -> Result<Self> {
-        let body = strip_ticket_prefix(token.trim())
-            .with_context(|| format!("not an invite ticket: must start with {PREFIX}"))?;
-        let framed = base58check_decode(body)?;
+        let framed = base58check_decode(token.trim())?;
         let version = *framed.first().context("ticket too short")?;
         if version != VERSION {
             bail!("unsupported invite ticket version: {version}");
@@ -236,18 +225,6 @@ impl InviteTicket {
         raw.try_into()
             .map_err(|_| anyhow!("invite root is not 32 bytes"))
     }
-}
-
-/// Strip the ticket brand and optional `://` off a token, returning the
-/// Base58Check body. Accepts the canonical `🎟️://` and a paste that dropped the
-/// VS-16 (`🎟://`) or the separator. `None` if the token lacks the ticket glyph.
-fn strip_ticket_prefix(token: &str) -> Option<&str> {
-    let base = TICKET_GLYPH
-        .strip_suffix('\u{FE0F}')
-        .unwrap_or(TICKET_GLYPH);
-    let rest = token.strip_prefix(base)?;
-    let rest = rest.strip_prefix('\u{FE0F}').unwrap_or(rest);
-    Some(rest.strip_prefix(MESH_URI_SEPARATOR).unwrap_or(rest))
 }
 
 /// Read `N` bytes at `*pos` into a fixed array, advancing `*pos`. `None` if the
@@ -472,7 +449,8 @@ mod tests {
 
     #[test]
     fn a_mesh_id_is_not_an_invite() {
-        // A plain `💬…` id carries the mesh glyph, not the ticket `🎟️`.
+        // An id and an invite are both bare Base58; the kind byte and the
+        // checksum are the only things keeping them apart.
         let plain = Mesh::new(
             [3u8; 32],
             MeshName::new("t").unwrap(),
@@ -498,7 +476,7 @@ mod tests {
         }
         .encode();
         let invite = mint(&creator(), Some(3600), None).unwrap();
-        // Same `🎟️` brand, different kind byte — each rejects the other.
+        // Same framing, different kind byte — each rejects the other.
         assert!(InviteTicket::decode(&blob).is_err());
         assert!(BlobTicket::decode(&invite).is_err());
     }
@@ -512,10 +490,13 @@ mod tests {
     }
 
     #[test]
-    fn decode_tolerates_missing_variation_selector() {
+    fn mints_bare_ascii_base58() {
+        // No glyph, no variation selector, no `://`: an invite pastes into a
+        // URL or a shell word untouched.
         let token = mint(&creator(), Some(3600), None).unwrap();
-        let bare = token.replacen('\u{FE0F}', "", 1);
-        assert_ne!(bare, token);
-        assert!(InviteTicket::decode(&bare).is_ok());
+        assert!(
+            token.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+            "invite must be ASCII Base58: {token}"
+        );
     }
 }

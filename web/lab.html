@@ -120,7 +120,7 @@
       <section>
         <h2>Bench consumer</h2>
         <p class="hint">Paste a ticket and run (30s after connect).</p>
-        <textarea id="rx-ticket" placeholder="🐝… or http://localhost:5173/#🐝…"></textarea>
+        <textarea id="rx-ticket" placeholder="ticket or http://localhost:5173/#&lt;ticket&gt;"></textarea>
         <div class="row">
           <button type="button" id="rx-run">Run bench</button>
         </div>
@@ -132,10 +132,10 @@
           This tab as a full <code>agent-habilis-mesh</code> member — the same
           engine the CLI runs. <b>direct</b> counts live WebRTC data channels,
           <b>gossip</b> is the roster (including self). A
-          <code>#mesh=💬://…</code> fragment joins on load, so the link is
+          <code>#mesh=&lt;id&gt;</code> fragment joins on load, so the link is
           shareable.
         </p>
-        <textarea id="mesh-id" placeholder="💬://… (blank ⇒ create a new mesh)"></textarea>
+        <textarea id="mesh-id" placeholder="mesh id (blank ⇒ create a new mesh)"></textarea>
         <div class="row">
           <label>
             transport
