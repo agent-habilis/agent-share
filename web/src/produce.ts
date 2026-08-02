@@ -6,6 +6,8 @@
  * A chained-timeout rescan keeps the share live while the producer runs.
  */
 
+import { buildPeerCard } from './peerCard.ts'
+
 export interface ShareProducer {
   readonly ticket: string
   readonly transport: string
@@ -106,7 +108,10 @@ async function scanDirectory(root: FileSystemDirectoryHandle): Promise<{
 export async function startProducer(root: FileSystemDirectoryHandle): Promise<ShareProducer> {
   const listing = await scanDirectory(root)
   const wasm = await loadWasm()
-  const producer = await wasm.ShareProducer.start(listing)
+  const producer = await wasm.ShareProducer.start(
+    listing,
+    buildPeerCard({ role: 'producer', transport: 'webrtc' }),
+  )
 
   let stopped = false
   ;(async () => {

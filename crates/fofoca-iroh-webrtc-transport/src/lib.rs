@@ -205,6 +205,20 @@ impl WebRtcHandle {
         self.inner.session_count()
     }
 
+    /// Endpoint ids of every live session.
+    #[must_use]
+    pub fn live_peer_ids(&self) -> Vec<iroh_base::EndpointId> {
+        self.inner.live_peer_ids()
+    }
+
+    /// Selected ICE remote candidate for a live session, if any.
+    pub async fn selected_remote_candidate(
+        &self,
+        remote: &iroh_base::EndpointId,
+    ) -> Option<(String, String)> {
+        self.inner.selected_remote_candidate(remote).await
+    }
+
     /// Tear down the session for `remote`, if any.
     #[must_use]
     pub fn detach(&self, remote: &iroh_base::EndpointId) -> bool {

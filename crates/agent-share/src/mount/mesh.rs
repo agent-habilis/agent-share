@@ -15,13 +15,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agent_habilis_mesh::embed::{
-    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink,
+    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
+    SilentSink,
 };
 use agent_habilis_mesh::net::TransportOpts;
-use agent_habilis_mesh::protocol::{Message, Nickname};
+use agent_habilis_mesh::ops::{StateMergeParams, broadcast_state_merge};
+use agent_habilis_mesh::protocol::{Channel, Message, Nickname};
 use agent_habilis_mesh::runtime::{
     InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh_with,
 };
+use agent_share_proto::PeerCard;
 use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
 use anyhow::{Context, Result};
@@ -57,10 +60,66 @@ pub(crate) fn mesh_lookups(
 /// and did.
 use agent_habilis_mesh::net::MAX_DIRECT_PEERS;
 
-/// Presence only: this node joins the mesh so its peers can see each other and
-/// hold direct sessions. File bytes ride the mount protocol, not gossip, so
-/// there is deliberately no application payload here.
-struct ShareDriver;
+/// Meta per-peer gate: only `<nick>` may write `/peers/<nick>/card`.
+fn share_card_gate() -> SelfWriteGate {
+    SelfWriteGate {
+        map: "peers".to_owned(),
+        field: "card".to_owned(),
+    }
+}
+
+/// Presence plus mesh/app metadata on the meta card. File bytes ride the mount
+/// protocol, not gossip.
+struct ShareDriver {
+    version: String,
+    runtime: String,
+    transport: String,
+    role: Option<String>,
+}
+
+impl ShareDriver {
+    fn new(version: String, runtime: String, transport: String, role: Option<String>) -> Self {
+        Self {
+            version,
+            runtime,
+            transport,
+            role,
+        }
+    }
+
+    async fn publish_card(&self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+        let card = PeerCard::new(
+            ctx.endpoint.id().to_string(),
+            &self.version,
+            &self.runtime,
+            &self.transport,
+            self.role.clone(),
+        );
+        let merge = serde_json::json!({
+            "peers": {
+                ctx.author.as_str(): {
+                    "card": card.to_card_value()
+                }
+            }
+        });
+        if let Err(error) = broadcast_state_merge(
+            state,
+            StateMergeParams {
+                mesh: ctx.mesh,
+                author: ctx.author,
+                merge,
+                sender: ctx.sender,
+                sink: ctx.sink,
+                channel: Channel::Meta,
+                surface: false,
+            },
+        )
+        .await
+        {
+            tracing::debug!(%error, "share meta client card publish failed");
+        }
+    }
+}
 
 #[agent_habilis_mesh::async_trait]
 impl NodeApp for ShareDriver {
@@ -82,6 +141,10 @@ impl NodeApp for ShareDriver {
     ) -> bool {
         false
     }
+
+    async fn on_meshed(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+        self.publish_card(state, ctx).await;
+    }
 }
 
 #[agent_habilis_mesh::async_trait]
@@ -89,6 +152,10 @@ impl NodeDriver for ShareDriver {
     type Session = ();
     type Http = ();
     type Ipc = serde_json::Value;
+
+    async fn on_startup(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+        self.publish_card(state, ctx).await;
+    }
 }
 
 /// A live membership in a share's mesh.
@@ -222,7 +289,7 @@ pub(crate) async fn join(
             protocols,
             transports: TransportOpts::default(),
             multihop: false,
-            per_peer_gate: None,
+            per_peer_gate: Some(share_card_gate()),
             cohost: None,
             live_count: Some(Arc::clone(&live)),
         },
@@ -233,11 +300,20 @@ pub(crate) async fn join(
     let mesh_id = config.mesh_id().as_str().to_owned();
     let webrtc = config.webrtc_handle();
     let router = config.router();
+    // Native CLI peers advertise as unicast — that is the directed path they
+    // take on the share mesh (iroh QUIC), distinct from a browser's webrtc/relay.
+    // This join path is the producer today (`mount::produce`).
+    let driver = ShareDriver::new(
+        env!("CARGO_PKG_VERSION").to_owned(),
+        "rust".to_owned(),
+        "unicast".to_owned(),
+        Some("producer".to_owned()),
+    );
     // `handle_signals: false` is load-bearing, not a default. Registering
     // tokio's signal handlers suppresses the OS default-terminate for the
     // *whole process, permanently* — `serve` owns its own ctrl-c, and a mesh
     // membership must not take that away from it.
-    let node = Node::spawn(config, ShareDriver, None, false);
+    let node = Node::spawn(config, driver, None, false);
     Ok(ShareMesh {
         mesh_id,
         _router: router,

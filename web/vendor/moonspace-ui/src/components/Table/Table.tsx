@@ -1,5 +1,4 @@
 import type { Child, Key } from 'visage-dom'
-import { keyed } from 'visage-dom/element'
 import { Style, css, raw } from 'visage-style'
 import { oneRow } from '../../styles/mixins.ts'
 import { T } from '../../tokens.ts'
@@ -101,21 +100,31 @@ export function Table<T>({
           </div>
         )}
 
-        {keyed(rows, rowKey, (row, index) => (
-          <>
-            {rowRules && index > 0 && (
-              <div aria-hidden="true">
+        {rows.flatMap((row, index) => {
+          // Nested arrays are flattened by the reconciler. Do not wrap a row in
+          // a Fragment and pass it to `keyed` — Fragments are bare Child[] and
+          // keyed expects an ElementNode (node.children would be undefined).
+          const key = rowKey(row)
+          const cells = columns.map((column) => (
+            <div
+              key={`${String(key)}-${column.key}`}
+              role="cell"
+              style={{ textAlign: column.align ?? 'left' }}
+            >
+              {Style(CELL)}
+              {column.render ? column.render(row) : String(row[column.key] ?? '')}
+            </div>
+          ))
+          if (rowRules && index > 0) {
+            return [
+              <div key={`${String(key)}-rule`} aria-hidden="true">
                 {Style(RULE)}
-              </div>
-            )}
-            {columns.map((column) => (
-              <div key={column.key} role="cell" style={{ textAlign: column.align ?? 'left' }}>
-                {Style(CELL)}
-                {column.render ? column.render(row) : String(row[column.key] ?? '')}
-              </div>
-            ))}
-          </>
-        ))}
+              </div>,
+              ...cells,
+            ]
+          }
+          return cells
+        })}
       </div>
     </div>
   )

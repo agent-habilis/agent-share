@@ -42,6 +42,16 @@ impl TransportMode {
     pub const fn selected_label(self, used_webrtc: bool) -> &'static str {
         if used_webrtc { "webrtc" } else { "relay" }
     }
+
+    /// Requested mode as a stable lowercase label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WebRtc => "webrtc",
+            Self::Relay => "relay",
+            Self::Dynamic => "dynamic",
+        }
+    }
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@
 // First, before anything can build a Disposable. See the file for why.
 import './compat.ts'
 
+import { buildPeerCard } from './peerCard.ts'
 import { parseShareInput } from './ticket.ts'
 
 function importWasm() {
@@ -196,7 +197,10 @@ async function meshStart(
   // `undefined` ⇒ every transport this target has; 'webrtc' pins the data
   // plane so a fallback shows up as a failure instead of passing quietly.
   const mode = ui.transport.value === 'dynamic' ? undefined : ui.transport.value
-  meshPeer = id ? await wasm.MeshPeer.join(id, mode) : await wasm.MeshPeer.create(mode)
+  const card = buildPeerCard({ role: 'consumer', transport: mode ?? 'webrtc' })
+  meshPeer = id
+    ? await wasm.MeshPeer.join(id, mode, card)
+    : await wasm.MeshPeer.create(mode, card)
   ui.idBox.value = meshPeer.mesh_id
   ui.nick.textContent = `as <${meshPeer.nickname}>`
   ui.leave.disabled = false

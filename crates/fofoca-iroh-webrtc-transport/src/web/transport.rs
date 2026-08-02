@@ -17,8 +17,10 @@ use iroh::endpoint::transports::{
 };
 use iroh_base::CustomAddr;
 use n0_watcher::Watchable;
+use js_sys::Reflect;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::JsFuture;
 use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection};
 
 use crate::custom_addr;
@@ -302,6 +304,27 @@ impl BrowserHubTransport {
         self.sessions.live_len()
     }
 
+    /// Endpoint ids of every live session.
+    #[must_use]
+    pub fn live_peer_ids(&self) -> Vec<EndpointId> {
+        self.sessions.live_ids()
+    }
+
+    /// Selected ICE remote candidate for `remote`, if a live session exists.
+    ///
+    /// Returns `(address, candidate_type)` where `candidate_type` is the
+    /// browser's string (`host` / `srflx` / `relay` / `prflx`). Address may be
+    /// an mDNS `.local` name — browsers redact LAN IPs that way.
+    pub async fn selected_remote_candidate(
+        &self,
+        remote: &EndpointId,
+    ) -> Option<(String, String)> {
+        let peer_connection = self.sessions.with_live(remote, |handle| {
+            handle._keepalive.peer_connection.clone()
+        })?;
+        selected_remote_from_stats(&peer_connection).await
+    }
+
     /// Tear down the session for `remote`, if any.
     pub fn detach(&self, remote: &EndpointId) -> bool {
         self.sessions.remove(remote)
@@ -322,6 +345,80 @@ impl std::fmt::Debug for BrowserHubTransport {
             .field("sessions", &self.sessions.live_len())
             .finish_non_exhaustive()
     }
+}
+
+/// Read the selected ICE pair's remote candidate via `RTCPeerConnection.getStats`.
+async fn selected_remote_from_stats(
+    peer_connection: &RtcPeerConnection,
+) -> Option<(String, String)> {
+    let report = JsFuture::from(peer_connection.get_stats()).await.ok()?;
+    let mut by_id: std::collections::HashMap<String, js_sys::Object> =
+        std::collections::HashMap::new();
+    let iter = js_sys::try_iter(&report).ok().flatten()?;
+    for entry in iter.flatten() {
+        let Ok(pair) = entry.dyn_into::<js_sys::Array>() else {
+            continue;
+        };
+        if pair.length() < 2 {
+            continue;
+        }
+        let Ok(obj) = pair.get(1).dyn_into::<js_sys::Object>() else {
+            continue;
+        };
+        let id = pair.get(0).as_string().unwrap_or_default();
+        by_id.insert(id, obj);
+    }
+
+    let mut selected_pair_id = None;
+    for stats in by_id.values() {
+        let ty = Reflect::get(stats, &JsValue::from_str("type"))
+            .ok()
+            .and_then(|v| v.as_string())
+            .unwrap_or_default();
+        if ty == "transport" {
+            selected_pair_id = Reflect::get(stats, &JsValue::from_str("selectedCandidatePairId"))
+                .ok()
+                .and_then(|v| v.as_string());
+            if selected_pair_id.is_some() {
+                break;
+            }
+        }
+        if ty == "candidate-pair"
+            && Reflect::get(stats, &JsValue::from_str("selected"))
+                .ok()
+                .and_then(|v| v.as_bool())
+                == Some(true)
+        {
+            selected_pair_id = Reflect::get(stats, &JsValue::from_str("id"))
+                .ok()
+                .and_then(|v| v.as_string());
+            break;
+        }
+    }
+    let pair_id = selected_pair_id?;
+    let pair = by_id.get(&pair_id)?;
+    let remote_id = Reflect::get(pair, &JsValue::from_str("remoteCandidateId"))
+        .ok()
+        .and_then(|v| v.as_string())?;
+    let remote = by_id.get(&remote_id)?;
+    let address = Reflect::get(remote, &JsValue::from_str("address"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .or_else(|| {
+            Reflect::get(remote, &JsValue::from_str("ip"))
+                .ok()
+                .and_then(|v| v.as_string())
+        })?;
+    let kind = Reflect::get(remote, &JsValue::from_str("candidateType"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let kind = if address.ends_with(".local") {
+        "mdns".to_owned()
+    } else {
+        kind
+    };
+    Some((address, kind))
 }
 
 impl CustomTransport for BrowserHubTransport {

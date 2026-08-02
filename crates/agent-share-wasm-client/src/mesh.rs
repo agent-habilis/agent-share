@@ -19,23 +19,98 @@
 //! no mDNS and no DHT; it does not need them.
 
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agent_habilis_mesh::embed::{
-    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink,
+    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
+    SilentSink,
 };
 use agent_habilis_mesh::net::TransportOpts;
+use agent_habilis_mesh::ops::{StateMergeParams, broadcast_state_merge};
 use agent_habilis_mesh::protocol::{
-    DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message,
+    Channel, DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message, Nickname,
 };
 use agent_habilis_mesh::runtime::{
     CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh_with,
     setup_mesh,
 };
+use agent_share_proto::PeerCard;
 use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
 use wasm_bindgen::prelude::*;
+
+/// Parts of a meta peer card known before the endpoint id exists.
+///
+/// Built by the TypeScript consumer (runtime, version, role, …). Wasm only
+/// publishes what JS passes — it does not sniff `navigator.userAgent`.
+#[derive(Debug, Clone)]
+pub(crate) struct CardParts {
+    pub version: String,
+    pub runtime: String,
+    pub transport: String,
+    pub role: Option<String>,
+}
+
+impl CardParts {
+    fn into_card(self, endpoint: String) -> PeerCard {
+        PeerCard::new(
+            endpoint,
+            self.version,
+            self.runtime,
+            self.transport,
+            self.role,
+        )
+    }
+}
+
+/// Fallback when JS omits a card (lab / older callers). No UA sniffing.
+pub(crate) fn default_card_parts(
+    default_transport: &str,
+    default_role: Option<String>,
+) -> CardParts {
+    CardParts {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        runtime: "browser".to_owned(),
+        transport: default_transport.to_owned(),
+        role: default_role,
+    }
+}
+
+/// Parse `{ version, runtime, transport?, role? }` from JS.
+pub(crate) fn parse_card_parts(
+    value: &JsValue,
+    default_transport: &str,
+    default_role: Option<String>,
+) -> Result<CardParts, JsValue> {
+    let version = js_sys::Reflect::get(value, &JsValue::from_str("version"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| JsValue::from_str("peer card.version must be a non-empty string"))?;
+    let runtime = js_sys::Reflect::get(value, &JsValue::from_str("runtime"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| JsValue::from_str("peer card.runtime must be a non-empty string"))?;
+    let transport = js_sys::Reflect::get(value, &JsValue::from_str("transport"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_transport.to_owned());
+    let role = js_sys::Reflect::get(value, &JsValue::from_str("role"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .filter(|s| !s.is_empty())
+        .or(default_role);
+    Ok(CardParts {
+        version,
+        runtime,
+        transport,
+        role,
+    })
+}
 
 /// The most direct sessions a tab will hold.
 ///
@@ -43,6 +118,15 @@ use wasm_bindgen::prelude::*;
 /// enforces and the denominator its header renders, and when they were separate
 /// literals the header could show `18/16`.
 use agent_habilis_mesh::net::MAX_DIRECT_PEERS;
+
+/// Meta per-peer gate: only `<nick>` may write `/peers/<nick>/card`.
+/// Must match on every share-mesh replica (genesis identity).
+fn share_card_gate() -> SelfWriteGate {
+    SelfWriteGate {
+        map: "peers".to_owned(),
+        field: "card".to_owned(),
+    }
+}
 
 /// A share's lookups, as the engine spells them.
 ///
@@ -66,15 +150,75 @@ fn mesh_lookups(
     }
 }
 
-/// Presence-only driver: enough to be a member, nothing more.
-///
-/// Application payloads are a separate concern — a peer that carries none still
-/// joins, shows up on every roster, and holds direct sessions. That separation
-/// is what lets this file be short.
-struct Probe;
+/// Endpoint id → peer card learned from meta `/peers/<nick>/card`.
+type ClientBook = Arc<Mutex<HashMap<String, PeerCard>>>;
+
+/// Share-mesh driver: presence plus mesh/app metadata on the meta card.
+struct ShareMeshDriver {
+    parts: CardParts,
+    book: ClientBook,
+}
+
+impl ShareMeshDriver {
+    fn new(parts: CardParts, book: ClientBook) -> Self {
+        Self { parts, book }
+    }
+
+    /// Publish mesh/app identity onto `/peers/<nick>/card` (meta channel).
+    async fn publish_card(&self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+        let card = self.parts.clone().into_card(ctx.endpoint.id().to_string());
+        let merge = serde_json::json!({
+            "peers": {
+                ctx.author.as_str(): {
+                    "card": card.to_card_value()
+                }
+            }
+        });
+        if let Err(error) = broadcast_state_merge(
+            state,
+            StateMergeParams {
+                mesh: ctx.mesh,
+                author: ctx.author,
+                merge,
+                sender: ctx.sender,
+                sink: ctx.sink,
+                channel: Channel::Meta,
+                surface: false,
+            },
+        )
+        .await
+        {
+            // Swallowed before — silent failure left other tabs unable to name this peer.
+            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                "share meta peer card publish failed: {error}"
+            )));
+        }
+        self.refresh_book(state);
+    }
+
+    /// Rebuild the endpoint → card map from the live meta document.
+    fn refresh_book(&self, state: &EventLoopState) {
+        let doc = state.doc(Channel::Meta).to_json();
+        let mut next = HashMap::new();
+        if let Some(peers) = doc.get("peers").and_then(|value| value.as_object()) {
+            for peer in peers.values() {
+                let Some(card_value) = peer.get("card") else {
+                    continue;
+                };
+                let Some(card) = PeerCard::from_card_value(card_value) else {
+                    continue;
+                };
+                next.insert(card.endpoint.clone(), card);
+            }
+        }
+        if let Ok(mut book) = self.book.lock() {
+            *book = next;
+        }
+    }
+}
 
 #[agent_habilis_mesh::async_trait]
-impl NodeApp for Probe {
+impl NodeApp for ShareMeshDriver {
     fn classify(&self, _message: &Message) -> AppClass {
         AppClass {
             loggable: false,
@@ -93,13 +237,39 @@ impl NodeApp for Probe {
     ) -> bool {
         false
     }
+
+    fn on_meta_applied(
+        &mut self,
+        _author: &Nickname,
+        state: &mut EventLoopState,
+        _ctx: &HandlerCtx<'_>,
+    ) {
+        self.refresh_book(state);
+    }
+
+    async fn on_meshed(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+        self.publish_card(state, ctx).await;
+    }
+
+    async fn on_peer_left(
+        &mut self,
+        _nickname: &Nickname,
+        state: &mut EventLoopState,
+        _ctx: &HandlerCtx<'_>,
+    ) {
+        self.refresh_book(state);
+    }
 }
 
 #[agent_habilis_mesh::async_trait]
-impl NodeDriver for Probe {
+impl NodeDriver for ShareMeshDriver {
     type Session = ();
     type Http = ();
     type Ipc = serde_json::Value;
+
+    async fn on_startup(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+        self.publish_card(state, ctx).await;
+    }
 }
 
 /// A live mesh membership held by this tab.
@@ -112,10 +282,12 @@ pub struct MeshPeer {
     /// without a request/response hop into the loop.
     live: Arc<AtomicUsize>,
     hub: Arc<fofoca_iroh_webrtc_transport::BrowserHubTransport>,
+    /// Peer cards from meta `/peers/<nick>/card`, keyed by endpoint id.
+    clients: ClientBook,
     /// Behind a `RefCell` so [`MeshPeer::leave`] can take `&self` — see the
     /// note there on why a `self`-by-value method is a trap through
     /// wasm-bindgen.
-    node: RefCell<Option<Node<Probe>>>,
+    node: RefCell<Option<Node<ShareMeshDriver>>>,
 }
 
 #[wasm_bindgen]
@@ -125,7 +297,10 @@ impl MeshPeer {
     ///
     /// # Errors
     /// Endpoint bind failure, or no reachable relay.
-    pub async fn create(transport: Option<String>) -> Result<MeshPeer, JsValue> {
+    pub async fn create(
+        transport: Option<String>,
+        card: Option<JsValue>,
+    ) -> Result<MeshPeer, JsValue> {
         console_error_panic_hook::set_once();
         let transports = parse_transport(transport.as_deref())?;
         let resolved = CreateParams {
@@ -146,14 +321,22 @@ impl MeshPeer {
         }
         .resolve()
         .map_err(|error| err("resolve create params", &error))?;
-        spawn_peer(resolved, transports, None).await
+        let parts = match card.as_ref() {
+            Some(value) => parse_card_parts(value, "webrtc", None)?,
+            None => default_card_parts("webrtc", None),
+        };
+        spawn_peer(resolved, transports, None, parts).await
     }
 
     /// Join an existing mesh by its `💬://…` id.
     ///
     /// # Errors
     /// Unparseable id, endpoint bind failure, or no reachable relay.
-    pub async fn join(mesh_id: String, transport: Option<String>) -> Result<MeshPeer, JsValue> {
+    pub async fn join(
+        mesh_id: String,
+        transport: Option<String>,
+        card: Option<JsValue>,
+    ) -> Result<MeshPeer, JsValue> {
         console_error_panic_hook::set_once();
         let transports = parse_transport(transport.as_deref())?;
         let target = mesh_id
@@ -167,7 +350,11 @@ impl MeshPeer {
         }
         .resolve()
         .map_err(|error| err("resolve join params", &error))?;
-        spawn_peer(resolved, transports, None).await
+        let parts = match card.as_ref() {
+            Some(value) => parse_card_parts(value, "webrtc", None)?,
+            None => default_card_parts("webrtc", None),
+        };
+        spawn_peer(resolved, transports, None, parts).await
     }
 
     /// Join the mesh a *share* belongs to, derived from its ticket secret.
@@ -192,6 +379,7 @@ impl MeshPeer {
         endpoint: iroh::Endpoint,
         webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
         protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+        card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
         let resolved = resolve_share(secret, lookups)?;
         spawn_peer_inner(
@@ -199,6 +387,7 @@ impl MeshPeer {
             TransportOpts::default(),
             Some(InjectedEndpoint { endpoint, webrtc }),
             protocols,
+            card,
         )
         .await
     }
@@ -207,9 +396,10 @@ impl MeshPeer {
         secret: &[u8; SECRET_LEN],
         lookups: &agent_share_proto::lookup::LookupOpts,
         shared: Option<(iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
+        card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
         let resolved = resolve_share(secret, lookups)?;
-        spawn_peer(resolved, TransportOpts::default(), shared).await
+        spawn_peer(resolved, TransportOpts::default(), shared, card).await
     }
 
     #[wasm_bindgen(getter)]
@@ -220,6 +410,28 @@ impl MeshPeer {
     #[wasm_bindgen(getter)]
     pub fn nickname(&self) -> String {
         self.nickname.clone()
+    }
+
+    /// The WebRTC hub this peer negotiates mesh sessions on.
+    pub(crate) fn hub(&self) -> &Arc<fofoca_iroh_webrtc_transport::BrowserHubTransport> {
+        &self.hub
+    }
+
+    /// Meta peer card for `endpoint_id`, if published.
+    pub(crate) fn card_for(&self, endpoint_id: &str) -> Option<PeerCard> {
+        self.clients
+            .lock()
+            .ok()
+            .and_then(|book| book.get(endpoint_id).cloned())
+    }
+
+    /// All meta peer cards currently known (gossip roster advertise).
+    pub(crate) fn known_cards(&self) -> Vec<PeerCard> {
+        self.clients
+            .lock()
+            .ok()
+            .map(|book| book.values().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Members on the gossip roster, including self — so a lone peer reads 1.
@@ -307,9 +519,10 @@ async fn spawn_peer(
     resolved: Resolved,
     transports: TransportOpts,
     shared: Option<(iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
+    card: CardParts,
 ) -> Result<MeshPeer, JsValue> {
     let injected = shared.map(|(endpoint, webrtc)| InjectedEndpoint { endpoint, webrtc });
-    spawn_peer_inner(resolved, transports, injected, Vec::new()).await
+    spawn_peer_inner(resolved, transports, injected, Vec::new(), card).await
 }
 
 async fn spawn_peer_inner(
@@ -317,9 +530,11 @@ async fn spawn_peer_inner(
     transports: TransportOpts,
     injected: Option<InjectedEndpoint>,
     protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    card: CardParts,
 ) -> Result<MeshPeer, JsValue> {
     let Resolved { kind, author, .. } = resolved;
     let live = Arc::new(AtomicUsize::new(0));
+    let clients: ClientBook = Arc::new(Mutex::new(HashMap::new()));
     let config = setup_mesh(
         kind,
         SetupParams {
@@ -339,7 +554,8 @@ async fn spawn_peer_inner(
             state_file: None,
             sink: Arc::new(SilentSink),
             multihop: false,
-            per_peer_gate: None,
+            // Gate meta so only `<nick>` may write `/peers/<nick>/card`.
+            per_peer_gate: Some(share_card_gate()),
             cohost: None,
             live_count: Some(Arc::clone(&live)),
         },
@@ -349,14 +565,21 @@ async fn spawn_peer_inner(
 
     let mesh_id = config.mesh_id().as_str().to_owned();
     let hub = config.webrtc_handle().transport();
+    // Seed our own card so Info does not wait on meta sync to self.
+    let own = card.clone().into_card(hub.local_id().to_string());
+    if let Ok(mut book) = clients.lock() {
+        book.insert(own.endpoint.clone(), own);
+    }
     // `handle_signals: false` — there are no process signals in a tab, and the
     // engine's signal registration is host-only anyway.
-    let node = Node::spawn(config, Probe, None, false);
+    let driver = ShareMeshDriver::new(card, Arc::clone(&clients));
+    let node = Node::spawn(config, driver, None, false);
     Ok(MeshPeer {
         mesh_id,
         nickname: author.to_string(),
         live,
         hub,
+        clients,
         node: RefCell::new(Some(node)),
     })
 }

@@ -22,6 +22,7 @@
 //! live beside the code they pin and must fail loudly rather than be updated
 //! to match.
 
+pub mod client;
 pub mod framing;
 pub mod lookup;
 pub mod manifest;
@@ -29,6 +30,11 @@ pub mod mesh_key;
 pub mod peer_addr;
 pub mod ticket;
 pub mod token;
+
+pub use client::{
+    CARD_APP, CARD_CLIENT, CARD_ENDPOINT, CARD_ROLE, CARD_RUNTIME, CARD_TRANSPORT, CARD_VERSION,
+    PRODUCT as CLIENT_PRODUCT, PeerCard, format_label as format_client_label,
+};
 
 pub use framing::{
     BENCH_ECHO_INTERVAL_SECS, BENCH_KIND_ECHO, BENCH_KIND_FILL, DEFAULT_BENCH_DURATION_SECS,

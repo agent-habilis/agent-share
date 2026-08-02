@@ -20,6 +20,7 @@ import { component, computed, listen, signal } from 'visage-dom'
 import type { Child, Ctx } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
+import { TechInfoModal } from './TechInfoModal.tsx'
 import { saveStream, singleFileStream, zipStream, type Progress } from './download.ts'
 import {
   canMount,
@@ -32,6 +33,7 @@ import {
   type SyncedState,
 } from './mount.ts'
 import { canProduce, pickShareRoot, startProducer, type ShareProducer } from './produce.ts'
+import { buildPeerCard } from './peerCard.ts'
 import { parseShareInput, shareUrl } from './ticket.ts'
 import {
   buildTree,
@@ -51,6 +53,10 @@ interface Client {
   /** Peers we hold a direct WebRTC data channel with. */
   readonly peers_direct: number
   readonly max_direct: number
+  /** Sync tech-info snapshot for the Info modal. */
+  info(): unknown
+  /** Refresh ICE remote-candidate addresses (slower cadence). */
+  refresh_peer_ips(): Promise<void>
   manifest(): Promise<Manifest>
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
   /** Subscribe to tree changes. Each call delivers the whole manifest. */
@@ -125,8 +131,14 @@ function connect(ticket: string): Promise<Client> {
   let client = clients.get(ticket)
   if (!client) {
     // Omit transport ⇒ dynamic (WebRTC preferred, iroh relay fallback).
+    // Peer card (runtime / version) is owned by this TS consumer.
     client = loadWasm().then(
-      (wasm) => wasm.ShareClient.connect(ticket) as unknown as Promise<Client>,
+      (wasm) =>
+        wasm.ShareClient.connect(
+          ticket,
+          undefined,
+          buildPeerCard({ role: 'consumer' }),
+        ) as unknown as Promise<Client>,
     )
     // Evict on failure so a retry (a re-entered hash, say) can dial again.
     client.catch(() => clients.delete(ticket))
@@ -446,6 +458,7 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
   const mountError = signal<string | null>(null)
   /** Non-null while a host directory is mounted for this session. */
   const mountSession = signal<MountSession | null>(null)
+  const infoOpen = signal(false)
 
   let synced: SyncedState = emptySyncedState()
   let syncing = false
@@ -656,6 +669,7 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     const active = transfer.value
     const mounted = mountSession.value !== null
     const mountable = canMount()
+    const open = infoOpen.value
     const mountButton = () => (
       <Button variant="secondary" onclick={() => void mount()} disabled={!mountable}>
         {mounted ? 'Unmount' : 'Mount'}
@@ -668,14 +682,20 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     // nothing worth showing — so that doubles as the "hide it" signal rather
     // than reporting a misleading `0/0`.
     peerTick.value
-    const peers =
-      current.client.max_direct === 0
-        ? null
-        : {
-            gossip: current.client.peers_gossip,
-            direct: current.client.peers_direct,
-            max: current.client.max_direct,
-          }
+    const meshCount =
+      current.client.max_direct === 0 ? null : current.client.peers_gossip
+    const status = active
+      ? transferLabel(active.kind)
+      : mounted
+        ? 'mounted'
+        : 'ready'
+    const infoButton = (
+      <Button variant="secondary" onclick={() => {
+        infoOpen.value = true
+      }}>
+        Info
+      </Button>
+    )
 
     return (
       <div
@@ -696,9 +716,10 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
           }}
         >
           {/*
-            One row, always. A transfer takes the row over rather than adding
-            one below it — every child here is exactly `oneRow` tall, so the
-            file browser underneath never moves.
+            One row, always. A transfer takes the middle of the row rather than
+            adding one below it — every child here is exactly `oneRow` tall, so
+            the file browser underneath never moves. Info stays outside the
+            transfer ternary so it remains reachable while mounting/syncing.
           */}
           <Stack direction="row" gap={2} justify="between">
             {active ? (
@@ -712,28 +733,25 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
                   }
                   label={transferLabel(active.kind)}
                 />
-                {active.kind === 'download' ? (
-                  <Button variant="danger" onclick={() => active.abort.abort()}>
-                    Cancel
-                  </Button>
-                ) : null}
+                <Stack direction="row" gap={1}>
+                  {infoButton}
+                  {active.kind === 'download' ? (
+                    <Button variant="danger" onclick={() => active.abort.abort()}>
+                      Cancel
+                    </Button>
+                  ) : null}
+                </Stack>
               </>
             ) : (
               <>
                 <Stack direction="row" gap={1}>
                   <Text weight="bold">agent-share</Text>
-                  <Badge tone="success" variant="outline">
-                    {current.client.transport}
-                  </Badge>
-                  <Text color="fgMuted">
-                    {files.length} files · {humanBytes(total)}
-                    {peers === null
-                      ? ''
-                      : ` · ${peers.direct}/${peers.max} direct · ${peers.gossip} on mesh`}
-                  </Text>
+                  {meshCount === null ? null : (
+                    <Text color="fgMuted">· {meshCount} on mesh</Text>
+                  )}
                 </Stack>
-                {/* No `disabled={busy}` needed — this branch only renders when idle. */}
                 <Stack direction="row" gap={1}>
+                  {infoButton}
                   {mountable ? (
                     mountButton()
                   ) : (
@@ -775,13 +793,37 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
           ) : null}
         </div>
 
-        <ColumnView
-          root={built.root}
-          path={path.value}
-          onPathChange={(next) => {
-            path.value = next
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: 'flex',
+            flexDirection: 'column',
           }}
-        />
+          {...(open ? { inert: true } : {})}
+        >
+          <ColumnView
+            root={built.root}
+            path={path.value}
+            onPathChange={(next) => {
+              path.value = next
+            }}
+          />
+        </div>
+
+        {open ? (
+          <TechInfoModal
+            client={current.client}
+            fileCount={files.length}
+            totalBytes={total}
+            status={status}
+            mounted={mounted}
+            mountError={err}
+            onClose={() => {
+              infoOpen.value = false
+            }}
+          />
+        ) : null}
       </div>
     )
   }

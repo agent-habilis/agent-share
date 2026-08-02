@@ -27,13 +27,18 @@
 //! short-lived public TURN server in `IceServers`. Under `dynamic`, a failed
 //! ICE then uses the iroh relay for mount bytes.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use agent_share_proto::framing::{
     self, BENCH_ECHO_INTERVAL_SECS, DEFAULT_BENCH_DURATION_SECS, MAX_BENCH_ECHO_BYTES,
     MAX_BENCH_FILL_BYTES, MAX_MANIFEST_BYTES, MOUNT_ALPN, SECRET_LEN, WEBRTC_SIGNAL_ALPN,
 };
+use agent_share_proto::lookup::{LookupOpts, RelayChoice};
 use agent_share_proto::manifest::{ManifestDelta, MountManifest};
+use agent_share_proto::mesh_key::share_mesh_key;
 use agent_share_proto::ticket::{MountTicket, TICKET_FLAG_BENCH_RELAY, TICKET_FLAG_BENCH_WEBRTC};
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
@@ -63,6 +68,9 @@ struct MeshEndpoint {
     webrtc: WebRtcHandle,
 }
 
+/// Cached ICE remote candidate for one peer endpoint id.
+type IpCache = Rc<RefCell<HashMap<String, (Option<String>, Option<String>)>>>;
+
 /// A connected share, ready to list and read.
 #[wasm_bindgen]
 pub struct ShareClient {
@@ -70,6 +78,14 @@ pub struct ShareClient {
     secret: [u8; SECRET_LEN],
     /// `"webrtc"` or `"relay"` — the path that actually carries mount bytes.
     data_path: String,
+    /// Requested connect mode (`webrtc` / `relay` / `dynamic`).
+    mount_mode: String,
+    /// Producer ticket lookups — labeled "producer reach" in the info pane.
+    lookups: LookupOpts,
+    /// `js_sys::Date::now()` when connect resolved (UI wall clock).
+    connected_at_ms: f64,
+    /// Last-known getStats IPs, keyed by endpoint id string.
+    ip_cache: IpCache,
     // Held so the hub (and its data channel) outlives the connection when used.
     _hub: Option<Arc<BrowserHubTransport>>,
     _session: Option<BrowserSession>,
@@ -84,6 +100,31 @@ pub struct ShareClient {
     mesh: Option<mesh::MeshPeer>,
 }
 
+fn new_share_client(
+    connection: Connection,
+    secret: [u8; SECRET_LEN],
+    data_path: String,
+    hub: Option<Arc<BrowserHubTransport>>,
+    session: Option<BrowserSession>,
+    mesh_endpoint: Option<MeshEndpoint>,
+    endpoint: Endpoint,
+) -> ShareClient {
+    ShareClient {
+        connection,
+        secret,
+        data_path,
+        mount_mode: "dynamic".to_owned(),
+        lookups: LookupOpts::public_preset(),
+        connected_at_ms: now_ms(),
+        ip_cache: Rc::new(RefCell::new(HashMap::new())),
+        _hub: hub,
+        _session: session,
+        mesh_endpoint,
+        _endpoint: endpoint,
+        mesh: None,
+    }
+}
+
 #[wasm_bindgen]
 impl ShareClient {
     /// Decode `ticket` and open the mount connection.
@@ -92,6 +133,10 @@ impl ShareClient {
     /// Omit it for **dynamic**: both paths on, WebRTC preferred, iroh relay
     /// fallback. See [`TransportMode`].
     ///
+    /// `card` is the peer identity the **TypeScript consumer** wants published
+    /// on meta (`{ version, runtime, transport?, role? }`). Wasm does not
+    /// sniff the browser — omit `transport` to use the mount data path.
+    ///
     /// # Errors
     /// The ticket is malformed, the mode is unknown, the producer is
     /// unreachable, or (in `webrtc` mode) ICE fails with no fallback.
@@ -99,6 +144,7 @@ impl ShareClient {
     pub async fn connect(
         ticket: String,
         transport: Option<String>,
+        card: Option<JsValue>,
     ) -> Result<ShareClient, JsValue> {
         console_error_panic_hook::set_once();
         let mode = TransportMode::parse(transport.as_deref())
@@ -116,6 +162,9 @@ impl ShareClient {
                 connect_webrtc(ticket, /*allow_relay_fallback=*/ true).await
             }
         }?;
+        client.mount_mode = mode.as_str().to_owned();
+        client.lookups = lookups.clone();
+        client.connected_at_ms = now_ms();
         // Join the share's mesh so this tab can see — and hold direct sessions
         // with — the other people viewing the same share. Strictly additive:
         // a mesh that will not start costs the peer counts and nothing else,
@@ -124,7 +173,13 @@ impl ShareClient {
             .mesh_endpoint
             .take()
             .map(|shared| (shared.endpoint, shared.webrtc));
-        match mesh::MeshPeer::join_share(&secret, &lookups, shared).await {
+        let card = match card.as_ref() {
+            Some(value) => {
+                mesh::parse_card_parts(value, &client.data_path, Some("consumer".to_owned()))?
+            }
+            None => mesh::default_card_parts(&client.data_path, Some("consumer".to_owned())),
+        };
+        match mesh::MeshPeer::join_share(&secret, &lookups, shared, card).await {
             Ok(peer) => client.mesh = Some(peer),
             Err(error) => {
                 web_sys::console::warn_1(&JsValue::from_str(&format!(
@@ -135,6 +190,38 @@ impl ShareClient {
         Ok(client)
     }
 
+    /// Sync tech-info snapshot for the Info modal (counters + last-known IPs).
+    ///
+    /// Call [`Self::refresh_peer_ips`] on a slower cadence to fill ICE addresses;
+    /// this getter never awaits `getStats`.
+    #[must_use]
+    #[wasm_bindgen]
+    pub fn info(&self) -> JsValue {
+        let json = self.info_json();
+        js_sys::JSON::parse(&json.to_string()).unwrap_or(JsValue::NULL)
+    }
+
+    /// Refresh ICE remote-candidate addresses for live mesh sessions.
+    ///
+    /// # Errors
+    /// Never fails today — reserved for future hard errors from getStats.
+    #[wasm_bindgen]
+    pub async fn refresh_peer_ips(&self) -> Result<(), JsValue> {
+        let Some(mesh) = self.mesh.as_ref() else {
+            return Ok(());
+        };
+        let hub = mesh.hub();
+        for id in hub.live_peer_ids() {
+            let key = id.to_string();
+            if let Some((ip, kind)) = hub.selected_remote_candidate(&id).await {
+                self.ip_cache
+                    .borrow_mut()
+                    .insert(key, (Some(ip), Some(kind)));
+            }
+        }
+        Ok(())
+    }
+
     /// Members on this share's mesh, including us. `0` when the mesh is not up.
     #[must_use]
     #[wasm_bindgen(getter)]
@@ -142,9 +229,8 @@ impl ShareClient {
         self.mesh.as_ref().map_or(0, mesh::MeshPeer::peers_gossip)
     }
 
-    /// Peers we hold a direct `WebRTC` data channel with, on the share's mesh.
-    /// Distinct from the mount connection to the producer, which is not a mesh
-    /// session and is not counted here.
+    /// Peers we hold a direct `WebRTC` data channel with, on the share's mesh
+    /// hub (including the producer when the mount session shares that hub).
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn peers_direct(&self) -> u32 {
@@ -360,6 +446,213 @@ impl ShareClient {
     }
 }
 
+impl ShareClient {
+    fn info_json(&self) -> serde_json::Value {
+        let producer = self.connection.remote_id().to_string();
+        let local = self._endpoint.id().to_string();
+        let mesh_up = self.mesh.is_some();
+        let nickname = self.mesh.as_ref().map(|m| m.nickname());
+        let peers_gossip = self.peers_gossip();
+        let peers_direct = self.peers_direct();
+        let max_direct = self.max_direct();
+        let relay_urls: Vec<String> = self
+            ._endpoint
+            .addr()
+            .relay_urls()
+            .map(|url| url.to_string())
+            .collect();
+        let producer_reach = serde_json::json!({
+            "mdns": self.lookups.mdns,
+            "dht": self.lookups.dht,
+            "relay": match &self.lookups.relay {
+                RelayChoice::Disabled => "disabled",
+                RelayChoice::Pinned => "pinned",
+                RelayChoice::Custom(_) => "custom",
+            },
+        });
+        let peers = self.swarm_peers_json(&local, &producer);
+        serde_json::json!({
+            "general": {
+                "transport": self.data_path,
+                "identity_fingerprint": identity_fingerprint(&self.secret),
+                "mesh_up": mesh_up,
+                "nickname": nickname,
+                "local_endpoint": local,
+                "producer_endpoint": producer,
+                "connected_ms_ui": (now_ms() - self.connected_at_ms).max(0.0),
+            },
+            "trackers": {
+                "relay_urls": relay_urls,
+                "producer_reach": producer_reach,
+            },
+            "swarm": {
+                "peers_gossip": peers_gossip,
+                "peers_direct": peers_direct,
+                "max_direct": max_direct,
+                "peers": peers,
+            },
+            "transfer": {
+                "mount_mode": self.mount_mode,
+                "mount_path": self.data_path,
+                "mount_paths": path_labels(&self.connection),
+            },
+        })
+    }
+
+    fn swarm_peers_json(&self, local: &str, producer: &str) -> Vec<serde_json::Value> {
+        let cache = self.ip_cache.borrow();
+        // Self label comes from the meta card the TS consumer published; this
+        // is only a last-resort row if the book has not been seeded yet.
+        let self_card = agent_share_proto::PeerCard::new(
+            local,
+            env!("CARGO_PKG_VERSION"),
+            "browser",
+            &self.data_path,
+            Some("consumer".to_owned()),
+        );
+        let card_for = |id: &str| self.mesh.as_ref().and_then(|m| m.card_for(id));
+        let peer_row = |id: &str,
+                        role: &str,
+                        flags: String,
+                        fallback_proto: &str,
+                        ip: Option<String>,
+                        ip_kind: Option<String>| {
+            let card = card_for(id);
+            let client = card
+                .as_ref()
+                .map(|c| c.client.clone())
+                .unwrap_or_else(|| {
+                    if id == local {
+                        self_card.client.clone()
+                    } else {
+                        "unknown".to_owned()
+                    }
+                });
+            let proto = card
+                .as_ref()
+                .map(|c| c.transport.clone())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| fallback_proto.to_owned());
+            let version = card.as_ref().map(|c| c.version.clone());
+            let runtime = card.as_ref().map(|c| c.runtime.clone());
+            let app_role = card.as_ref().and_then(|c| c.role.clone());
+            serde_json::json!({
+                "id": id,
+                "role": role,
+                "flags": flags,
+                "client": client,
+                "version": version,
+                "runtime": runtime,
+                "app_role": app_role,
+                "ip": ip,
+                "ip_kind": ip_kind,
+                "proto": proto,
+            })
+        };
+
+        let mut rows = Vec::new();
+        rows.push(peer_row(
+            local,
+            "self",
+            "*".to_owned(),
+            &self.data_path,
+            None,
+            None,
+        ));
+
+        let live: Vec<String> = self
+            .mesh
+            .as_ref()
+            .map(|m| {
+                m.hub()
+                    .live_peer_ids()
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let producer_direct = live.iter().any(|id| id == producer);
+        let (ip, ip_kind) = cache
+            .get(producer)
+            .cloned()
+            .unwrap_or((None, None));
+        let mut flags = String::from("S");
+        if producer_direct {
+            flags.push('D');
+        }
+        rows.push(peer_row(
+            producer,
+            "producer",
+            flags,
+            &self.data_path,
+            ip,
+            ip_kind,
+        ));
+
+        let mut seen: HashSet<String> = HashSet::new();
+        seen.insert(local.to_owned());
+        seen.insert(producer.to_owned());
+
+        for id in live {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let (ip, ip_kind) = cache.get(&id).cloned().unwrap_or((None, None));
+            rows.push(peer_row(&id, "direct", "D".to_owned(), "webrtc", ip, ip_kind));
+        }
+
+        // Gossip-only members publish meta cards but may never open a direct
+        // hub session — still show them so the Peers list matches the roster.
+        if let Some(mesh) = self.mesh.as_ref() {
+            for card in mesh.known_cards() {
+                if !seen.insert(card.endpoint.clone()) {
+                    continue;
+                }
+                let fallback = if card.transport.is_empty() {
+                    "gossip"
+                } else {
+                    card.transport.as_str()
+                };
+                rows.push(peer_row(
+                    &card.endpoint,
+                    "gossip",
+                    String::new(),
+                    fallback,
+                    None,
+                    None,
+                ));
+            }
+        }
+        rows
+    }
+}
+
+fn identity_fingerprint(secret: &[u8; SECRET_LEN]) -> String {
+    let key = share_mesh_key(secret);
+    let head = key.get(..8).unwrap_or(&key);
+    let tail = key
+        .get(key.len().saturating_sub(8)..)
+        .unwrap_or("");
+    format!("{head}…{tail}")
+}
+
+fn path_labels(connection: &Connection) -> Vec<String> {
+    connection
+        .paths()
+        .iter()
+        .map(|path| match path.remote_addr() {
+            TransportAddr::Relay(_) => "relay".to_owned(),
+            TransportAddr::Ip(_) => "ip".to_owned(),
+            TransportAddr::Custom(addr)
+                if addr.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID =>
+            {
+                "webrtc".to_owned()
+            }
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
 fn emit_status(on_status: Option<&js_sys::Function>, value: &serde_json::Value) {
     let Some(callback) = on_status else {
         return;
@@ -547,16 +840,15 @@ async fn connect_relay(ticket: MountTicket) -> Result<ShareClient, JsValue> {
         .await
         .map_err(|error| err("dial the mount ALPN over iroh relay/IP", &error))?;
 
-    Ok(ShareClient {
+    Ok(new_share_client(
         connection,
-        secret: ticket.secret,
-        data_path: "relay".to_owned(),
-        _hub: None,
-        mesh_endpoint: None,
-        _session: None,
-        _endpoint: endpoint,
-        mesh: None,
-    })
+        ticket.secret,
+        "relay".to_owned(),
+        None,
+        None,
+        None,
+        endpoint,
+    ))
 }
 
 /// Dial mount using **only** the ticket's relay URL(s) — no direct IP.
@@ -586,16 +878,15 @@ async fn connect_relay_only(ticket: MountTicket) -> Result<ShareClient, JsValue>
     let connection = dial_with_retry(&endpoint, relay_only).await?;
     ensure_relay_selected(&connection).await?;
 
-    Ok(ShareClient {
+    Ok(new_share_client(
         connection,
-        secret: ticket.secret,
-        data_path: "relay".to_owned(),
-        _hub: None,
-        mesh_endpoint: None,
-        _session: None,
-        _endpoint: endpoint,
-        mesh: None,
-    })
+        ticket.secret,
+        "relay".to_owned(),
+        None,
+        None,
+        None,
+        endpoint,
+    ))
 }
 
 /// Retry dial for up to 90s (same policy as the native bench consumer).
@@ -810,21 +1101,24 @@ async fn connect_webrtc(
                     "mount connected but not over WebRTC, and webrtc mode forbids a fallback",
                 ));
             }
-            Ok(ShareClient {
+            Ok(new_share_client(
                 connection,
-                secret: ticket.secret,
+                ticket.secret,
                 // Report what was actually selected. Previously this said
                 // "webrtc" unconditionally on this path, which was a guess.
-                data_path: if on_webrtc { "webrtc" } else { "relay" }.to_owned(),
-                _hub: Some(hub),
-                _session: Some(session),
-                mesh_endpoint: Some(MeshEndpoint {
+                if on_webrtc {
+                    "webrtc".to_owned()
+                } else {
+                    "relay".to_owned()
+                },
+                Some(hub),
+                Some(session),
+                Some(MeshEndpoint {
                     endpoint: endpoint.clone(),
                     webrtc: handle,
                 }),
-                _endpoint: endpoint,
-                mesh: None,
-            })
+                endpoint,
+            ))
         }
         Err(error) if allow_relay_fallback => {
             web_sys::console::warn_1(&JsValue::from_str(&format!(
@@ -847,16 +1141,15 @@ async fn finish_relay_fallback(
         .connect(ticket.addr.clone(), MOUNT_ALPN)
         .await
         .map_err(|error| err("dial the mount ALPN over iroh relay/IP (fallback)", &error))?;
-    Ok(ShareClient {
+    Ok(new_share_client(
         connection,
-        secret: ticket.secret,
-        data_path: "relay".to_owned(),
-        _hub: None,
-        mesh_endpoint: None,
-        _session: None,
-        _endpoint: endpoint,
-        mesh: None,
-    })
+        ticket.secret,
+        "relay".to_owned(),
+        None,
+        None,
+        None,
+        endpoint,
+    ))
 }
 
 fn ensure_reachable_addr(addr: &EndpointAddr) -> Result<(), JsValue> {

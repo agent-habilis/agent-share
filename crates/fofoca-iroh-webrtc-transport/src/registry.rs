@@ -104,6 +104,15 @@ impl<T> Registry<T> {
             .count()
     }
 
+    /// Endpoint ids of every *usable* session (reservations excluded).
+    pub(crate) fn live_ids(&self) -> Vec<EndpointId> {
+        self.lock()
+            .iter()
+            .filter(|(_, slot)| slot.value.is_some())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Run `f` against `remote`'s payload, if it is live.
     ///
     /// A closure rather than a returned reference: the lock cannot outlive the

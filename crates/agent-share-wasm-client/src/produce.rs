@@ -66,7 +66,10 @@ impl ShareProducer {
     ///
     /// # Errors
     /// Bad listing shape, bind failure, or empty tree.
-    pub async fn start(listing: JsValue) -> Result<ShareProducer, JsValue> {
+    pub async fn start(
+        listing: JsValue,
+        card: Option<JsValue>,
+    ) -> Result<ShareProducer, JsValue> {
         console_error_panic_hook::set_once();
         let scanned = parse_listing(&listing)?;
         if scanned.files.is_empty() && scanned.dirs.is_empty() {
@@ -127,12 +130,19 @@ impl ShareProducer {
         let lookups = LookupOpts::public_preset();
         // One identity for this tab: the mount peer and the mesh peer are the
         // same node, so a viewer counts this producer once rather than twice.
+        let card = match card.as_ref() {
+            Some(value) => {
+                crate::mesh::parse_card_parts(value, "webrtc", Some("producer".to_owned()))?
+            }
+            None => crate::mesh::default_card_parts("webrtc", Some("producer".to_owned())),
+        };
         let mesh = crate::mesh::MeshPeer::join_share_with(
             &secret,
             &lookups,
             endpoint.clone(),
             handle.clone(),
             protocols,
+            card,
         )
         .await?;
 
