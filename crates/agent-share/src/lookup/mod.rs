@@ -155,10 +155,9 @@ mod tests {
 
     #[tokio::test]
     async fn loopback_all_off_binds() {
-        let endpoint =
-            build_endpoint(&LookupOpts::loopback(), None, None, Vec::new(), None, false)
-                .await
-                .expect("loopback endpoint must bind");
+        let endpoint = build_endpoint(&LookupOpts::loopback(), None, None, Vec::new(), None, false)
+            .await
+            .expect("loopback endpoint must bind");
         endpoint.close().await;
     }
 

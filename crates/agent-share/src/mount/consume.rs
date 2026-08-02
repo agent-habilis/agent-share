@@ -37,12 +37,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(3);
 /// # Errors
 /// A malformed ticket, an unreachable producer, a hostile manifest, a bad
 /// target directory, or the NFS bridge failing to bind.
-pub(crate) async fn attach(
-    ticket: &str,
-    target: &Path,
-    no_mount: bool,
-    json: bool,
-) -> Result<()> {
+pub(crate) async fn attach(ticket: &str, target: &Path, no_mount: bool, json: bool) -> Result<()> {
     let ticket = MountTicket::decode(ticket)?;
     // Pin a key so the WebRTC transport advertises the identity this endpoint
     // binds — the producer does the same, for the same reason.
@@ -585,10 +580,7 @@ mod tests {
         std::fs::create_dir_all(&target).expect("create target");
         std::fs::write(target.join("keep.txt"), b"x").expect("occupy target");
         let mount = prepare_mount_dir(&target).expect("prepare");
-        let name = mount
-            .file_name()
-            .and_then(|os| os.to_str())
-            .expect("utf-8");
+        let name = mount.file_name().and_then(|os| os.to_str()).expect("utf-8");
         assert!(
             name.starts_with("agent-share-") && name.contains('T'),
             "unexpected mount folder name: {name}"

@@ -1,11 +1,11 @@
 use std::time::Duration;
 
-use iroh::endpoint::Connection;
-use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 use fofoca_iroh_webrtc_transport::{
     IceConfig, WEBRTC_TRANSPORT_ID, WebRtcTransport, answer_with, custom_addr, offer_with,
 };
+use iroh::endpoint::Connection;
+use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 
 const ECHO_ALPN: &[u8] = b"agent-gossip-webrtc/test-echo/0";
 const JSEP_DEADLINE: Duration = Duration::from_secs(30);

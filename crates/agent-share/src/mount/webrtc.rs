@@ -19,12 +19,12 @@
 //! dial fails loudly rather than quietly relaying.
 
 use anyhow::{Context, Result};
-use iroh::endpoint::Connection;
-use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
 use fofoca_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, answer_with, custom_addr,
     offer_with,
 };
+use iroh::endpoint::Connection;
+use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
 
 pub(crate) use agent_share_proto::framing::WEBRTC_SIGNAL_ALPN;
 

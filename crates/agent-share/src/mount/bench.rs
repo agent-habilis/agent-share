@@ -326,15 +326,8 @@ async fn connect_forced(
             // Dial relay-only *and* clear IP transports locally so the path
             // cannot upgrade to direct after connect.
             let relay_only = relay_only_addr(&ticket.addr)?;
-            let endpoint = build_endpoint(
-                &ticket.lookups,
-                Some(key),
-                None,
-                Vec::new(),
-                None,
-                true,
-            )
-            .await?;
+            let endpoint =
+                build_endpoint(&ticket.lookups, Some(key), None, Vec::new(), None, true).await?;
             add_peer_addr(&endpoint, relay_only.clone())?;
             let conn = dial_with_retry(&endpoint, relay_only).await?;
             ensure_relay_selected(&conn).await?;
