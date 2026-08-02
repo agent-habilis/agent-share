@@ -27,8 +27,8 @@ pub const TICKET_FLAG_BENCH_RELAY: u8 = 2;
 /// knows which path the producer opened.
 ///
 /// The secret is a pure bearer capability: whoever holds this string can read
-/// the share. That is why the web client keeps it in the URL *fragment*,
-/// which is never sent to a server.
+/// the share. The web client puts it in the path (`/files/<ticket>`,
+/// `/info/<ticket>`) so those views are shareable as ordinary URLs.
 #[derive(Debug, Clone)]
 pub struct MountTicket {
     pub addr: EndpointAddr,

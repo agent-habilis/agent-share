@@ -15,7 +15,7 @@
  * requirement rather than a limitation to work around.
  */
 
-import { Stack, Text, MiddleTruncate, glyphs, roleVar, theme } from 'moonspace-ui'
+import { Button, Stack, Text, MiddleTruncate, glyphs, roleVar, theme } from 'moonspace-ui'
 import { component, keyed, signal } from 'visage-dom'
 
 import { humanBytes, type DirNode, type Node } from './tree.ts'
@@ -35,6 +35,8 @@ interface ColumnViewProps {
   /** Names from the root down to the selection, one per level. */
   path: string[]
   onPathChange: (path: string[]) => void
+  onDownload: () => void
+  downloadDisabled?: boolean
 }
 
 /** The directory chain the current path selects, root first. */
@@ -52,7 +54,7 @@ function columnsFor(root: DirNode, path: string[]): DirNode[] {
   return columns
 }
 
-/** The node the last path segment names, if it is a file. */
+/** The node the last path segment names. */
 function selectedNode(columns: DirNode[], path: string[]): Node | undefined {
   const last = path[path.length - 1]
   if (last === undefined) return undefined
@@ -87,10 +89,14 @@ function fitColumnWidth(dir: DirNode, padX: number): number {
 }
 
 function fitDetailWidth(node: Node, padX: number): number {
-  if (node.kind !== 'file') return DEFAULT_WIDTH
+  // "Download" label plus brackets from the primary button chrome.
+  const downloadLabel = 10
+  if (node.kind !== 'file') {
+    return Math.max(MIN_WIDTH, Math.max(node.name.length, downloadLabel) + padX * 2)
+  }
   const size = humanBytes(node.size)
   const date = node.mtime > 0 ? new Date(node.mtime * 1000).toISOString().slice(0, 10) : ''
-  const longest = Math.max(node.name.length, size.length, date.length)
+  const longest = Math.max(node.name.length, size.length, date.length, downloadLabel)
   return Math.max(MIN_WIDTH, longest + padX * 2)
 }
 
@@ -199,26 +205,28 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
               dir={column}
               selected={path[depth]}
               width={width}
-              padX={1}
+              padX={2}
               onSelect={(node) => select(depth, node)}
               onClear={() => clearTo(depth)}
               onResizeStart={(event) =>
                 beginResize(event, widthAt(depth), (next) => setWidth(depth, next))
               }
-              onFit={() => setWidth(depth, fitColumnWidth(column, 1))}
+              onFit={() => setWidth(depth, fitColumnWidth(column, 2))}
             />
           )
         })}
         <Detail
           node={selectedNode(columns, path)}
           width={detailW}
+          onDownload={props.onDownload}
+          downloadDisabled={props.downloadDisabled}
           onResizeStart={(event) =>
             beginResize(event, detailWidth.peek(), (next) => {
               detailWidth.value = Math.max(MIN_WIDTH, Math.round(next))
             })
           }
           onFit={(node) => {
-            detailWidth.value = fitDetailWidth(node, 1)
+            detailWidth.value = fitDetailWidth(node, 2)
           }}
         />
       </div>
@@ -291,18 +299,20 @@ function Column({
         flexDirection: 'column',
         boxSizing: 'border-box',
         width: `${width}ch`,
-        padding: `0 ${padX}ch`,
-        borderRight: `1px solid ${SURFACE_BORDER}`,
+        borderRight: `2px solid ${SURFACE_BORDER}`,
       }}
     >
       <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
         {dir.children.length === 0 ? (
-          <Text color="fgSubtle">(empty)</Text>
+          <div style={{ padding: `0 ${padX}ch` }}>
+            <Text color="fgSubtle">(empty)</Text>
+          </div>
         ) : (
           keyed(dir.children, (child) => child.path, (child) => (
             <Row
               node={child}
               active={child.name === selected}
+              padX={padX}
               onSelect={() => onSelect(child)}
             />
           ))
@@ -316,10 +326,12 @@ function Column({
 function Row({
   node,
   active,
+  padX,
   onSelect,
 }: {
   node: Node
   active: boolean
+  padX: number
   onSelect: () => void
 }) {
   return (
@@ -337,37 +349,47 @@ function Row({
         }
       }}
       style={{
+        display: 'flex',
+        alignItems: 'center',
+        width: '100%',
+        boxSizing: 'border-box',
         cursor: 'pointer',
+        // Full-bleed highlight; name keeps the left gutter. Chevron sits on the
+        // trailing edge like Finder column view.
+        paddingLeft: `${padX}ch`,
+        paddingRight: '1ch',
         background: active ? theme.color.bgSelected : 'transparent',
       }}
     >
-      <Stack direction="row" gap={0} justify="between">
-        <div style={{ minWidth: 0, flex: 1, overflow: 'hidden' }}>
-          <Text weight={node.kind === 'dir' ? 'bold' : 'regular'}>
-            <MiddleTruncate value={node.name} />
-          </Text>
-        </div>
-        <Text color={active ? 'fg' : 'fgSubtle'}>
-          {node.kind === 'dir' ? `${glyphs.chevron.right}\u00a0` : '\u00a0\u00a0'}
+      <div style={{ minWidth: 0, flex: 1, overflow: 'hidden' }}>
+        <Text weight={node.kind === 'dir' ? 'bold' : 'regular'}>
+          <MiddleTruncate value={node.name} />
         </Text>
-      </Stack>
+      </div>
+      {node.kind === 'dir' ? (
+        <Text color={active ? 'fg' : 'fgSubtle'}>{glyphs.chevron.right}</Text>
+      ) : null}
     </div>
   )
 }
 
-/** The rightmost pane: what the selected file is, when one is selected. */
+/** The rightmost pane: metadata and download for the current selection. */
 function Detail({
   node,
   width,
+  onDownload,
+  downloadDisabled,
   onResizeStart,
   onFit,
 }: {
   node: Node | undefined
   width: number
+  onDownload: () => void
+  downloadDisabled?: boolean
   onResizeStart: (event: MouseEvent) => void
   onFit: (node: Node) => void
 }) {
-  if (!node || node.kind !== 'file') return null
+  if (!node) return null
   return (
     <div
       onclick={(event: MouseEvent) => event.stopPropagation()}
@@ -379,8 +401,8 @@ function Detail({
         flexDirection: 'column',
         boxSizing: 'border-box',
         width: `${width}ch`,
-        padding: '0 1ch',
-        borderRight: `1px solid ${SURFACE_BORDER}`,
+        padding: '0 2ch',
+        borderRight: `2px solid ${SURFACE_BORDER}`,
       }}
     >
       <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
@@ -388,12 +410,27 @@ function Detail({
           <Text weight="bold">
             <MiddleTruncate value={node.name} />
           </Text>
-          <Text color="fgMuted">{humanBytes(node.size)}</Text>
-          {node.mtime > 0 ? (
-            <Text color="fgSubtle">
-              {new Date(node.mtime * 1000).toISOString().slice(0, 10)}
-            </Text>
-          ) : null}
+          {node.kind === 'file' ? (
+            <>
+              <Text color="fgMuted">{humanBytes(node.size)}</Text>
+              {node.mtime > 0 ? (
+                <Text color="fgSubtle">
+                  {new Date(node.mtime * 1000).toISOString().slice(0, 10)}
+                </Text>
+              ) : null}
+            </>
+          ) : (
+            <Text color="fgMuted">folder</Text>
+          )}
+          <div style={{ alignSelf: 'start' }}>
+            <Button
+              variant="primary"
+              onclick={() => onDownload()}
+              disabled={downloadDisabled}
+            >
+              Download
+            </Button>
+          </div>
         </Stack>
       </div>
       <ResizeHandle onResizeStart={onResizeStart} onFit={() => onFit(node)} />

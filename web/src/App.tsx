@@ -1,10 +1,8 @@
 /**
  * The share browser.
  *
- * The ticket lives in the URL *fragment*, never the path: it is a bearer
- * capability granting full read access, and a path would send it to the server
- * on every request — into logs, proxies and referrers. A fragment never leaves
- * the browser, which is what lets this be a purely static site.
+ * Share routes put the ticket in the path so views are shareable:
+ * `/files/<ticket>` for the file browser and `/info/<ticket>` for session info.
  */
 
 import {
@@ -15,12 +13,13 @@ import {
   Spinner,
   Stack,
   Text,
+  roleVar,
 } from 'moonspace-ui'
-import { component, computed, listen, signal } from 'visage-dom'
+import { component, computed, signal } from 'visage-dom'
 import type { Child, Ctx } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
-import { TechInfoModal } from './TechInfoModal.tsx'
+import { TechInfo } from './TechInfo.tsx'
 import { saveStream, singleFileStream, zipStream, type Progress } from './download.ts'
 import {
   canMount,
@@ -34,7 +33,14 @@ import {
 } from './mount.ts'
 import { canProduce, pickShareRoot, startProducer, type ShareProducer } from './produce.ts'
 import { buildPeerCard } from './peerCard.ts'
-import { parseShareInput, shareUrl } from './ticket.ts'
+import {
+  navigateToShare,
+  onRouteChange,
+  parseRoute,
+  parseShareInput,
+  shareUrl,
+  type ShareView,
+} from './ticket.ts'
 import {
   buildTree,
   filesUnder,
@@ -53,7 +59,7 @@ interface Client {
   /** Peers we hold a direct WebRTC data channel with. */
   readonly peers_direct: number
   readonly max_direct: number
-  /** Sync tech-info snapshot for the Info modal. */
+  /** Sync tech-info snapshot for the Info panel. */
   info(): unknown
   /** Refresh ICE remote-candidate addresses (slower cadence). */
   refresh_peer_ips(): Promise<void>
@@ -176,10 +182,6 @@ function release(ticket: string, owned: Promise<Client>): void {
   )
 }
 
-function readHash(): string | null {
-  return decodeURIComponent(window.location.hash.replace(/^#/, '')).trim() || null
-}
-
 /** Fall back to the deepest prefix that still exists in the manifest. */
 function prunePath(current: string[], manifest: Manifest): string[] {
   const dirs = new Set(manifest.dirs.map((dir) => dir.rel_path))
@@ -188,12 +190,21 @@ function prunePath(current: string[], manifest: Manifest): string[] {
   return depth === current.length ? current : current.slice(0, depth)
 }
 
-/** Shared chrome: header row plus a body that fills the rest of the viewport. */
-function AppShell({
+/**
+ * App chrome: top bar on the sunken page background + content surface on `bg`
+ * (same split as the file browser). `belowBar` is optional status under the
+ * main top-bar line.
+ */
+function SessionChrome({
+  crumb,
   trailing,
+  belowBar,
   children,
 }: {
+  /** When omitted, the top bar is just the brand. */
+  crumb?: string
   trailing?: Child
+  belowBar?: Child
   children: Child
 }) {
   return (
@@ -217,11 +228,26 @@ function AppShell({
         <Stack direction="row" gap={2} justify="between">
           <Stack direction="row" gap={1}>
             <Text weight="bold">agent-share</Text>
+            {crumb ? (
+              <>
+                <Text color="fgMuted">/</Text>
+                <Text color="fgMuted">{crumb}</Text>
+              </>
+            ) : null}
           </Stack>
-          {trailing ? <Stack direction="row" gap={1}>{trailing}</Stack> : null}
+          {trailing ?? null}
         </Stack>
+        {belowBar ?? null}
       </div>
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          background: roleVar.bg,
+        }}
+      >
         {children}
       </div>
     </div>
@@ -319,7 +345,7 @@ const Home = component(function* (_props, ctx: Ctx) {
     if (raw === null) return
     const ticket = parseShareInput(raw)
     if (!ticket) return
-    window.location.hash = encodeURIComponent(ticket)
+    navigateToShare(ticket, 'files')
   }
 
   async function stopServing(): Promise<void> {
@@ -348,14 +374,14 @@ const Home = component(function* (_props, ctx: Ctx) {
     const current = state.value
     if (current.phase === 'creating') {
       return (
-        <AppShell>
+        <SessionChrome>
           <LoadingBody label="creating share…" />
-        </AppShell>
+        </SessionChrome>
       )
     }
     if (current.phase === 'failed') {
       return (
-        <AppShell
+        <SessionChrome
           trailing={
             <Button variant="secondary" onclick={() => {
               state.value = { phase: 'landing' }
@@ -365,13 +391,13 @@ const Home = component(function* (_props, ctx: Ctx) {
           }
         >
           <FailedBody reason={current.reason} kind={current.kind} />
-        </AppShell>
+        </SessionChrome>
       )
     }
     if (current.phase === 'serving') {
       const url = shareUrl(current.producer.ticket)
       return (
-        <AppShell
+        <SessionChrome
           trailing={
             <Button variant="danger" onclick={() => void stopServing()}>
               Stop sharing
@@ -380,7 +406,7 @@ const Home = component(function* (_props, ctx: Ctx) {
         >
           <Centered>
             <div style={{ padding: '0 2ch', maxWidth: '72ch', width: '100%' }}>
-              <Box border="line" background="bg" padX={2} padY={1}>
+              <Box border="line" padX={2} padY={1}>
                 <Stack direction="column" gap={1}>
                   <Stack direction="row" gap={1}>
                     <Text weight="bold">Sharing</Text>
@@ -405,12 +431,12 @@ const Home = component(function* (_props, ctx: Ctx) {
               </Box>
             </div>
           </Centered>
-        </AppShell>
+        </SessionChrome>
       )
     }
 
     return (
-      <AppShell>
+      <SessionChrome>
         <Centered>
           <Stack direction="column" gap={1}>
             <Button variant="primary" onclick={() => void createShare()}>
@@ -421,44 +447,35 @@ const Home = component(function* (_props, ctx: Ctx) {
             </Button>
           </Stack>
         </Centered>
-      </AppShell>
+      </SessionChrome>
     )
   }
 })
 
 /**
  * One dialled session for a fixed ticket. Remounted (via `key`) when the
- * fragment changes so the previous watch/dial is disposed through ctx.aborted.
+ * ticket changes so the previous watch/dial is disposed through ctx.aborted.
+ * The files/info view is a prop driven by the path — switching views does not
+ * remount the session.
  */
-type Transfer =
-  // Only a download is cancellable — a half-written mount would leave the
-  // host folder in a state the next sync has no record of.
-  | { kind: 'download'; progress: Progress; abort: AbortController }
-  | { kind: 'mounting'; progress: Progress }
-  | { kind: 'syncing'; progress: Progress }
+type Transfer = {
+  kind: 'download' | 'mounting' | 'syncing'
+  progress: Progress
+  abort: AbortController
+}
 
 /** What the top bar says while `kind` is in flight. */
 function transferLabel(kind: Transfer['kind']): string {
   return kind === 'download' ? 'downloading' : kind === 'mounting' ? 'mounting' : 'syncing'
 }
 
-const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
+const Session = component<{ ticket: string; view: ShareView }>(function* (props, ctx: Ctx) {
   const state = signal<State>({ phase: 'connecting' })
-  // The peer counts are lock-free reads on the wasm side (an atomic the mesh
-  // event loop stores into, and a map length on the transport), so a timer is
-  // cheaper than plumbing an event channel out through wasm-bindgen. This
-  // signal exists only to make the header recompute; the values are read live.
-  const peerTick = signal(0)
-  const peerTimer = window.setInterval(() => {
-    peerTick.value = peerTick.peek() + 1
-  }, 1000)
-  ctx.aborted.addEventListener('abort', () => window.clearInterval(peerTimer))
   const path = signal<string[]>([])
   const transfer = signal<Transfer | null>(null)
   const mountError = signal<string | null>(null)
   /** Non-null while a host directory is mounted for this session. */
   const mountSession = signal<MountSession | null>(null)
-  const infoOpen = signal(false)
 
   let synced: SyncedState = emptySyncedState()
   let syncing = false
@@ -480,6 +497,8 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
       return
     }
     syncing = true
+    const abort = new AbortController()
+    let pass: 'mounting' | 'syncing' = label
     try {
       do {
         syncDirty = false
@@ -487,9 +506,10 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
         // while the previous write was in flight.
         const latest = state.peek()
         if (latest.phase !== 'ready' || mountSession.peek() !== session) break
+        if (abort.signal.aborted) break
         const latestTree = buildTree(latest.manifest)
         const latestFiles = filesUnder(latestTree.root)
-        transfer.value = { kind: label, progress: { done: 0, total: 0 } }
+        transfer.value = { kind: pass, progress: { done: 0, total: 0 }, abort }
         synced = await syncMount(
           session.root,
           latest.client,
@@ -497,14 +517,26 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
           latest.manifest.dirs,
           synced,
           (progress) => {
-            transfer.value = { kind: label, progress }
+            transfer.value = { kind: pass, progress, abort }
           },
+          abort.signal,
         )
         // After the first full mirror, later passes are incremental syncs.
-        label = 'syncing'
-      } while (syncDirty && mountSession.peek() === session && !ctx.aborted.aborted)
+        pass = 'syncing'
+      } while (
+        syncDirty &&
+        mountSession.peek() === session &&
+        !ctx.aborted.aborted &&
+        !abort.signal.aborted
+      )
+      // Cancel during the initial mirror drops the half-written folder.
+      if (abort.signal.aborted && label === 'mounting') {
+        await clearMount()
+      }
     } catch (error) {
-      if (!ctx.aborted.aborted) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        if (label === 'mounting') await clearMount()
+      } else if (!ctx.aborted.aborted) {
         mountError.value = error instanceof MountError ? error.message : String(error)
         await clearMount()
       }
@@ -649,16 +681,16 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     const current = state.value
     if (current.phase === 'connecting') {
       return (
-        <AppShell>
-          <LoadingBody label="Connecting…" />
-        </AppShell>
+        <SessionChrome>
+          <LoadingBody label="connecting…" />
+        </SessionChrome>
       )
     }
     if (current.phase === 'failed') {
       return (
-        <AppShell>
+        <SessionChrome crumb="failed">
           <FailedBody reason={current.reason} kind={current.kind} />
-        </AppShell>
+        </SessionChrome>
       )
     }
     const built = tree.value
@@ -669,175 +701,141 @@ const Session = component<{ ticket: string }>(function* (props, ctx: Ctx) {
     const active = transfer.value
     const mounted = mountSession.value !== null
     const mountable = canMount()
-    const open = infoOpen.value
+    const showingInfo = props.view === 'info'
+    const closeInfo = () => {
+      navigateToShare(props.ticket, 'files')
+    }
+    const openInfo = () => {
+      navigateToShare(props.ticket, 'info')
+    }
     const mountButton = () => (
       <Button variant="secondary" onclick={() => void mount()} disabled={!mountable}>
         {mounted ? 'Unmount' : 'Mount'}
       </Button>
     )
     const err = mountError.value
-    const hasSelection = nodeAtPath(built.root, path.value) !== undefined
-    // Read through the tick so this recomputes each second. `max_direct` is 0
-    // exactly when the mesh failed to start, which is also when there is
-    // nothing worth showing — so that doubles as the "hide it" signal rather
-    // than reporting a misleading `0/0`.
-    peerTick.value
-    const meshCount =
-      current.client.max_direct === 0 ? null : current.client.peers_gossip
     const status = active
       ? transferLabel(active.kind)
       : mounted
         ? 'mounted'
         : 'ready'
+    const crumb = showingInfo
+      ? 'info'
+      : active
+        ? transferLabel(active.kind)
+        : 'files'
     const infoButton = (
-      <Button variant="secondary" onclick={() => {
-        infoOpen.value = true
-      }}>
+      <Button variant="secondary" onclick={openInfo}>
         Info
       </Button>
     )
 
-    return (
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          height: '100vh',
-          minHeight: 0,
-        }}
-      >
-        <div
-          style={{
-            flexShrink: 0,
-            padding: 'var(--ms-row) 2ch',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 'calc(1 * var(--ms-row))',
-          }}
-        >
-          {/*
-            One row, always. A transfer takes the middle of the row rather than
-            adding one below it — every child here is exactly `oneRow` tall, so
-            the file browser underneath never moves. Info stays outside the
-            transfer ternary so it remains reachable while mounting/syncing.
-          */}
-          <Stack direction="row" gap={2} justify="between">
-            {active ? (
-              <>
-                <Text color="fgMuted">{transferLabel(active.kind)}</Text>
-                <ProgressBar
-                  fluid
-                  showValue
-                  value={
-                    active.progress.total === 0 ? 0 : active.progress.done / active.progress.total
-                  }
-                  label={transferLabel(active.kind)}
-                />
-                <Stack direction="row" gap={1}>
-                  {infoButton}
-                  {active.kind === 'download' ? (
-                    <Button variant="danger" onclick={() => active.abort.abort()}>
-                      Cancel
-                    </Button>
-                  ) : null}
-                </Stack>
-              </>
-            ) : (
-              <>
-                <Stack direction="row" gap={1}>
-                  <Text weight="bold">agent-share</Text>
-                  {meshCount === null ? null : (
-                    <Text color="fgMuted">· {meshCount} on mesh</Text>
-                  )}
-                </Stack>
-                <Stack direction="row" gap={1}>
-                  {infoButton}
-                  {mountable ? (
-                    mountButton()
-                  ) : (
-                    /*
-                      The `title` goes on a wrapper, not on the button: a disabled
-                      control is an unreliable tooltip host, since browsers suppress
-                      pointer delivery to it. `inline-flex` keeps the wrapper exactly
-                      `oneRow` tall — a default `inline` span adds line-box leading
-                      and would break the invariant this row is built on.
-                    */
-                    <span
-                      title="Mounting needs the File System Access API, which this browser lacks. Use Chrome or Edge — or run `npx agent-share <ticket>` to receive the folder locally."
-                      style={{ display: 'inline-flex' }}
-                    >
-                      {mountButton()}
-                    </span>
-                  )}
-                  <Button
-                    variant="primary"
-                    onclick={() => void downloadSelected()}
-                    disabled={!hasSelection}
-                  >
-                    Download
-                  </Button>
-                  <Button variant="secondary" onclick={() => void downloadAll()}>
-                    Download all
-                  </Button>
-                </Stack>
-              </>
-            )}
-          </Stack>
+    /*
+      One row, always. A transfer takes the middle of the row rather than
+      adding one below it — every child here is exactly `oneRow` tall, so
+      the content underneath never moves.
+    */
+    let trailing: Child
+    if (showingInfo) {
+      trailing = (
+        <Button variant="secondary" onclick={closeInfo}>
+          Close
+        </Button>
+      )
+    } else if (active) {
+      trailing = (
+        <>
+          <ProgressBar
+            fluid
+            showValue
+            value={
+              active.progress.total === 0 ? 0 : active.progress.done / active.progress.total
+            }
+            label={transferLabel(active.kind)}
+          />
+          <Button variant="danger" onclick={() => active.abort.abort()}>
+            Cancel
+          </Button>
+        </>
+      )
+    } else {
+      trailing = (
+        <Stack direction="row" gap={1}>
+          {infoButton}
+          {mountable ? (
+            mountButton()
+          ) : (
+            /*
+              The `title` goes on a wrapper, not on the button: a disabled
+              control is an unreliable tooltip host, since browsers suppress
+              pointer delivery to it. `inline-flex` keeps the wrapper exactly
+              `oneRow` tall — a default `inline` span adds line-box leading
+              and would break the invariant this row is built on.
+            */
+            <span
+              title="Mounting needs the File System Access API, which this browser lacks. Use Chrome or Edge — or run `npx agent-share <ticket>` to receive the folder locally."
+              style={{ display: 'inline-flex' }}
+            >
+              {mountButton()}
+            </span>
+          )}
+          <Button variant="secondary" onclick={() => void downloadAll()}>
+            Download all
+          </Button>
+        </Stack>
+      )
+    }
 
+    const belowBar =
+      err || built.skipped > 0 ? (
+        <>
           {err ? <Text color="danger">{err}</Text> : null}
-
           {built.skipped > 0 ? (
             <Text color="warning">
               {built.skipped} entries hidden — unsafe paths in the peer&apos;s manifest
             </Text>
           ) : null}
-        </div>
+        </>
+      ) : null
 
-        <div
-          style={{
-            flex: 1,
-            minHeight: 0,
-            display: 'flex',
-            flexDirection: 'column',
-          }}
-          {...(open ? { inert: true } : {})}
-        >
-          <ColumnView
-            root={built.root}
-            path={path.value}
-            onPathChange={(next) => {
-              path.value = next
-            }}
-          />
-        </div>
-
-        {open ? (
-          <TechInfoModal
+    return (
+      <SessionChrome crumb={crumb} trailing={trailing} belowBar={belowBar}>
+        {showingInfo ? (
+          <TechInfo
             client={current.client}
             fileCount={files.length}
             totalBytes={total}
             status={status}
             mounted={mounted}
             mountError={err}
-            onClose={() => {
-              infoOpen.value = false
-            }}
+            onClose={closeInfo}
           />
-        ) : null}
-      </div>
+        ) : (
+          <ColumnView
+            root={built.root}
+            path={path.value}
+            onPathChange={(next) => {
+              path.value = next
+            }}
+            onDownload={() => void downloadSelected()}
+            downloadDisabled={active !== null}
+          />
+        )}
+      </SessionChrome>
     )
   }
 })
 
-export const App = component(function* () {
-  const ticket = signal(readHash())
-  using _hash = listen(window, 'hashchange', () => {
-    ticket.value = readHash()
+export const App = component(function* (_props, ctx: Ctx) {
+  const route = signal(parseRoute())
+  const stop = onRouteChange(() => {
+    route.value = parseRoute()
   })
+  ctx.aborted.addEventListener('abort', stop)
 
   yield () => {
-    const current = ticket.value
+    const current = route.value
     if (!current) return <Home />
-    return <Session key={current} ticket={current} />
+    return <Session key={current.ticket} ticket={current.ticket} view={current.view} />
   }
 })

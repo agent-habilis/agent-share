@@ -148,6 +148,7 @@ async function writeFile(
   reader: Reader,
   file: FileNode,
   onBytes: (n: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const parts = safeSplit(file.path)
   if (!parts || parts.length === 0) return
@@ -158,6 +159,7 @@ async function writeFile(
   try {
     let offset = 0
     while (offset < file.size) {
+      throwIfAborted(signal)
       const want = Math.min(CHUNK, file.size - offset)
       const chunk = await reader.read(file.index, BigInt(offset), want)
       if (chunk.length === 0) break
@@ -204,12 +206,21 @@ function unchanged(prev: SyncedFile | undefined, next: SyncedFile): boolean {
   )
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException('Mount cancelled', 'AbortError')
+  }
+}
+
 /**
  * Bring `root` in line with the current tree.
  *
  * Only files that are new or whose size/mtime/index changed are rewritten.
  * Paths that left the manifest are deleted. Progress totals cover bytes of
  * files that will actually be written this pass.
+ *
+ * `signal` cancels between chunks; a cancelled pass leaves a partial tree and
+ * does not return a new synced state — callers should discard or retry.
  */
 export async function syncMount(
   root: FileSystemDirectoryHandle,
@@ -218,6 +229,7 @@ export async function syncMount(
   dirs: ManifestDir[],
   previous: SyncedState,
   onProgress?: (progress: Progress) => void,
+  signal?: AbortSignal,
 ): Promise<SyncedState> {
   const nextFiles = new Map<string, SyncedFile>()
   const nextDirs = new Set<string>()
@@ -237,6 +249,7 @@ export async function syncMount(
 
   // Create directory scaffolding first so empty dirs land even with no files.
   for (const rel of nextDirs) {
+    throwIfAborted(signal)
     const parts = safeSplit(rel)
     if (!parts) continue
     await ensureDir(root, parts)
@@ -248,12 +261,20 @@ export async function syncMount(
 
   let writeFailures = 0
   for (const file of toWrite) {
+    throwIfAborted(signal)
     try {
-      await writeFile(root, reader, file, (n) => {
-        done += n
-        onProgress?.({ done, total })
-      })
+      await writeFile(
+        root,
+        reader,
+        file,
+        (n) => {
+          done += n
+          onProgress?.({ done, total })
+        },
+        signal,
+      )
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') throw error
       writeFailures += 1
       console.warn(`[share] failed to sync ${file.path}; will retry`, error)
       // Omit so the next pass treats it as still needing a write.
@@ -267,11 +288,17 @@ export async function syncMount(
   // Delete files that disappeared, deepest paths first so parents can go next.
   const removedFiles = [...previous.files.keys()].filter((path) => !nextFiles.has(path))
   removedFiles.sort((a, b) => b.length - a.length)
-  for (const path of removedFiles) await removePath(root, path)
+  for (const path of removedFiles) {
+    throwIfAborted(signal)
+    await removePath(root, path)
+  }
 
   const removedDirs = [...previous.dirs].filter((path) => !nextDirs.has(path))
   removedDirs.sort((a, b) => b.length - a.length)
-  for (const path of removedDirs) await removePath(root, path)
+  for (const path of removedDirs) {
+    throwIfAborted(signal)
+    await removePath(root, path)
+  }
 
   return { files: nextFiles, dirs: nextDirs }
 }

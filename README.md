@@ -74,13 +74,12 @@ tickets and with peers running an older build.
 ## The web client
 
 `share.agent-habilis.com` is a **pure static site**: no backend, no signalling
-server, no database. Open `share.agent-habilis.com/#<🐝ticket>` and the browser
-connects straight to the producer.
+server, no database. Open `share.agent-habilis.com/files/<🐝ticket>` and the
+browser connects straight to the producer. Session info is at
+`/info/<🐝ticket>`.
 
-The ticket rides in the URL **fragment**, never the path. It is a bearer
-capability granting full read access, and a path would send it to the server on
-every request — into logs, proxies and referrers. A fragment never leaves the
-browser, which is exactly what lets the site be static.
+The ticket is a bearer capability in the path so those views are ordinary
+shareable URLs. The static host must fall back to `index.html` for deep links.
 
 ### How a browser reaches a peer behind NAT
 
