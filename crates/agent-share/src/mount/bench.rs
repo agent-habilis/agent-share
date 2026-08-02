@@ -366,11 +366,13 @@ async fn connect_forced(
 async fn ensure_relay_selected(conn: &Connection) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
+        // `any` rather than `find(selected).is_some_and(relay)`: at most one
+        // path is ever selected, so the two are equivalent, and this one does
+        // not hand clippy a closure over a double reference.
         if conn
             .paths()
             .iter()
-            .find(|p| p.is_selected())
-            .is_some_and(|p| p.is_relay())
+            .any(|path| path.is_selected() && path.is_relay())
         {
             return Ok(());
         }
@@ -378,15 +380,15 @@ async fn ensure_relay_selected(conn: &Connection) -> Result<()> {
             let summary: Vec<String> = conn
                 .paths()
                 .iter()
-                .map(|p| {
-                    let kind = if p.is_relay() {
+                .map(|path| {
+                    let kind = if path.is_relay() {
                         "relay"
-                    } else if p.is_ip() {
+                    } else if path.is_ip() {
                         "ip"
                     } else {
                         "other"
                     };
-                    if p.is_selected() {
+                    if path.is_selected() {
                         format!("*{kind}")
                     } else {
                         kind.to_owned()
@@ -635,9 +637,38 @@ mod tests {
         assert!(relay_only_addr(&EndpointAddr::new(id)).is_err());
     }
 
+    /// A relay-forced dial refuses a ticket carrying no relay URL.
+    ///
+    /// The ticket is built by hand rather than by standing a producer up, and
+    /// that is the fix rather than a shortcut. `spawn_loopback_producer` could
+    /// not bind this case *at all*: `bind_bench` passes `clear_ip = true` for
+    /// the relay transport — correct in production, where the lookups resolve a
+    /// real relay — but against `LookupOpts::loopback()` the builder ends up
+    /// with an empty transport list. `bind_addr` adds an IP transport,
+    /// `RelayMode::Disabled` retains away every relay transport, no custom
+    /// transport is registered, and `clear_ip_transports()` removes the IP one.
+    /// iroh then fails the bind with "no valid address available" — its own
+    /// `test_bind_addr_badport_notrequired_no_other_transports` asserts that
+    /// exact string for that exact configuration.
+    ///
+    /// The test never needed the producer: `connect_forced` reads the ticket
+    /// and rejects it in `relay_only_addr` before it binds or dials anything.
+    /// Nothing here touches the network.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn relay_mode_rejects_loopback_ticket_without_relay_url() {
-        let (endpoint, ticket) = spawn_loopback_producer(BenchTransport::Relay).await;
+        let producer = SecretKey::from_bytes(&[9u8; 32]).public();
+        let ticket = MountTicket {
+            // Loopback: an IP path and no relay, which is what makes a
+            // relay-forced dial impossible.
+            addr: EndpointAddr::from_parts(
+                producer,
+                [TransportAddr::Ip("127.0.0.1:1".parse().unwrap())],
+            ),
+            secret: [0u8; SECRET_LEN],
+            lookups: LookupOpts::loopback(),
+            flags: TICKET_FLAG_BENCH_RELAY,
+        };
+
         let transport = BenchTransport::from_ticket_flags(ticket.flags).unwrap();
         let err = connect_forced(&ticket, transport)
             .await
@@ -646,7 +677,6 @@ mod tests {
             err.to_string().contains("no iroh relay URL"),
             "unexpected error: {err:#}"
         );
-        endpoint.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

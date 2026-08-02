@@ -18,4 +18,4 @@ pub use jsep::{
     BrowserSession, IceServer, IceServers, PendingAnswer, PendingOffer, answer, log_signal_sdps,
     offer,
 };
-pub use transport::{BrowserHubTransport, BrowserRtcTransport};
+pub use transport::{AttachError, BrowserHubTransport, BrowserRtcTransport, BrowserSessionGuard};

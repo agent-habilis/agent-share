@@ -34,7 +34,7 @@ pub async fn run_cli() -> Result<()> {
 #[doc(hidden)]
 pub mod test_support {
     pub use crate::lookup::add_peer_addr;
-    pub use crate::mount::test_support::{live_tree, scan, serve_mount};
+    pub use crate::mount::test_support::{dial_webrtc, live_tree, scan, serve_mount, serve_signal};
 }
 
 /// The fully-built `agent-share` clap command tree, for offline man-page

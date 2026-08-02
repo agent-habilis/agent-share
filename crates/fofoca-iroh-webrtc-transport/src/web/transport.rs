@@ -4,7 +4,6 @@
 //! data channels, keyed by remote [`EndpointId`]. The consumer attaches one
 //! session after offering; the producer attaches each peer that signals in.
 
-use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -23,6 +22,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection};
 
 use crate::custom_addr;
+use crate::registry::Registry;
 
 /// Bound on queued outbound datagrams per session.
 const OUT_QUEUE: usize = 256;
@@ -36,6 +36,7 @@ pub(crate) struct InboundPacket {
     pub(crate) payload: Vec<u8>,
 }
 
+#[derive(Debug)]
 struct SessionHandle {
     out_tx: mpsc::Sender<Vec<u8>>,
     /// Keeps the peer connection and data channel alive.
@@ -43,6 +44,7 @@ struct SessionHandle {
 }
 
 /// Opaque hold on browser handles that must outlive the QUIC path.
+#[derive(Debug)]
 struct SessionKeepalive {
     peer_connection: RtcPeerConnection,
     data_channel: RtcDataChannel,
@@ -61,7 +63,58 @@ impl Drop for SessionKeepalive {
     }
 }
 
-type SessionMap = Arc<Mutex<HashMap<EndpointId, SessionHandle>>>;
+type SessionMap = Arc<Registry<SessionHandle>>;
+
+/// Why [`BrowserHubTransport::attach`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachError {
+    /// Someone already holds this peer's slot — a live session, or another
+    /// negotiation partway through attaching one.
+    ///
+    /// Not necessarily a fault. The mount lane and the mesh lane share one
+    /// registry, so either can reach a peer first; the loser should use the
+    /// winner's session rather than treat this as a failure.
+    ///
+    /// The handles passed to `attach` have already been closed.
+    AlreadyAttached(EndpointId),
+}
+
+impl std::fmt::Display for AttachError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyAttached(remote) => {
+                write!(formatter, "a WebRTC session for {remote} already exists")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AttachError {}
+
+/// A session that is attached but not yet proven to carry traffic.
+///
+/// Attaching happens *before* the data channel opens — deliberately, because
+/// the browser has no inbound buffer and a QUIC Initial that lands before
+/// `onmessage` is installed is lost. This guard is what makes that early attach
+/// safe: dropping it without [`Self::commit`] removes the session and closes
+/// the peer connection, so a negotiation that never gets its channel open
+/// leaves nothing behind.
+#[derive(Debug)]
+#[must_use = "an uncommitted session guard tears the session down when dropped"]
+pub struct BrowserSessionGuard(crate::registry::SessionGuard<SessionHandle>);
+
+impl BrowserSessionGuard {
+    /// The peer this session is for.
+    #[must_use]
+    pub fn remote(&self) -> EndpointId {
+        self.0.remote()
+    }
+
+    /// The channel is open and carrying traffic: keep the session.
+    pub fn commit(self) {
+        self.0.commit();
+    }
+}
 
 /// Factory for the browser `WebRTC` datagram lane of one iroh endpoint.
 pub struct BrowserHubTransport {
@@ -78,7 +131,7 @@ impl BrowserHubTransport {
         let (inbound_tx, inbound_rx) = mpsc::channel(IN_QUEUE);
         Arc::new(Self {
             local_id,
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Registry::new(),
             inbound_tx,
             inbound_rx: Mutex::new(Some(inbound_rx)),
             local_addrs: Watchable::new(vec![custom_addr(local_id)]),
@@ -92,15 +145,43 @@ impl BrowserHubTransport {
 
     /// Adopt an open data channel for `remote` and start its pumps.
     ///
+    /// Returns a guard, not `()`. The session is in the registry the moment
+    /// this returns — it has to be, so no inbound QUIC Initial is lost — but it
+    /// is not yet *proven*, and the caller must [`BrowserSessionGuard::commit`]
+    /// once the channel opens. Dropping the guard instead removes the session
+    /// and closes the handles.
+    ///
     /// # Errors
-    /// A live session for `remote` already exists.
+    /// [`AttachError::AlreadyAttached`] when someone already holds this peer's
+    /// slot. The handles passed in are closed before returning: `attach` took
+    /// ownership of them, so the caller has no way to.
     pub fn attach(
         &self,
         remote: EndpointId,
         peer_connection: RtcPeerConnection,
         data_channel: RtcDataChannel,
         mut callbacks: Vec<JsValue>,
-    ) -> Result<(), String> {
+    ) -> Result<BrowserSessionGuard, AttachError> {
+        // Claim the slot first, before a single handler is installed.
+        //
+        // The old order was install-then-check, and the refused path was a trap:
+        // `Closure::into_js_value` forgets each closure into JS, so dropping the
+        // local `callbacks` vec detached nothing. A duplicate left behind an
+        // unclosed peer connection, an inbound pump still injecting packets
+        // tagged as this remote, and — worst — a live `onclose` hook that would
+        // later remove the *surviving* session, killing a working data path
+        // mid-transfer.
+        //
+        // Nothing between here and `fulfil` below awaits or re-enters the
+        // registry (`spawn_local` only queues), so the reserved slot is never
+        // observable from outside this function.
+        let Some(reservation) = self.sessions.reserve(remote) else {
+            data_channel.close();
+            peer_connection.close();
+            return Err(AttachError::AlreadyAttached(remote));
+        };
+        let generation = reservation.generation();
+
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUT_QUEUE);
         let (mut in_tx_session, mut in_rx_session) = mpsc::channel::<Vec<u8>>(IN_QUEUE);
 
@@ -118,17 +199,18 @@ impl BrowserHubTransport {
         // grow without bound. Removal is deferred to a task: it drops this
         // very closure (it lives in the session's keepalive), which must not
         // happen while the closure is executing.
+        //
+        // Scoped to `generation`, so a hook can only ever remove the session it
+        // was born into. An unscoped hook on a channel that outlived its
+        // session — an orphan from a refused duplicate, or a channel whose
+        // close event arrives after the peer reconnected — would take out the
+        // replacement instead.
         for event in ["close", "error"] {
             let sessions = Arc::clone(&self.sessions);
             let hook = Closure::<dyn FnMut()>::new(move || {
                 let sessions = Arc::clone(&sessions);
                 wasm_bindgen_futures::spawn_local(async move {
-                    if sessions
-                        .lock()
-                        .expect("browser hub session map poisoned")
-                        .remove(&remote)
-                        .is_some()
-                    {
+                    if sessions.remove_if_generation(&remote, generation) {
                         web_sys::console::log_1(&JsValue::from_str(&format!(
                             "[agent-share webrtc] session for {remote} detached (channel closed)"
                         )));
@@ -190,68 +272,45 @@ impl BrowserHubTransport {
             });
         }
 
-        let mut sessions = self
-            .sessions
-            .lock()
-            .expect("browser hub session map poisoned");
-        if sessions.contains_key(&remote) {
-            return Err(format!("a live WebRTC session for {remote} already exists"));
-        }
-        sessions.insert(
-            remote,
-            SessionHandle {
-                out_tx,
-                _keepalive: SessionKeepalive {
-                    peer_connection,
-                    data_channel,
-                    _callbacks: callbacks,
-                },
+        Ok(BrowserSessionGuard(reservation.fulfil(SessionHandle {
+            out_tx,
+            _keepalive: SessionKeepalive {
+                peer_connection,
+                data_channel,
+                _callbacks: callbacks,
             },
-        );
-        Ok(())
+        })))
     }
 
-    /// Whether a live session for `remote` exists.
+    /// Whether a *usable* session for `remote` exists.
     ///
     /// The mirror of `WebRtcTransport::has_session` on the host side. A session
     /// manager needs this to answer "have I already negotiated with this peer?"
     /// without attempting a duplicate `attach` and reading the error.
+    ///
+    /// A session still waiting for its channel to open does not count. It is
+    /// not yet a path anything can be sent over, and reporting it as one is how
+    /// a failed ICE run used to pin a pair to the relay forever.
     #[must_use]
     pub fn has_session(&self, remote: &EndpointId) -> bool {
-        self.sessions
-            .lock()
-            .expect("browser hub session map poisoned")
-            .contains_key(remote)
+        self.sessions.is_live(remote)
     }
 
     /// How many live sessions this hub holds — the tab's direct-peer count.
     #[must_use]
     pub fn session_count(&self) -> usize {
-        self.sessions
-            .lock()
-            .expect("browser hub session map poisoned")
-            .len()
+        self.sessions.live_len()
     }
 
     /// Tear down the session for `remote`, if any.
     pub fn detach(&self, remote: &EndpointId) -> bool {
-        self.sessions
-            .lock()
-            .expect("browser hub session map poisoned")
-            .remove(remote)
-            .is_some()
+        self.sessions.remove(remote)
     }
 
     /// Tear down every live session (producer shutdown). Returns how many
     /// sessions were closed.
     pub fn detach_all(&self) -> usize {
-        let mut sessions = self
-            .sessions
-            .lock()
-            .expect("browser hub session map poisoned");
-        let count = sessions.len();
-        sessions.clear();
-        count
+        self.sessions.clear()
     }
 }
 
@@ -260,10 +319,7 @@ impl std::fmt::Debug for BrowserHubTransport {
         formatter
             .debug_struct("BrowserHubTransport")
             .field("local_id", &self.local_id)
-            .field(
-                "sessions",
-                &self.sessions.lock().map(|map| map.len()).unwrap_or(0),
-            )
+            .field("sessions", &self.sessions.live_len())
             .finish_non_exhaustive()
     }
 }
@@ -367,14 +423,14 @@ impl std::fmt::Debug for BrowserHubSender {
 }
 
 impl CustomSender for BrowserHubSender {
+    /// Live sessions only. A reserved slot has no pump behind it, so calling it
+    /// a valid address would have QUIC write into a channel that is not open —
+    /// which is exactly what a stuck phantom entry used to do, silently.
     fn is_valid_send_addr(&self, addr: &CustomAddr) -> bool {
         let Ok(remote) = crate::parse_custom_addr(addr) else {
             return false;
         };
-        self.sessions
-            .lock()
-            .expect("browser hub session map poisoned")
-            .contains_key(&remote)
+        self.sessions.is_live(&remote)
     }
 
     fn poll_send(
@@ -390,14 +446,13 @@ impl CustomSender for BrowserHubSender {
         let chunk_size = transmit
             .segment_size
             .unwrap_or_else(|| transmit.contents.len().max(1));
-        let sessions = self
+        // Clone the sender out under the lock, then queue outside it.
+        let Some(mut out_tx) = self
             .sessions
-            .lock()
-            .expect("browser hub session map poisoned");
-        let Some(handle) = sessions.get(&remote) else {
+            .with_live(&remote, |handle| handle.out_tx.clone())
+        else {
             return Poll::Ready(Err(io::Error::from(io::ErrorKind::NotConnected)));
         };
-        let mut out_tx = handle.out_tx.clone();
         for chunk in transmit.contents.chunks(chunk_size) {
             let _ = out_tx.try_send(chunk.to_vec());
         }

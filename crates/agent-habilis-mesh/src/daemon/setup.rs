@@ -10,9 +10,7 @@ use tokio::sync::{mpsc, watch};
 use crate::gossip::event::{NodeEvent, NodeSink};
 #[cfg(feature = "host")]
 use crate::lookup::build_peer_multihop;
-use crate::lookup::{
-    add_peer_addr, build_mesh, build_peer_endpoint, relay_ladder, select_bootstrap_rung,
-};
+use crate::lookup::{add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung};
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
 use crate::protocol::{MeshId, Nickname};
@@ -207,7 +205,11 @@ async fn build_member_endpoint(
             !build.multihop,
             "multihop cannot share a caller-supplied endpoint: both need to pin the key"
         );
-        crate::lookup::check_injected_identity(&injected.endpoint, &injected.webrtc)?;
+        crate::lookup::check_injected_identity(
+            &injected.endpoint,
+            &injected.webrtc,
+            build.lookups,
+        )?;
         return Ok((injected.endpoint.clone(), None, injected.webrtc.clone()));
     }
     if build.multihop {
@@ -237,7 +239,11 @@ async fn build_member_endpoint(
     fofoca_iroh_webrtc_transport::WebRtcHandle,
 )> {
     if let Some(injected) = build.injected.as_ref() {
-        crate::lookup::check_injected_identity(&injected.endpoint, &injected.webrtc)?;
+        crate::lookup::check_injected_identity(
+            &injected.endpoint,
+            &injected.webrtc,
+            build.lookups,
+        )?;
         return Ok((injected.endpoint.clone(), None, injected.webrtc.clone()));
     }
     let (endpoint, webrtc) =
@@ -253,7 +259,7 @@ async fn build_member_endpoint(
 /// per-peer count wrong: the same machine is reachable twice and there is
 /// nothing to deduplicate on.
 ///
-/// The endpoint must be built with the WebRTC transport already registered from
+/// The endpoint must be built with the `WebRTC` transport already registered from
 /// the same key it binds; [`check_injected_identity`](crate::net::check_injected_identity)
 /// enforces that. Its `LookupOpts` must also match the ones the mesh id derives,
 /// or the relay-direct rendezvous dial has no rung to ride.
@@ -342,9 +348,12 @@ struct SetupBuild<'a> {
     /// The caller's ALPN handlers, moved out exactly once by whichever of
     /// create/join runs. `RefCell` because they are boxed trait objects — not
     /// `Clone` — and `SetupBuild` is threaded by reference.
-    protocols: std::cell::RefCell<Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>>,
+    protocols: std::cell::RefCell<CallerProtocols>,
     rung_tx: &'a watch::Sender<Option<RelayUrl>>,
 }
+
+/// The ALPN handlers a caller registers on the mesh's Router.
+type CallerProtocols = Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>;
 
 /// The freshly-assembled mesh handles a [`SetupKind`] arm produces.
 struct Assembled {
@@ -375,6 +384,13 @@ struct Assembled {
     /// the session manager can negotiate with peers as it learns of them, and
     /// so a consumer can read its live direct-peer count.
     webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
+    /// The negotiation-slot table the Router's signal acceptor was built with.
+    /// Threaded on so `EventLoopState` gets the *same* one — the dialing side
+    /// and the answering side must share a ceiling, or neither enforces it.
+    webrtc_admission: crate::transport::SignalAdmission,
+    /// How far ICE may reach — host-only on a loopback mesh. Derived from the
+    /// mesh's own lookups, so it cannot disagree with them.
+    webrtc_ice: crate::transport::IceProfile,
     /// The raw topic string (`SetupKind::Topic` only); `None` for create/join.
     topic_string: Option<String>,
 }
@@ -447,6 +463,8 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         #[cfg(feature = "host")]
             multihop: multihop_handle,
         webrtc,
+        webrtc_admission,
+        webrtc_ice,
         topic_string,
     } = match kind {
         SetupKind::Create {
@@ -505,6 +523,8 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         #[cfg(feature = "host")]
         multihop: multihop_handle,
         webrtc,
+        webrtc_admission,
+        webrtc_ice,
         unicast_rx,
         live_count,
         // Default to the CLI driver; the in-process sessions
@@ -609,11 +629,22 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         mesh.network_label(),
     );
 
+    // One table for both roles on this node: the acceptor built inside
+    // `build_mesh` gets this clone, and so does `EventLoopState`. Two separate
+    // ones would mean two separate ceilings, each enforcing half of one.
+    let webrtc_admission =
+        crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
+    // A loopback mesh gathers host candidates only. Anything else would put
+    // STUN packets on the wire from a mesh whose whole point is that it makes
+    // no external network call.
+    let webrtc_ice = crate::transport::IceProfile {
+        host_only: mesh.is_loopback(),
+    };
     let (gossip, router) = build_mesh(
         endpoint.clone(),
         build.max_peers,
         Some(build.unicast_acceptor.clone()),
-        Some(webrtc.clone()),
+        Some((webrtc.clone(), webrtc_admission.clone(), webrtc_ice)),
         build.protocols.take(),
     );
     // Creator has no peers yet — bootstrap is empty.
@@ -637,6 +668,8 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         #[cfg(feature = "host")]
         multihop,
         webrtc,
+        webrtc_admission,
+        webrtc_ice,
         topic_string: None,
     })
 }
@@ -674,11 +707,22 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // the chosen relay rung (reachable across machines).
     register_rendezvous(&endpoint, &rdv);
 
+    // One table for both roles on this node: the acceptor built inside
+    // `build_mesh` gets this clone, and so does `EventLoopState`. Two separate
+    // ones would mean two separate ceilings, each enforcing half of one.
+    let webrtc_admission =
+        crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
+    // A loopback mesh gathers host candidates only. Anything else would put
+    // STUN packets on the wire from a mesh whose whole point is that it makes
+    // no external network call.
+    let webrtc_ice = crate::transport::IceProfile {
+        host_only: mesh.is_loopback(),
+    };
     let (gossip, router) = build_mesh(
         endpoint.clone(),
         build.max_peers,
         Some(build.unicast_acceptor.clone()),
-        Some(webrtc.clone()),
+        Some((webrtc.clone(), webrtc_admission.clone(), webrtc_ice)),
         build.protocols.take(),
     );
     // We subscribe, background-connect to the rendezvous, and — for a plain
@@ -720,6 +764,8 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         #[cfg(feature = "host")]
         multihop,
         webrtc,
+        webrtc_admission,
+        webrtc_ice,
         topic_string,
     })
 }

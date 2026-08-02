@@ -86,22 +86,26 @@ impl TransportHandles {
 /// Deliberately **not** part of the mesh id. [`LookupOpts`] is mixed into
 /// `derive_topic_id` so that every member provably agrees on where to
 /// rendezvous — right for discovery, and exactly wrong for transports: a
-/// browser only ever has relay and WebRTC, a native peer also has IP and
+/// browser only ever has relay and `WebRTC`, a native peer also has IP and
 /// multihop. Baking transports into mesh identity would mean a browser could
 /// never join a mesh a CLI created. So this is local, per-peer, and reconciled
 /// per pair by ICE and iroh's own path selection.
 ///
 /// `Default` is "everything this target has".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one independent on/off per transport; a bitflags type would read worse"
+)]
 pub struct TransportOpts {
     /// Direct UDP and hole-punched paths, plus the address lookups that find
     /// them. Cleared by a WebRTC-only instance.
     pub ip: bool,
     /// The relay. **Never cleared by `webrtc`-only**, because the relay is the
     /// rendezvous: it carries the bootstrap dial and the JSEP exchange. Clearing
-    /// it would sever the very thing that lets a WebRTC session be negotiated.
+    /// it would sever the very thing that lets a `WebRTC` session be negotiated.
     pub relay: bool,
-    /// QUIC over a WebRTC data channel.
+    /// QUIC over a `WebRTC` data channel.
     pub webrtc: bool,
     /// Source-routed multi-hop. Host-only.
     pub multihop: bool,
@@ -119,11 +123,11 @@ impl Default for TransportOpts {
 }
 
 impl TransportOpts {
-    /// Data-plane exclusivity for WebRTC: IP paths cleared, relay kept for
+    /// Data-plane exclusivity for `WebRTC`: IP paths cleared, relay kept for
     /// rendezvous and signalling.
     ///
     /// The intent is to make a WebRTC-only run *falsifiable* — with IP cleared,
-    /// any data path that is not the WebRTC one is a failure rather than a
+    /// any data path that is not the `WebRTC` one is a failure rather than a
     /// silent fallback. Note this is not the transport crate's
     /// `ExclusivePreset`, which clears relay transports outright and would
     /// leave nothing to negotiate over.
@@ -316,18 +320,22 @@ pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint> {
 
 /// Assert a caller-supplied endpoint and hub agree on identity.
 ///
-/// The WebRTC transport advertises `custom_addr(local_id)` as the address peers
+/// The `WebRTC` transport advertises `custom_addr(local_id)` as the address peers
 /// dial it on, so the hub must have been built from the same key the endpoint
 /// binds. Getting this wrong is **silent**: the endpoint comes up fine and every
-/// WebRTC dial goes to an address nobody listens on. `build_peer_webrtc` gets
+/// `WebRTC` dial goes to an address nobody listens on. `build_peer_webrtc` gets
 /// this right by construction; an injected pair is only as good as its caller,
 /// so it is checked here instead of assumed.
+///
+/// The reach check is a `warn!`, not an error: relay home is not established at
+/// bind time, so a false negative would fail a perfectly good setup.
 ///
 /// # Errors
 /// The endpoint and hub advertise different identities.
 pub fn check_injected_identity(
     endpoint: &Endpoint,
     webrtc: &fofoca_iroh_webrtc_transport::WebRtcHandle,
+    mesh_lookups: &LookupOpts,
 ) -> Result<()> {
     let bound = endpoint.id();
     let advertised = webrtc.transport().local_id();
@@ -336,6 +344,35 @@ pub fn check_injected_identity(
         "injected endpoint binds {bound} but its WebRTC transport advertises \
          {advertised}; they must share one key or every WebRTC dial goes nowhere"
     );
+
+    // The other half of the injection contract, and the half that had no check
+    // at all. A caller that injects an endpoint built for one reach into a mesh
+    // derived at another gets a setup that comes up clean and does not work:
+    // the mesh registers its rendezvous somewhere the endpoint has no transport
+    // to dial, so peers never find each other, while the node reports success.
+    // One log line would have caught a share bound loopback-only whose mesh was
+    // busy publishing a public rendezvous.
+    // Keyed on whether the mesh *expects* a relay, not on whether it is
+    // loopback. An mDNS-only mesh is neither loopback nor relayed, and having no
+    // relay address is exactly right for it — warning there would be a false
+    // alarm, which is its own defect.
+    let endpoint_has_relay = endpoint
+        .addr()
+        .addrs
+        .iter()
+        .any(|addr| matches!(addr, iroh::TransportAddr::Relay(_)));
+    let mesh_wants_relay = mesh_lookups.relay != RelayChoice::Disabled;
+    if mesh_wants_relay && !endpoint_has_relay {
+        tracing::warn!(
+            "injected endpoint advertises no relay address but the mesh rendezvous \
+             is on a relay; peers will not find each other until one comes up"
+        );
+    } else if !mesh_wants_relay && endpoint_has_relay {
+        tracing::warn!(
+            "injected endpoint has a relay address but the mesh does not use one; \
+             the rendezvous will bootstrap without it"
+        );
+    }
     Ok(())
 }
 
@@ -345,7 +382,7 @@ pub fn check_injected_identity(
 /// The key is minted here and pinned, because the transport advertises
 /// `custom_addr(local_id)` as the address peers dial it on — so it has to know
 /// the endpoint's identity, but the endpoint is built *with* the transport.
-/// Getting this wrong is silent: the endpoint comes up fine and every WebRTC
+/// Getting this wrong is silent: the endpoint comes up fine and every `WebRTC`
 /// dial goes to an address nobody listens on.
 ///
 /// Registration is additive, so IP and relay stay available. A native peer
@@ -386,7 +423,7 @@ pub(crate) async fn build_peer_webrtc(
 /// A `WebRtcHandle` for an endpoint that was built *without* it registered.
 ///
 /// Only the multihop path needs this: multihop pins the key for its own hop
-/// identity, so it owns the endpoint and WebRTC cannot be a custom transport on
+/// identity, so it owns the endpoint and `WebRTC` cannot be a custom transport on
 /// it. The handle still answers inbound JSEP (the Router arm is independent of
 /// the transport registration), it just has no path to send over — so a
 /// multihop peer negotiates nothing. Kept rather than skipped so the wiring has
@@ -513,7 +550,14 @@ pub(crate) fn build_mesh(
     endpoint: Endpoint,
     active_view_capacity: usize,
     unicast: Option<crate::transport::UnicastAcceptor>,
-    webrtc: Option<fofoca_iroh_webrtc_transport::WebRtcHandle>,
+    // The admission travels with the handle because the acceptor built below
+    // has to share it with the dialing side — one ceiling per node, not one
+    // per role. The beacon passes `None` and needs neither.
+    webrtc: Option<(
+        fofoca_iroh_webrtc_transport::WebRtcHandle,
+        crate::transport::SignalAdmission,
+        crate::transport::IceProfile,
+    )>,
     protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
 ) -> (Gossip, Router) {
     // `active_view_capacity` is the live direct-neighbor cap (`--max-peers`),
@@ -540,10 +584,10 @@ pub(crate) fn build_mesh(
     // still open a direct data channel. Answering is unconditional: the role
     // rule (lower `EndpointId` offers) decides who *dials*, and a peer that
     // never answers can never be dialled by anyone.
-    if let Some(handle) = webrtc {
+    if let Some((handle, admission, ice)) = webrtc {
         builder = builder.accept(
             crate::transport::MESH_WEBRTC_SIGNAL_ALPN,
-            crate::transport::WebRtcSignalAcceptor::new(handle, local),
+            crate::transport::WebRtcSignalAcceptor::new(handle, local, admission, ice),
         );
     }
     // The caller's own protocols, if it shares this endpoint with us.

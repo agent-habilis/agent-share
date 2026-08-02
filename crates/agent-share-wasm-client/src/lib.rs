@@ -105,6 +105,10 @@ impl ShareClient {
             .map_err(|message| JsValue::from_str(&message))?;
         let ticket = MountTicket::decode(&ticket).map_err(|error| err("decode ticket", &error))?;
         let secret = ticket.secret;
+        // Captured before `ticket` is moved into the connect. The mesh is
+        // derived from the share's own reach, so every holder of this ticket —
+        // producer included — computes the same mesh id.
+        let lookups = ticket.lookups.clone();
         let mut client = match mode {
             TransportMode::Relay => connect_relay(ticket).await,
             TransportMode::WebRtc => connect_webrtc(ticket, /*allow_relay_fallback=*/ false).await,
@@ -120,7 +124,7 @@ impl ShareClient {
             .mesh_endpoint
             .take()
             .map(|shared| (shared.endpoint, shared.webrtc));
-        match mesh::MeshPeer::join_share(&secret, shared).await {
+        match mesh::MeshPeer::join_share(&secret, &lookups, shared).await {
             Ok(peer) => client.mesh = Some(peer),
             Err(error) => {
                 web_sys::console::warn_1(&JsValue::from_str(&format!(
@@ -872,6 +876,16 @@ async fn negotiate(
     hub: &BrowserHubTransport,
 ) -> Result<BrowserSession, JsValue> {
     let producer_id = producer.id;
+    // Today the hub is built a few lines above this call and is provably empty,
+    // so this cannot fire. It is here because the invariant is "the hub is
+    // newborn", and the day someone reuses a hub across dials — which is the
+    // natural next refactor — a second negotiation for a peer we already reach
+    // would burn a full ICE budget and then be refused at attach.
+    if hub.has_session(&producer_id) {
+        return Ok(BrowserSession {
+            remote: producer_id,
+        });
+    }
     let conn = endpoint
         .connect(producer, WEBRTC_SIGNAL_ALPN)
         .await
@@ -902,6 +916,20 @@ async fn negotiate(
         })?;
     let answer: SignalEnvelope =
         serde_json::from_slice(&raw).map_err(|error| err("parse answer", &error))?;
+    // An explicit refusal, which a producer sends when it already holds a
+    // session with us. Named here rather than left to `complete`, which reports
+    // it through `claimed_endpoint()` as "remote signaling error" from inside a
+    // stage called "build offer" — true but useless.
+    if let SignalEnvelope::Error { reason, .. } = &answer {
+        if hub.has_session(&producer_id) {
+            return Ok(BrowserSession {
+                remote: producer_id,
+            });
+        }
+        return Err(JsValue::from_str(&format!(
+            "producer refused WebRTC signalling: {reason}"
+        )));
+    }
     let session = match pending.complete(hub, &answer).await {
         Ok(session) => session,
         Err(error) => {

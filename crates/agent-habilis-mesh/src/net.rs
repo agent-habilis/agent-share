@@ -12,3 +12,8 @@ pub use crate::lookup::{
     check_injected_identity, probe_connect, probe_ladder, relay_ladder,
 };
 pub use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
+/// The direct-`WebRTC`-session ceiling this engine enforces, so a consumer
+/// renders the same denominator the engine checks. It used to be written out
+/// once here and again in each frontend, and the UI's copy drifted from the
+/// one that was enforced.
+pub use crate::transport::MAX_DIRECT_PEERS;

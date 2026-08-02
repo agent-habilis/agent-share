@@ -81,6 +81,8 @@ pub async fn run<A: NodeDriver>(
         #[cfg(feature = "host")]
         multihop,
         webrtc,
+        webrtc_admission,
+        webrtc_ice,
         unicast_rx,
         live_count,
         driver,
@@ -156,6 +158,10 @@ pub async fn run<A: NodeDriver>(
         state.multihop = multihop; // `--multihop`: the registered transport's handle
     }
     state.webrtc = Some(webrtc); // the direct-path transport the session manager fills
+    // The *same* table the Router's signal acceptor holds, not a fresh one:
+    // the cap only means anything if both roles count against it together.
+    state.webrtc_admission = webrtc_admission;
+    state.webrtc_ice = webrtc_ice;
     wire_session_state(
         &mut state,
         &endpoint,

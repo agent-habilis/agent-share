@@ -20,15 +20,42 @@ use agent_habilis_mesh::embed::{
 use agent_habilis_mesh::net::TransportOpts;
 use agent_habilis_mesh::protocol::{Message, Nickname};
 use agent_habilis_mesh::runtime::{
-    InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh,
+    InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh_with,
 };
 use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
 use anyhow::{Context, Result};
 
-/// How many peers this node negotiates direct sessions with. Matches the
-/// engine's own ceiling and the browser peer's.
-const MAX_DIRECT_PEERS: usize = 16;
+/// A share's lookups, as the engine spells them.
+///
+/// The two types are structurally identical and carry the same `RelayUrl` —
+/// the workspace pins one `iroh-base` — but they belong to different crates,
+/// and deliberately: `agent-share-proto` is wasm-clean and depends on
+/// `iroh-base` alone, so it must not learn about the engine just to spare this
+/// function. The browser peer carries the same ten lines for the same reason.
+pub(crate) fn mesh_lookups(
+    share: &agent_share_proto::lookup::LookupOpts,
+) -> agent_habilis_mesh::protocol::LookupOpts {
+    use agent_habilis_mesh::protocol::RelayChoice as MeshRelay;
+    use agent_share_proto::lookup::RelayChoice as ShareRelay;
+    agent_habilis_mesh::protocol::LookupOpts {
+        mdns: share.mdns,
+        dht: share.dht,
+        relay: match &share.relay {
+            ShareRelay::Disabled => MeshRelay::Disabled,
+            ShareRelay::Pinned => MeshRelay::Pinned,
+            ShareRelay::Custom(urls) => MeshRelay::Custom(urls.clone()),
+        },
+    }
+}
+
+/// How many peers this node negotiates direct sessions with.
+///
+/// The engine's own constant, not a copy of it. It used to be a local `16`
+/// here, another in the browser peer, and the real one in the engine — so the
+/// number a UI rendered and the number the engine enforced could drift apart,
+/// and did.
+use agent_habilis_mesh::net::MAX_DIRECT_PEERS;
 
 /// Presence only: this node joins the mesh so its peers can see each other and
 /// hold direct sessions. File bytes ride the mount protocol, not gossip, so
@@ -82,16 +109,6 @@ impl ShareMesh {
         &self.mesh_id
     }
 
-    /// Members on the roster, including us.
-    pub(crate) fn peers_gossip(&self) -> usize {
-        self.live.load(Ordering::Relaxed)
-    }
-
-    /// Peers we hold a direct `WebRTC` data channel with.
-    pub(crate) fn peers_direct(&self) -> usize {
-        self.webrtc.transport().session_count()
-    }
-
     /// Report the peer counts on a line of their own whenever they change.
     ///
     /// Append-on-change rather than a redrawn status line: the CLI has no
@@ -117,10 +134,23 @@ impl ShareMesh {
                 let gossip = live.load(Ordering::Relaxed).saturating_sub(1);
                 let direct = webrtc.transport().session_count();
                 let now = (gossip, direct);
-                if last == Some(now) || now == (0, 0) {
+                if last == Some(now) {
                     continue;
                 }
+                // `last` is updated whichever way the next branch goes.
+                // Skipping the update on the quiet path is how a share went
+                // permanently silent after a single join/leave cycle: the
+                // return to zero was dropped without recording it, so when the
+                // peer came back the identical state read as a repeat and was
+                // dropped too. Nothing ever printed again.
+                let first_sample = last.is_none();
                 last = Some(now);
+                // Quiet *until* the first peer arrives, so a solo share prints
+                // nothing extra — but a return to zero afterwards is real news
+                // and gets a line.
+                if now == (0, 0) && first_sample {
+                    continue;
+                }
                 crate::util::output::status(
                     "Peers",
                     &format!("{gossip} on mesh · {direct} direct"),
@@ -132,10 +162,10 @@ impl ShareMesh {
     /// Broadcast `Left` and wind the node down, so peers drop us now rather
     /// than on a silence timeout. Idempotent.
     pub(crate) async fn leave(mut self) {
-        if let Some(node) = self.node.take() {
-            if let Err(error) = node.leave().await {
-                tracing::debug!(%error, "leaving the share mesh failed");
-            }
+        if let Some(node) = self.node.take()
+            && let Err(error) = node.leave().await
+        {
+            tracing::debug!(%error, "leaving the share mesh failed");
         }
     }
 }
@@ -147,6 +177,7 @@ impl ShareMesh {
 /// relay. Callers treat this as non-fatal: the share serves either way.
 pub(crate) async fn join(
     secret: &[u8; SECRET_LEN],
+    lookups: &agent_share_proto::lookup::LookupOpts,
     shared: InjectedEndpoint,
     protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
 ) -> Result<ShareMesh> {
@@ -154,7 +185,12 @@ pub(crate) async fn join(
     // state file and user-facing lines, so handing it the bearer secret would
     // print the secret. See `share_mesh_key`.
     let key = share_mesh_key(secret);
-    let mesh = derive_topic_mesh(&key).context("deriving the share's mesh")?;
+    // The share's own reach, not the public preset. Producer and consumers
+    // agree by construction because they read it from the same ticket, so this
+    // needs no new ticket field — and a private share stops standing up a
+    // public rendezvous it could never reach anyway.
+    let mesh =
+        derive_topic_mesh_with(&key, mesh_lookups(lookups)).context("deriving the share's mesh")?;
 
     let Resolved { kind, author, .. } = JoinParams {
         target: mesh

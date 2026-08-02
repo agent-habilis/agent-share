@@ -174,6 +174,13 @@ pub struct EventLoopConfig {
     /// only direct path onto the mesh, and an extra candidate path for a native
     /// peer. `run()` moves it into `EventLoopState::webrtc`.
     pub(crate) webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
+    /// The negotiation-slot table this peer's Router acceptor was built with.
+    /// `run()` moves it into `EventLoopState::webrtc_admission`, so the dialing
+    /// side and the answering side share one direct-peer ceiling.
+    pub(crate) webrtc_admission: crate::transport::SignalAdmission,
+    /// How far ICE may reach when gathering — host-only on a loopback mesh.
+    /// `run()` moves it into `EventLoopState::webrtc_ice`.
+    pub(crate) webrtc_ice: crate::transport::IceProfile,
     /// Inbound unicast frames from the `UNICAST_ALPN` acceptor. The event loop
     /// drains this into `gossip::ingest` (the same path as gossip), so both
     /// transports share signature-verify + dedup. Built in `setup_mesh`.

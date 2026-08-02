@@ -34,6 +34,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 
 use super::LOG_TARGET;
+use super::admission::{Refusal, SignalAdmission};
 
 /// ALPN for the JSEP exchange. Wire-load-bearing in the same way
 /// [`super::UNICAST_ALPN`] is: both ends must agree, so it moves only with a
@@ -47,8 +48,94 @@ pub(crate) const MESH_WEBRTC_SIGNAL_ALPN: &[u8] = b"habilis-mesh/webrtc-signal/1
 /// browser side gathers with a vanilla-ICE budget of its own (candidates ride
 /// inside the SDP; there is no trickle message), so this must comfortably
 /// exceed it.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// Compiled on both targets so the arithmetic below is target-independent.
+/// Only the native backend passes it *into* str0m — the browser backend takes
+/// no deadline parameter at all, so for a tab [`SignalDeadlines::round`] is the
+/// only bound that exists.
 const JSEP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// One leg of the envelope exchange: dial, open, write, then wait for the
+/// peer's envelope.
+///
+/// The wait covers the *peer's* SDP construction, which is the expensive part.
+/// A browser answerer pays a TURN-credential fetch (≤1.5s) plus a full
+/// vanilla-ICE gathering budget (≤10s) before its answer exists; a CLI answerer
+/// pays up to two 2s STUN probes. 20s is comfortably past the worst honest path
+/// and leaves room for a relay round trip on a throttled tab.
+const SIGNAL_EXCHANGE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The whole round, either role.
+///
+/// Strictly greater than the sum of the two legs, so that in every honest
+/// failure an *inner* deadline fires first and names the phase; this one only
+/// catches a peer that stalls somewhere with no budget of its own. It also sits
+/// below two `alive` ticks, so a peer that always times out is retried on the
+/// following tick rather than being skipped indefinitely.
+const SIGNAL_ROUND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Application close code: we are at our direct-peer ceiling.
+///
+/// Distinct from a failure so the dialer can tell "no room" from "ICE broke"
+/// and back off instead of re-offering every tick. Weakly wire-load-bearing:
+/// a peer too old to know the code just sees a closed connection and retries,
+/// which is the behaviour it had before.
+const CAP_REFUSED: u32 = 1;
+/// Application close code: the negotiation failed.
+const SIGNAL_FAILED: u32 = 2;
+/// Application close code: the negotiation ran out of time.
+const SIGNAL_ABORTED: u32 = 3;
+
+/// The deadlines one round runs under.
+///
+/// Injectable so tests need not wait 45 real seconds. A `util::tuning` knob
+/// would not do: that is a process-wide `OnceLock`, and these tests run in
+/// parallel in one process.
+///
+/// [`JSEP_DEADLINE`] is deliberately *not* in here. It is consumed inside the
+/// backends' `complete()`, which the browser backend does not even accept a
+/// deadline for, so threading it would buy an injectability only half the
+/// targets could honour. [`Self::round`] bounds it from the outside on both.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SignalDeadlines {
+    /// Bound on each wait for the peer's envelope.
+    pub(crate) exchange: std::time::Duration,
+    /// Bound on the whole round, both roles.
+    pub(crate) round: std::time::Duration,
+}
+
+impl SignalDeadlines {
+    pub(crate) const DEFAULT: Self = Self {
+        exchange: SIGNAL_EXCHANGE_DEADLINE,
+        round: SIGNAL_ROUND_DEADLINE,
+    };
+}
+
+/// How far ICE may reach when gathering candidates.
+///
+/// A loopback mesh must make no external network call — that is the whole
+/// promise of `LookupOpts::loopback()` — but `IceConfig::default()` queries two
+/// public STUN servers. Without this, threading the share's real lookups into
+/// the mesh derivation would have closed one hole (mDNS, DHT, a published
+/// rendezvous) and left this one open.
+///
+/// Target-independent on purpose. The native backend maps it onto `IceConfig`;
+/// the browser backend ignores it, because a tab is never a loopback peer — it
+/// has no loopback peers to reach.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct IceProfile {
+    /// Gather host candidates only: no STUN, no TURN, no packets off the box.
+    pub(crate) host_only: bool,
+}
+
+/// Whether `error` is a peer telling us it is at its ceiling.
+fn refused_at_cap(conn: &Connection) -> bool {
+    matches!(
+        conn.close_reason(),
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
+            if close.error_code.into_inner() == u64::from(CAP_REFUSED)
+    )
+}
 
 /// The `ProtocolHandler` the Router runs for [`MESH_WEBRTC_SIGNAL_ALPN`]: read
 /// one offer, answer it, attach the resulting session to our hub.
@@ -61,11 +148,35 @@ const JSEP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 pub(crate) struct WebRtcSignalAcceptor {
     handle: WebRtcHandle,
     local: EndpointId,
+    /// Shared with the dialing side, so the ceiling is one number for the node
+    /// rather than one per role.
+    admission: SignalAdmission,
+    deadlines: SignalDeadlines,
+    /// How far ICE may reach — host-only on a loopback mesh.
+    ice: IceProfile,
 }
 
 impl WebRtcSignalAcceptor {
-    pub(crate) fn new(handle: WebRtcHandle, local: EndpointId) -> Self {
-        Self { handle, local }
+    pub(crate) fn new(
+        handle: WebRtcHandle,
+        local: EndpointId,
+        admission: SignalAdmission,
+        ice: IceProfile,
+    ) -> Self {
+        Self {
+            handle,
+            local,
+            admission,
+            deadlines: SignalDeadlines::DEFAULT,
+            ice,
+        }
+    }
+
+    /// Shorten the deadlines, for tests that must not wait 45 real seconds.
+    #[cfg(test)]
+    pub(crate) fn with_deadlines(mut self, deadlines: SignalDeadlines) -> Self {
+        self.deadlines = deadlines;
+        self
     }
 }
 
@@ -78,28 +189,97 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
         // where sessions are keyed by peer, is impersonation rather than merely
         // a wasted negotiation.
         let remote = conn.remote_id();
+
+        // Admit *before* spawning, in the synchronous prefix of `accept`. Two
+        // things fall out of that ordering:
+        //
+        // - The ceiling now binds the answering side. The role rule makes the
+        //   highest-id peer in a mesh a pure answerer, and with the cap checked
+        //   only by dialers it attached everyone who asked.
+        // - One peer cannot flood us. Admission is keyed by the TLS-proven id,
+        //   so N connections from one peer yield one task; the rest are closed
+        //   here and their `Connection`s dropped with them. Before this, a peer
+        //   that connected and never opened a stream left a detached task
+        //   parked on `accept_bi` forever, one per connection.
+        let guard = match self.admission.try_admit(remote, &self.handle) {
+            Ok(guard) => guard,
+            Err(reason) => {
+                let (code, why): (u32, &[u8]) = match reason {
+                    Refusal::AtCap => (CAP_REFUSED, b"at the direct-peer cap"),
+                    Refusal::ShuttingDown => (SIGNAL_ABORTED, b"shutting down"),
+                    Refusal::InFlight | Refusal::HaveSession | Refusal::Cooling => {
+                        (SIGNAL_FAILED, b"already negotiating")
+                    }
+                };
+                conn.close(code.into(), why);
+                tracing::debug!(target: LOG_TARGET, %remote, ?reason, "refused a signal offer");
+                return Ok(());
+            }
+        };
+
         let handle = self.handle.clone();
         let local = self.local;
+        let deadlines = self.deadlines;
+        let ice = self.ice;
         // Negotiate off the accept future, for two independent reasons. It can
         // take seconds (candidate gathering, then DTLS/SCTP), and holding the
         // Router's accept task that long would serialize inbound offers. And in
         // a browser the JSEP path holds `!Send` web-sys closures, which iroh's
         // `Send` accept future cannot carry at all — `n0_future::task::spawn` is
         // `spawn_local` there, so the requirement simply does not apply.
-        n0_future::task::spawn(async move {
-            match answer_one(&conn, local, remote, &handle).await {
-                Ok(()) => {
+        //
+        // The cost of spawning is that the task escapes the Router's own
+        // `JoinSet`, so shutdown cannot reach it and nothing bounds how long it
+        // lives. The guard and the round deadline below are what replace those
+        // two guarantees.
+        let task = n0_future::task::spawn(async move {
+            let _guard = guard;
+            // Boxed: the answer future carries the whole sans-io str0m state,
+            // large enough that clippy flags it on this task's stack.
+            match n0_future::time::timeout(
+                deadlines.round,
+                Box::pin(answer_one(&conn, local, remote, &handle, deadlines, ice)),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    conn.close(0u32.into(), b"jsep done");
                     tracing::debug!(target: LOG_TARGET, %remote, "webrtc session attached (answerer)");
                 }
                 // A failed negotiation is normal operation, not a fault: ICE
                 // fails, peers vanish mid-handshake, a NAT refuses. The peer
                 // stays reachable over whatever path it already had.
-                Err(error) => {
+                Ok(Err(error)) => {
+                    conn.close(SIGNAL_FAILED.into(), b"answer failed");
                     tracing::debug!(target: LOG_TARGET, %remote, %error, "webrtc answer failed");
+                }
+                Err(_elapsed) => {
+                    conn.close(SIGNAL_ABORTED.into(), b"answer timed out");
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %remote,
+                        deadline = ?deadlines.round,
+                        "webrtc answer timed out"
+                    );
                 }
             }
         });
+        self.admission.track(remote, task.abort_handle());
         Ok(())
+    }
+
+    /// Cancel every round in flight.
+    ///
+    /// The trait's own hook, which `Router::shutdown` awaits *before* it closes
+    /// the endpoint — so this is how the spawned answer tasks, which are not in
+    /// the Router's `JoinSet`, get reached at all. Aborting rather than
+    /// draining is right: the endpoint is about to go, so an in-flight
+    /// negotiation has nothing left to attach to.
+    ///
+    /// Synchronous body inside an `async fn`, so the future stays `Send` as the
+    /// trait requires and no `MutexGuard` crosses an await.
+    async fn shutdown(&self) {
+        self.admission.close();
     }
 }
 
@@ -109,11 +289,19 @@ async fn answer_one(
     local: EndpointId,
     remote: EndpointId,
     handle: &WebRtcHandle,
+    deadlines: SignalDeadlines,
+    ice: IceProfile,
 ) -> Result<()> {
-    let (mut send, mut recv) = conn.accept_bi().await.context("accept signal stream")?;
-    let raw = recv
-        .read_to_end(MAX_ENVELOPE_BYTES)
+    // Bounded: a peer that connects and never opens a stream would otherwise
+    // park this task forever, and its QUIC keep-alives mean the connection
+    // never idles out on its own.
+    let (mut send, mut recv) = n0_future::time::timeout(deadlines.exchange, conn.accept_bi())
         .await
+        .context("timed out waiting for the signal stream")?
+        .context("accept signal stream")?;
+    let raw = n0_future::time::timeout(deadlines.exchange, recv.read_to_end(MAX_ENVELOPE_BYTES))
+        .await
+        .context("timed out reading the signal offer")?
         .context("read signal offer")?;
     let offer: SignalEnvelope = serde_json::from_slice(&raw).context("parse signal offer")?;
 
@@ -121,7 +309,7 @@ async fn answer_one(
     // negotiation. The offerer cannot finish ICE until it has our SDP, so
     // completing first deadlocks both sides into their full gathering budget
     // and then fails — which is exactly what it did.
-    let answer = build_answer(local, &offer).await?;
+    let answer = build_answer(local, &offer, ice).await?;
     send.write_all(&serde_json::to_vec(answer.envelope())?)
         .await
         .context("send signal answer")?;
@@ -139,9 +327,69 @@ pub(crate) async fn dial_signal(
     endpoint: &Endpoint,
     peer: EndpointAddr,
     handle: &WebRtcHandle,
+    ice: IceProfile,
+) -> Result<()> {
+    Box::pin(dial_signal_with(
+        endpoint,
+        peer,
+        handle,
+        SignalDeadlines::DEFAULT,
+        ice,
+    ))
+    .await
+}
+
+/// [`dial_signal`] with the deadlines spelled out, so tests need not wait them.
+///
+/// # Errors
+/// As [`dial_signal`].
+pub(crate) async fn dial_signal_with(
+    endpoint: &Endpoint,
+    peer: EndpointAddr,
+    handle: &WebRtcHandle,
+    deadlines: SignalDeadlines,
+    ice: IceProfile,
+) -> Result<()> {
+    // Bounded as a whole, because every step below can hang and only some of
+    // them have a budget of their own. Nothing here was bounded before: the old
+    // `JSEP_DEADLINE` wrapped only `complete()`, which runs *after* the answer
+    // is read — so a peer that accepted our connection and then stalled before
+    // writing kept this future alive for the life of the process, and its QUIC
+    // keep-alives meant the connection never idled out either.
+    let remote = peer.id;
+    match n0_future::time::timeout(
+        deadlines.round,
+        // Boxed for the same reason `answer_one` is: the pending session state
+        // is large, and this future is held across a spawn.
+        Box::pin(dial_signal_round(endpoint, peer, handle, deadlines, ice)),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            anyhow::bail!(
+                "webrtc signalling with {remote} exceeded {:?}",
+                deadlines.round
+            )
+        }
+    }
+}
+
+async fn dial_signal_round(
+    endpoint: &Endpoint,
+    peer: EndpointAddr,
+    handle: &WebRtcHandle,
+    deadlines: SignalDeadlines,
+    ice: IceProfile,
 ) -> Result<()> {
     let remote = peer.id;
     let local = endpoint.id();
+
+    // Built before the dial, not after: the answerer's `accept_bi` returns as
+    // soon as our stream opens, and it then sits through our whole gathering
+    // budget waiting to read. Gathering first shortens its read window by
+    // several seconds and costs us nothing.
+    let offer = build_offer(local, handle, ice).await?;
 
     let conn = endpoint
         .connect(peer, MESH_WEBRTC_SIGNAL_ALPN)
@@ -149,16 +397,29 @@ pub(crate) async fn dial_signal(
         .context("dial the mesh WebRTC signal ALPN")?;
     let (mut send, mut recv) = conn.open_bi().await.context("open signal stream")?;
 
-    let offer = build_offer(local, handle).await?;
     send.write_all(&serde_json::to_vec(offer.envelope())?)
         .await
         .context("send signal offer")?;
     send.finish().context("finish signal stream")?;
 
-    let raw = recv
-        .read_to_end(MAX_ENVELOPE_BYTES)
-        .await
-        .context("read signal answer")?;
+    let raw =
+        match n0_future::time::timeout(deadlines.exchange, recv.read_to_end(MAX_ENVELOPE_BYTES))
+            .await
+        {
+            Ok(raw) => raw.context("read signal answer")?,
+            Err(_elapsed) => {
+                // Close explicitly so the answerer wakes now instead of waiting out
+                // its own deadline on a round nobody is listening to any more.
+                conn.close(SIGNAL_ABORTED.into(), b"signalling timed out");
+                if refused_at_cap(&conn) {
+                    anyhow::bail!("{remote} is at its direct-peer cap");
+                }
+                anyhow::bail!(
+                    "no signal answer from {remote} within {:?}",
+                    deadlines.exchange
+                );
+            }
+        };
     let answer: SignalEnvelope = serde_json::from_slice(&raw).context("parse signal answer")?;
 
     offer.with_answer(answer).complete(remote, handle).await?;
@@ -177,7 +438,17 @@ pub(crate) async fn dial_signal(
 /// overlay and is fixed when the mesh is built, while this one is ours and can
 /// move at runtime. Each session costs a peer connection and, in a browser, up
 /// to a full ICE gathering budget — so the ceiling is real, not notional.
-pub(crate) const MAX_DIRECT_PEERS: usize = 16;
+///
+/// Enforced on **both** roles, and counting rounds in flight, by
+/// [`super::admission::SignalAdmission`]. It was neither for a while: only
+/// dialers checked it, so the highest-id peer in a mesh — which by the role
+/// rule never dials — answered everyone who asked, and the header rendered
+/// counts above the ceiling.
+///
+/// Public so the CLI and the browser render the same denominator they enforce.
+/// It used to be written out three times, and the UI read a different copy from
+/// the one the engine checked.
+pub const MAX_DIRECT_PEERS: usize = 16;
 
 /// Start a `WebRTC` negotiation with `peer`, if one is wanted and not already
 /// running. Fire-and-forget: the caller does **not** wait, and the graft
@@ -195,7 +466,7 @@ pub(crate) const MAX_DIRECT_PEERS: usize = 16;
 ///
 /// So: gossip links form immediately, over the relay if that is what is
 /// available, and the direct session is negotiated alongside. Connections
-/// opened *after* attach — unicast, blob — take the WebRTC path. The gossip
+/// opened *after* attach — unicast, blob — take the `WebRTC` path. The gossip
 /// link for that pair may stay relayed, which is a real cost and the reason
 /// `peers_direct` and `peers_gossip` are reported separately rather than as one
 /// number.
@@ -214,53 +485,43 @@ pub(crate) fn negotiate_session(
         // No transport registered: the beacon, or a multihop peer.
         return;
     };
-    if handle.transport().has_session(&peer) {
-        return;
-    }
     // The higher id waits to be dialled, so exactly one offer crosses per pair.
     let local = ctx.endpoint.id();
     if local > peer {
         return;
     }
-    {
-        let inflight = state
-            .webrtc_dialing
-            .lock()
-            .expect("webrtc dialing set poisoned");
-        if inflight.contains(&peer) {
+    // Every other gate — already have a session, already negotiating, at the
+    // cap, cooling off after a refusal — is one synchronous decision under one
+    // lock. That is what lets in-flight rounds count against the cap: this
+    // function is called in a tight loop by `retry_sessions` with nothing
+    // awaited between calls, so a check that read only `session_count()` saw
+    // the same zero twenty times and spawned twenty dials.
+    let guard = match state.webrtc_admission.try_admit(peer, &handle) {
+        Ok(guard) => guard,
+        Err(reason) => {
+            tracing::debug!(target: LOG_TARGET, %peer, ?reason, "not negotiating");
             return;
         }
-    }
-    if handle.transport().session_count() >= MAX_DIRECT_PEERS {
-        tracing::debug!(
-            target: LOG_TARGET,
-            %peer,
-            cap = MAX_DIRECT_PEERS,
-            "direct-peer cap reached; not negotiating"
-        );
-        return;
-    }
+    };
 
-    state
-        .webrtc_dialing
-        .lock()
-        .expect("webrtc dialing set poisoned")
-        .insert(peer);
     let endpoint = ctx.endpoint.clone();
-    let inflight = std::sync::Arc::clone(&state.webrtc_dialing);
-    n0_future::task::spawn(async move {
-        let outcome = dial_signal(&endpoint, addr, &handle).await;
-        // Clear the marker on *both* paths. A failed round must be retryable —
-        // ICE fails for transient reasons all the time — and the next
-        // `PeerInfo` re-flood is what retries it.
-        inflight
-            .lock()
-            .expect("webrtc dialing set poisoned")
-            .remove(&peer);
-        if let Err(error) = outcome {
+    let admission = state.webrtc_admission.clone();
+    let ice = state.webrtc_ice;
+    let task = n0_future::task::spawn(async move {
+        // Released by `Drop`, so the slot comes back whether this returns, is
+        // dropped, or is aborted at shutdown. The set this replaced was cleared
+        // by a statement at the end of the task — which a task that never
+        // finishes never reaches, leaving the peer marked in-flight forever and
+        // skipped by every later retry.
+        let _guard = guard;
+        if let Err(error) = Box::pin(dial_signal(&endpoint, addr, &handle, ice)).await {
+            if error.to_string().contains("direct-peer cap") {
+                admission.note_refused(peer);
+            }
             tracing::debug!(target: LOG_TARGET, %peer, %error, "webrtc offer failed");
         }
     });
+    state.webrtc_admission.track(peer, task.abort_handle());
 }
 
 // ── Per-target JSEP ───────────────────────────────────────────────────────
@@ -273,7 +534,9 @@ pub(crate) fn negotiate_session(
 // `--no-default-features` *native* build still has str0m, not the browser hub.
 #[cfg(not(target_arch = "wasm32"))]
 mod backend {
-    use super::{Context, EndpointId, JSEP_DEADLINE, Result, SignalEnvelope, WebRtcHandle};
+    use super::{
+        Context, EndpointId, IceProfile, JSEP_DEADLINE, Result, SignalEnvelope, WebRtcHandle,
+    };
     use fofoca_iroh_webrtc_transport::{
         IceConfig, PendingAnswer, PendingOffer, answer_with, offer_with,
     };
@@ -310,8 +573,12 @@ mod backend {
         }
     }
 
-    pub(super) async fn build_offer(local: EndpointId, _handle: &WebRtcHandle) -> Result<Offer> {
-        let ice = IceConfig::default();
+    pub(super) async fn build_offer(
+        local: EndpointId,
+        _handle: &WebRtcHandle,
+        profile: IceProfile,
+    ) -> Result<Offer> {
+        let ice = ice_config(profile);
         let (pending, envelope) = offer_with(local, &ice)
             .await
             .context("build WebRTC offer")?;
@@ -346,8 +613,22 @@ mod backend {
         }
     }
 
-    pub(super) async fn build_answer(local: EndpointId, offer: &SignalEnvelope) -> Result<Answer> {
-        let ice = IceConfig::default();
+    /// Host candidates only when the mesh is loopback: `IceConfig::default()`
+    /// queries two public STUN servers, which a loopback mesh promises not to.
+    fn ice_config(profile: IceProfile) -> IceConfig {
+        if profile.host_only {
+            IceConfig::host_only()
+        } else {
+            IceConfig::default()
+        }
+    }
+
+    pub(super) async fn build_answer(
+        local: EndpointId,
+        offer: &SignalEnvelope,
+        profile: IceProfile,
+    ) -> Result<Answer> {
+        let ice = ice_config(profile);
         let (pending, envelope) = answer_with(local, offer, &ice)
             .await
             .context("build WebRTC answer")?;
@@ -357,7 +638,7 @@ mod backend {
 
 #[cfg(target_arch = "wasm32")]
 mod backend {
-    use super::{Context, EndpointId, Result, SignalEnvelope, WebRtcHandle};
+    use super::{Context, EndpointId, IceProfile, Result, SignalEnvelope, WebRtcHandle};
     use fofoca_iroh_webrtc_transport::{
         BrowserPendingAnswer, BrowserPendingOffer, IceServers, browser_answer, browser_offer,
     };
@@ -403,7 +684,13 @@ mod backend {
         }
     }
 
-    pub(super) async fn build_offer(local: EndpointId, _handle: &WebRtcHandle) -> Result<Offer> {
+    /// `_profile` is ignored: a tab is never a loopback peer — it has no
+    /// loopback peers to reach — so there is no host-only case here.
+    pub(super) async fn build_offer(
+        local: EndpointId,
+        _handle: &WebRtcHandle,
+        _profile: IceProfile,
+    ) -> Result<Offer> {
         let ice = IceServers::with_turn_fallback().await;
         let (pending, envelope) = browser_offer(local, &ice)
             .await
@@ -440,7 +727,11 @@ mod backend {
         }
     }
 
-    pub(super) async fn build_answer(local: EndpointId, offer: &SignalEnvelope) -> Result<Answer> {
+    pub(super) async fn build_answer(
+        local: EndpointId,
+        offer: &SignalEnvelope,
+        _profile: IceProfile,
+    ) -> Result<Answer> {
         let ice = IceServers::with_turn_fallback().await;
         let (pending, envelope) = browser_answer(local, offer, &ice)
             .await
@@ -470,13 +761,298 @@ pub(crate) fn retry_sessions(
     }
     // Collected first: `negotiate_session` needs `&mut state`, so the borrow of
     // `peer_endpoints` cannot be held across the calls.
-    let peers: Vec<EndpointId> = state
+    let mut peers: Vec<EndpointId> = state
         .peer_endpoints
         .values()
         .copied()
         .filter(|peer| *peer != ctx.rendezvous_id)
         .collect();
+    // Sorted because the cap now bites here: in a mesh larger than the ceiling
+    // this pass decides *which* peers get direct sessions, and `HashMap`
+    // iteration order would make that differ run to run on one machine.
+    peers.sort_unstable();
     for peer in peers {
         negotiate_session(state, ctx, peer, EndpointAddr::new(peer));
+    }
+}
+
+// Host-only: two real loopback endpoints and a tokio runtime. The logic under
+// test is written once for both targets, but a browser cannot bind an endpoint.
+//
+// These are in-src rather than in `tests/` because `WebRtcSignalAcceptor` is
+// `pub(crate)` — and it should stay that way. Before them this whole plane
+// (the ALPN, the acceptor, the dialer, the retry tick) had no coverage
+// anywhere in the workspace: `fofoca-iroh-webrtc-transport`'s loopback test
+// hands envelopes over in memory, and `agent-share`'s tests exercise the
+// *share's* signal ALPN, not this one.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use std::time::Duration;
+
+    use fofoca_iroh_webrtc_transport::WebRtcTransport;
+    use iroh::protocol::Router;
+    use iroh::{RelayMode, SecretKey, endpoint::presets};
+
+    use super::*;
+
+    /// Short enough that a test finishes, long enough that a loopback dial and
+    /// a QUIC handshake comfortably fit inside it.
+    fn quick() -> SignalDeadlines {
+        SignalDeadlines {
+            exchange: Duration::from_millis(400),
+            round: Duration::from_millis(900),
+        }
+    }
+
+    /// Offline: loopback only, no relay, no address lookup.
+    async fn endpoint() -> (Endpoint, WebRtcHandle) {
+        let key = SecretKey::generate();
+        let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .secret_key(key)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .add_custom_transport(handle.transport())
+            .bind()
+            .await
+            .expect("bind loopback endpoint");
+        (endpoint, handle)
+    }
+
+    fn serve(endpoint: &Endpoint, handle: &WebRtcHandle, admission: &SignalAdmission) -> Router {
+        Router::builder(endpoint.clone())
+            .accept(
+                MESH_WEBRTC_SIGNAL_ALPN,
+                WebRtcSignalAcceptor::new(
+                    handle.clone(),
+                    endpoint.id(),
+                    admission.clone(),
+                    // Host candidates only: these tests must not touch STUN.
+                    IceProfile { host_only: true },
+                )
+                .with_deadlines(quick()),
+            )
+            .spawn()
+    }
+
+    /// Wait for `check` to hold, or give up. Polling beats a fixed sleep: the
+    /// release happens on a spawned task's drop, which has no completion signal
+    /// to await.
+    async fn until(mut check: impl FnMut() -> bool) -> bool {
+        for _ in 0..100 {
+            if check() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        check()
+    }
+
+    /// A peer that connects and never opens a stream must not pin the answer
+    /// task, and must not pin its admission slot either.
+    ///
+    /// Before the deadline and the guard, `answer_one` blocked on `accept_bi`
+    /// forever — the peer's QUIC keep-alives meant the connection never idled
+    /// out — and the task was detached from the Router's `JoinSet`, so nothing
+    /// reaped it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_that_never_opens_a_stream_is_released() {
+        let (server, server_hub) = endpoint().await;
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let router = serve(&server, &server_hub, &admission);
+
+        let (client, _client_hub) = endpoint().await;
+        let conn = client
+            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+            .await
+            .expect("dial the signal ALPN");
+        assert!(
+            until(|| admission.in_flight() == 1).await,
+            "the offer should have been admitted"
+        );
+
+        // Never open a bi-stream; just hold the connection open.
+        assert!(
+            until(|| admission.in_flight() == 0).await,
+            "a stalled offer must release its slot on the exchange deadline"
+        );
+        assert_eq!(server_hub.session_count(), 0);
+
+        conn.close(0u32.into(), b"done");
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// One peer, many connections, one task.
+    ///
+    /// Admission is keyed by the TLS-proven remote id and happens *before* the
+    /// spawn, so a peer cannot multiply our task count by reconnecting. It used
+    /// to be able to: every connection spawned its own detached task holding
+    /// its own `Connection`, with nothing bounding either.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn many_connections_from_one_peer_yield_one_task() {
+        let (server, server_hub) = endpoint().await;
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let router = serve(&server, &server_hub, &admission);
+
+        let (client, _client_hub) = endpoint().await;
+        let mut conns = Vec::new();
+        for _ in 0..5 {
+            conns.push(
+                client
+                    .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+                    .await
+                    .expect("dial the signal ALPN"),
+            );
+        }
+
+        // Give every accept a chance to run, then assert the ceiling held
+        // throughout rather than only at the end.
+        for _ in 0..12 {
+            assert!(
+                admission.in_flight() <= 1,
+                "one peer must never hold more than one slot"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        for conn in conns {
+            conn.close(0u32.into(), b"done");
+        }
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// At the ceiling, the answerer refuses before doing any JSEP work, and
+    /// says *why* with a distinct close code so the dialer can back off rather
+    /// than re-offer every tick.
+    ///
+    /// A cap of zero is the cheap way to stand at the ceiling; the arithmetic
+    /// (`sessions + in-flight >= cap`) is the same at sixteen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_offer_at_the_cap_is_refused_with_the_cap_code() {
+        let (server, server_hub) = endpoint().await;
+        let admission = SignalAdmission::new(0);
+        let router = serve(&server, &server_hub, &admission);
+
+        let (client, _client_hub) = endpoint().await;
+        let conn = client
+            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+            .await
+            .expect("dial the signal ALPN");
+
+        let reason = tokio::time::timeout(Duration::from_secs(5), conn.closed())
+            .await
+            .expect("the refusal must be prompt — no gathering should have happened");
+        match reason {
+            iroh::endpoint::ConnectionError::ApplicationClosed(close) => {
+                assert_eq!(
+                    close.error_code.into_inner(),
+                    u64::from(CAP_REFUSED),
+                    "expected the at-cap close code"
+                );
+            }
+            other @ (iroh::endpoint::ConnectionError::VersionMismatch
+            | iroh::endpoint::ConnectionError::TransportError(_)
+            | iroh::endpoint::ConnectionError::ConnectionClosed(_)
+            | iroh::endpoint::ConnectionError::Reset
+            | iroh::endpoint::ConnectionError::TimedOut
+            | iroh::endpoint::ConnectionError::LocallyClosed
+            | iroh::endpoint::ConnectionError::CidsExhausted) => {
+                panic!("expected an application close, got {other:?}")
+            }
+        }
+        assert_eq!(server_hub.session_count(), 0);
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// `Router::shutdown` must reach the spawned answer tasks.
+    ///
+    /// They are not in the Router's own `JoinSet` — spawning is deliberate, so
+    /// a multi-second negotiation does not serialize inbound offers, and so the
+    /// browser's `!Send` JSEP future has somewhere to live. `ProtocolHandler`'s
+    /// `shutdown` hook is what replaces that reachability.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn router_shutdown_cancels_rounds_in_flight() {
+        let (server, server_hub) = endpoint().await;
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let router = serve(&server, &server_hub, &admission);
+
+        let (client, _client_hub) = endpoint().await;
+        let conn = client
+            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+            .await
+            .expect("dial the signal ALPN");
+        assert!(
+            until(|| admission.in_flight() == 1).await,
+            "the offer should have been admitted"
+        );
+
+        // Well inside the round deadline, so a pass here is the abort working
+        // and not the timeout firing.
+        tokio::time::timeout(Duration::from_millis(500), router.shutdown())
+            .await
+            .expect("shutdown must not wait out the round deadline")
+            .expect("shutdown");
+        assert!(
+            until(|| admission.in_flight() == 0).await,
+            "an aborted round must give its slot back"
+        );
+
+        conn.close(0u32.into(), b"done");
+        client.close().await;
+    }
+
+    /// The dialer's half: a peer that accepts the connection and reads the
+    /// offer but never answers must not hold the round open forever.
+    ///
+    /// This is the shape that pinned a pair to the relay permanently. Nothing
+    /// in `dial_signal` was bounded — `JSEP_DEADLINE` wrapped only `complete()`,
+    /// which runs after the answer arrives — so the in-flight marker was never
+    /// cleared and every later retry skipped that peer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dial_gives_up_when_the_answer_never_comes() {
+        /// Reads the offer and then says nothing, keeping the connection alive.
+        #[derive(Debug, Clone)]
+        struct BlackHole;
+
+        impl ProtocolHandler for BlackHole {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                let (_send, mut recv) = conn.accept_bi().await?;
+                let _ = recv.read_to_end(MAX_ENVELOPE_BYTES).await;
+                // Hold the connection open, answering nothing.
+                conn.closed().await;
+                Ok(())
+            }
+        }
+
+        let (server, _server_hub) = endpoint().await;
+        let router = Router::builder(server.clone())
+            .accept(MESH_WEBRTC_SIGNAL_ALPN, BlackHole)
+            .spawn();
+
+        let (client, client_hub) = endpoint().await;
+        let started = std::time::Instant::now();
+        let outcome = dial_signal_with(
+            &client,
+            server.addr(),
+            &client_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await;
+
+        assert!(outcome.is_err(), "a silent peer must not succeed");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the dial must give up on its own deadline, not hang: took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(client_hub.session_count(), 0);
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
     }
 }

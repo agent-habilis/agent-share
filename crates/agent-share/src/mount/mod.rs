@@ -24,6 +24,11 @@ pub mod test_support {
     pub use super::live::LiveTree;
     pub use super::produce::serve_established as serve_mount;
     pub use super::scan::scan;
+    /// The two halves of the share's `WebRTC` lane, so a test can drive the real
+    /// ones rather than a hand-rolled copy. The hand-rolled copy in
+    /// `tests/webrtc_mount.rs` is what let the registry-collision bug live: it
+    /// exercised the shape of the lane, not the lane.
+    pub use super::webrtc::{dial_webrtc, serve_signal};
 
     /// Build the producer's tree from a scan, for tests that stand a producer
     /// up by hand. `paths` must stay in the order [`scan`] returned them: a

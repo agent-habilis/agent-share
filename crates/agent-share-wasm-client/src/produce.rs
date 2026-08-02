@@ -4,7 +4,7 @@
 //! full-manifest frames. The accept loop answers the signal ALPN (JSEP
 //! answerer) and the mount ALPN (manifest / read / watch).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -48,8 +48,14 @@ pub struct ShareProducer {
     shared: Shared,
     /// This tab's mesh membership. It also owns the Router serving the share's
     /// own ALPNs, so dropping it stops the share serving.
-    mesh: Option<crate::mesh::MeshPeer>,
-    _endpoint: Endpoint,
+    ///
+    /// Behind a `RefCell` so [`ShareProducer::stop`] can take `&self`. See the
+    /// note there: a `self`-by-value method is a trap through wasm-bindgen.
+    mesh: RefCell<Option<crate::mesh::MeshPeer>>,
+    /// Latched by the first `stop`, so a second one is a no-op rather than a
+    /// concurrent teardown racing the first.
+    stopped: Cell<bool>,
+    endpoint: Endpoint,
     hub: Arc<BrowserHubTransport>,
 }
 
@@ -114,10 +120,16 @@ impl ShareProducer {
                 }),
             ),
         ];
+        // A tab is always publicly reachable or not reachable at all — it has no
+        // mDNS, no DHT, and no loopback peers. Hoisted so the mesh derivation
+        // and the ticket cannot state different reaches: they must agree, or a
+        // viewer derives a mesh the producer is not on.
+        let lookups = LookupOpts::public_preset();
         // One identity for this tab: the mount peer and the mesh peer are the
         // same node, so a viewer counts this producer once rather than twice.
         let mesh = crate::mesh::MeshPeer::join_share_with(
             &secret,
+            &lookups,
             endpoint.clone(),
             handle.clone(),
             protocols,
@@ -130,7 +142,7 @@ impl ShareProducer {
         let ticket = MountTicket {
             addr: endpoint.addr(),
             secret,
-            lookups: LookupOpts::public_preset(),
+            lookups,
             flags: 0,
         };
         let ticket_str = ticket.encode();
@@ -138,8 +150,9 @@ impl ShareProducer {
         Ok(ShareProducer {
             ticket: ticket_str,
             shared,
-            mesh: Some(mesh),
-            _endpoint: endpoint,
+            mesh: RefCell::new(Some(mesh)),
+            stopped: Cell::new(false),
+            endpoint,
             hub,
         })
     }
@@ -199,6 +212,7 @@ impl ShareProducer {
     #[wasm_bindgen(getter)]
     pub fn peers_gossip(&self) -> u32 {
         self.mesh
+            .borrow()
             .as_ref()
             .map_or(0, crate::mesh::MeshPeer::peers_gossip)
     }
@@ -208,6 +222,7 @@ impl ShareProducer {
     #[wasm_bindgen(getter)]
     pub fn peers_direct(&self) -> u32 {
         self.mesh
+            .borrow()
             .as_ref()
             .map_or(0, crate::mesh::MeshPeer::peers_direct)
     }
@@ -216,24 +231,44 @@ impl ShareProducer {
     #[wasm_bindgen(getter)]
     pub fn max_direct(&self) -> u32 {
         self.mesh
+            .borrow()
             .as_ref()
             .map_or(0, crate::mesh::MeshPeer::max_direct)
     }
 
-    /// Stop accepting peers. Idempotent.
+    /// Stop accepting peers. Idempotent, and that is load-bearing.
     ///
     /// Leaving the mesh is what stops the share serving now: the mesh's Router
     /// owns the accept loop for this tab's ALPNs, so dropping it is the
     /// shutdown. It also broadcasts `Left`, which the old stop channel never
     /// did — peers used to wait out a silence timeout.
-    pub async fn stop(mut self) -> Result<(), JsValue> {
-        if let Some(mesh) = self.mesh.take() {
+    ///
+    /// `&self`, not `self`. A `self`-by-value method compiles to a
+    /// `__destroy_into_raw()` in the wasm-bindgen glue, which nulls the JS
+    /// object's pointer — so a second call passes `0` to Rust, panics with
+    /// "null pointer passed to rust", and, because this crate builds with
+    /// `panic = "abort"`, traps the whole wasm instance. Every later call into
+    /// the module then throws "unreachable executed". Two ordinary UI paths
+    /// reach a second call: double-clicking Stop, and clicking Stop then
+    /// changing the hash before the await resolves.
+    ///
+    /// The latch is taken synchronously, before the first await, so a second
+    /// call cannot tear down concurrently with the first either.
+    pub async fn stop(&self) -> Result<(), JsValue> {
+        if self.stopped.replace(true) {
+            return Ok(());
+        }
+        // Scoped so the `RefMut` is dropped before the await — a borrow held
+        // across a suspension point is how single-threaded code still manages
+        // to hit `already borrowed`.
+        let mesh = self.mesh.borrow_mut().take();
+        if let Some(mesh) = mesh {
             mesh.leave().await?;
         }
         // Close live WebRTC sessions before the endpoint: dropping them clears
         // their browser handlers and closes the peer connections.
         self.hub.detach_all();
-        self._endpoint.close().await;
+        self.endpoint.close().await;
         Ok(())
     }
 }
@@ -310,8 +345,9 @@ impl iroh::protocol::ProtocolHandler for SignalHandler {
 #[wasm_bindgen]
 pub struct BenchProducer {
     ticket: String,
-    stop_tx: Option<oneshot::Sender<()>>,
-    _endpoint: Endpoint,
+    stop_tx: RefCell<Option<oneshot::Sender<()>>>,
+    stopped: Cell<bool>,
+    endpoint: Endpoint,
     hub: Arc<BrowserHubTransport>,
 }
 
@@ -379,8 +415,9 @@ impl BenchProducer {
 
         Ok(BenchProducer {
             ticket: ticket.encode(),
-            stop_tx: Some(stop_tx),
-            _endpoint: endpoint,
+            stop_tx: RefCell::new(Some(stop_tx)),
+            stopped: Cell::new(false),
+            endpoint,
             hub,
         })
     }
@@ -390,15 +427,19 @@ impl BenchProducer {
         self.ticket.clone()
     }
 
-    /// Stop accepting peers. Idempotent.
-    pub async fn stop(mut self) -> Result<(), JsValue> {
-        if let Some(tx) = self.stop_tx.take() {
+    /// Stop accepting peers. Idempotent — `&self` for the same reason
+    /// [`ShareProducer::stop`] is; see the note there.
+    pub async fn stop(&self) -> Result<(), JsValue> {
+        if self.stopped.replace(true) {
+            return Ok(());
+        }
+        if let Some(tx) = self.stop_tx.borrow_mut().take() {
             let _ = tx.send(());
         }
         // Close live WebRTC sessions before the endpoint: dropping them clears
         // their browser handlers and closes the peer connections.
         self.hub.detach_all();
-        self._endpoint.close().await;
+        self.endpoint.close().await;
         Ok(())
     }
 }
@@ -628,6 +669,29 @@ async fn serve_signal(
         .read_to_end(MAX_ENVELOPE_BYTES)
         .await
         .map_err(|error| err("read signal offer", &error))?;
+
+    // The mirror of the native producer's refusal. This tab's mount lane and
+    // its mesh lane share one hub, so either can reach a peer first, and the
+    // registry refuses the second session. Say so before paying for a TURN
+    // credential fetch and a full ICE gather that would end in that refusal.
+    if hub.has_session(&remote) {
+        let encoded = serde_json::to_vec(&SignalEnvelope::error(
+            "a WebRTC session with you already exists; dial the custom addr",
+        ))
+        .map_err(|error| err("encode refusal", &error))?;
+        send.write_all(&encoded)
+            .await
+            .map_err(|error| err("send refusal", &error))?;
+        send.finish()
+            .map_err(|error| err("finish signal", &error))?;
+        // Returning closes the connection, so wait for the acknowledgement
+        // first or the offerer reads a connection error instead of the reason.
+        // The answer path below is only safe without this because it then
+        // spends seconds inside `complete()`.
+        let _ = send.stopped().await;
+        return Ok(());
+    }
+
     let offer: SignalEnvelope =
         serde_json::from_slice(&raw).map_err(|error| err("parse signal offer", &error))?;
 

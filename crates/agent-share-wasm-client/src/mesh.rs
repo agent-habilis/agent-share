@@ -18,6 +18,7 @@
 //! every peer pre-registers that identity at a known relay rung. A browser has
 //! no mDNS and no DHT; it does not need them.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -29,19 +30,41 @@ use agent_habilis_mesh::protocol::{
     DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message,
 };
 use agent_habilis_mesh::runtime::{
-    CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh,
+    CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh_with,
     setup_mesh,
 };
 use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
 use wasm_bindgen::prelude::*;
 
-/// The most direct peers a tab will hold sessions with.
+/// The most direct sessions a tab will hold.
 ///
-/// Mirrors the engine's own cap. Each session is one `RTCPeerConnection` plus,
-/// on the way up, a full ICE gathering budget — so this is a real ceiling on a
-/// tab, not a formality.
-const MAX_DIRECT_PEERS: usize = 16;
+/// The engine's own constant, not a copy: this is both the number the tab
+/// enforces and the denominator its header renders, and when they were separate
+/// literals the header could show `18/16`.
+use agent_habilis_mesh::net::MAX_DIRECT_PEERS;
+
+/// A share's lookups, as the engine spells them.
+///
+/// Structurally identical types in two crates, converted by hand in both leaf
+/// crates that see both. `agent-share-proto` stays wasm-clean and
+/// `iroh-base`-only, so it must not depend on the engine just to spare these
+/// ten lines; the CLI carries the same ones.
+fn mesh_lookups(
+    share: &agent_share_proto::lookup::LookupOpts,
+) -> agent_habilis_mesh::protocol::LookupOpts {
+    use agent_habilis_mesh::protocol::RelayChoice as MeshRelay;
+    use agent_share_proto::lookup::RelayChoice as ShareRelay;
+    agent_habilis_mesh::protocol::LookupOpts {
+        mdns: share.mdns,
+        dht: share.dht,
+        relay: match &share.relay {
+            ShareRelay::Disabled => MeshRelay::Disabled,
+            ShareRelay::Pinned => MeshRelay::Pinned,
+            ShareRelay::Custom(urls) => MeshRelay::Custom(urls.clone()),
+        },
+    }
+}
 
 /// Presence-only driver: enough to be a member, nothing more.
 ///
@@ -89,7 +112,10 @@ pub struct MeshPeer {
     /// without a request/response hop into the loop.
     live: Arc<AtomicUsize>,
     hub: Arc<fofoca_iroh_webrtc_transport::BrowserHubTransport>,
-    node: Option<Node<Probe>>,
+    /// Behind a `RefCell` so [`MeshPeer::leave`] can take `&self` — see the
+    /// note there on why a `self`-by-value method is a trap through
+    /// wasm-bindgen.
+    node: RefCell<Option<Node<Probe>>>,
 }
 
 #[wasm_bindgen]
@@ -162,11 +188,12 @@ impl MeshPeer {
     /// mesh's Router rather than a loop of its own.
     pub(crate) async fn join_share_with(
         secret: &[u8; SECRET_LEN],
+        lookups: &agent_share_proto::lookup::LookupOpts,
         endpoint: iroh::Endpoint,
         webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
         protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
     ) -> Result<MeshPeer, JsValue> {
-        let resolved = resolve_share(secret)?;
+        let resolved = resolve_share(secret, lookups)?;
         spawn_peer_inner(
             resolved,
             TransportOpts::default(),
@@ -178,9 +205,10 @@ impl MeshPeer {
 
     pub(crate) async fn join_share(
         secret: &[u8; SECRET_LEN],
+        lookups: &agent_share_proto::lookup::LookupOpts,
         shared: Option<(iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
     ) -> Result<MeshPeer, JsValue> {
-        let resolved = resolve_share(secret)?;
+        let resolved = resolve_share(secret, lookups)?;
         spawn_peer(resolved, TransportOpts::default(), shared).await
     }
 
@@ -215,10 +243,17 @@ impl MeshPeer {
     /// Leave the mesh: broadcast `Left` so peers drop us now rather than on a
     /// silence timeout, then wind the loop down. Idempotent.
     ///
+    /// `&self`, not `self`: a `self`-by-value method compiles to a
+    /// `__destroy_into_raw()` in the wasm-bindgen glue, so a second call from
+    /// JS passes a null pointer and traps the whole wasm instance. The lab
+    /// page calls this directly.
+    ///
     /// # Errors
     /// The event loop returned an error while shutting down.
-    pub async fn leave(mut self) -> Result<(), JsValue> {
-        if let Some(node) = self.node.take() {
+    pub async fn leave(&self) -> Result<(), JsValue> {
+        // Scoped: the `RefMut` must not be alive across the await below.
+        let node = self.node.borrow_mut().take();
+        if let Some(node) = node {
             node.leave()
                 .await
                 .map_err(|error| err("leave mesh", &error))?;
@@ -233,8 +268,13 @@ impl MeshPeer {
 ///
 /// Hashes before deriving: the engine carries the topic string into its state
 /// file and user-facing lines, so it must not be the bearer secret.
-fn resolve_share(secret: &[u8; SECRET_LEN]) -> Result<Resolved, JsValue> {
-    let mesh = derive_topic_mesh(&share_mesh_key(secret))
+fn resolve_share(
+    secret: &[u8; SECRET_LEN],
+    lookups: &agent_share_proto::lookup::LookupOpts,
+) -> Result<Resolved, JsValue> {
+    // The share's own reach, from the ticket both ends read — not the public
+    // preset. See `derive_topic_mesh_with`.
+    let mesh = derive_topic_mesh_with(&share_mesh_key(secret), mesh_lookups(lookups))
         .map_err(|error| err("derive the share mesh", &error))?;
     let target = mesh
         .to_string()
@@ -317,7 +357,7 @@ async fn spawn_peer_inner(
         nickname: author.to_string(),
         live,
         hub,
-        node: Some(node),
+        node: RefCell::new(Some(node)),
     })
 }
 

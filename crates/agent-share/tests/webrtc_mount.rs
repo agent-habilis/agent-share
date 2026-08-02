@@ -213,3 +213,158 @@ async fn read_range(
     recv.read_exact(&mut data).await.expect("read body");
     data
 }
+
+// ── the two lanes share one registry ────────────────────────────────────────
+//
+// Since the share and the mesh were put on one endpoint, the mount lane and the
+// mesh lane attach into the same session registry, and a registry that already
+// holds a session for a peer refuses a second one. These pin the behaviour that
+// makes that survivable: ask the registry first, defer to it after.
+
+/// Attach a real session for the pair, out of band — standing in for whatever
+/// the mesh lane would have done.
+async fn attach_pair(
+    offerer_id: iroh::EndpointId,
+    offerer: &WebRtcHandle,
+    answerer_id: iroh::EndpointId,
+    answerer: &WebRtcHandle,
+) {
+    let (pending_offer, offer) = offer_with(offerer_id, &ice()).await.expect("build offer");
+    let (pending_answer, answer) = answer_with(answerer_id, &offer, &ice())
+        .await
+        .expect("build answer");
+    let (offerer_session, answerer_session) = tokio::join!(
+        Box::pin(pending_offer.complete(&answer, Duration::from_secs(20))),
+        Box::pin(pending_answer.complete(Duration::from_secs(20))),
+    );
+    offerer
+        .attach(answerer_id, offerer_session.expect("offerer session"))
+        .expect("attach offerer");
+    answerer
+        .attach(offerer_id, answerer_session.expect("answerer session"))
+        .expect("attach answerer");
+}
+
+/// With a session already in the registry, `dial_webrtc` must hand back the
+/// custom-addr-only address without signalling at all.
+///
+/// The counter is the assertion that matters. Before this, losing the race to
+/// the mesh cost a full 20s JSEP round that ended in "a live session already
+/// exists" and dropped the mount to relay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dial_webrtc_reuses_a_session_another_lane_attached() {
+    let (producer, producer_webrtc) =
+        endpoint_with_webrtc(vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()]).await;
+    let (consumer, consumer_webrtc) = endpoint_with_webrtc(Vec::new()).await;
+    let producer_id = producer.id();
+    let consumer_id = consumer.id();
+
+    let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let accept_endpoint = producer.clone();
+    let counted = Arc::clone(&rounds);
+    let server = tokio::spawn(async move {
+        while let Some(incoming) = accept_endpoint.accept().await {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let Ok(conn) = incoming.await else { continue };
+            conn.close(0u32.into(), b"unexpected");
+        }
+    });
+
+    // Boxed: two full JSEP rounds' worth of str0m state on this future.
+    Box::pin(attach_pair(
+        consumer_id,
+        &consumer_webrtc,
+        producer_id,
+        &producer_webrtc,
+    ))
+    .await;
+
+    let addr = Box::pin(agent_share::test_support::dial_webrtc(
+        &consumer,
+        producer.addr(),
+        &consumer_webrtc,
+        &ice(),
+    ))
+    .await
+    .expect("dial_webrtc must succeed against an existing session");
+
+    assert_eq!(addr.id, producer_id);
+    let only_webrtc = addr
+        .addrs
+        .iter()
+        .all(|addr| matches!(addr, TransportAddr::Custom(_)));
+    assert!(only_webrtc, "must return a webrtc-only address: {addr:?}");
+    assert_eq!(
+        rounds.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no signalling connection should have been opened at all"
+    );
+
+    server.abort();
+    consumer.close().await;
+    producer.close().await;
+}
+
+/// The answering half: a producer that already holds a session refuses the
+/// round with an `Error` envelope, before spending anything on ICE.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serve_signal_refuses_when_a_session_already_exists() {
+    let (producer, producer_webrtc) = endpoint_with_webrtc(vec![WEBRTC_SIGNAL_ALPN.to_vec()]).await;
+    let (consumer, consumer_webrtc) = endpoint_with_webrtc(Vec::new()).await;
+    let producer_id = producer.id();
+    let consumer_id = consumer.id();
+    let producer_addr = producer.addr();
+
+    // Boxed: two full JSEP rounds' worth of str0m state on this future.
+    Box::pin(attach_pair(
+        consumer_id,
+        &consumer_webrtc,
+        producer_id,
+        &producer_webrtc,
+    ))
+    .await;
+
+    let accept_endpoint = producer.clone();
+    let accept_webrtc = producer_webrtc.clone();
+    let server = tokio::spawn(async move {
+        let Some(incoming) = accept_endpoint.accept().await else {
+            return;
+        };
+        let conn = incoming.await.expect("accept signal connection");
+        agent_share::test_support::serve_signal(&conn, producer_id, &accept_webrtc, &ice())
+            .await
+            .expect("serve_signal must not error on a refusal");
+    });
+
+    // Dial by hand: `dial_webrtc` would short-circuit on its own `has_session`
+    // check, and the point here is what the *answerer* puts on the wire.
+    let signal = consumer
+        .connect(producer_addr, WEBRTC_SIGNAL_ALPN)
+        .await
+        .expect("dial signal ALPN");
+    let (mut send, mut recv) = signal.open_bi().await.expect("open signal stream");
+    let (_pending, offer) = offer_with(consumer_id, &ice()).await.expect("build offer");
+    send.write_all(&serde_json::to_vec(&offer).expect("encode offer"))
+        .await
+        .expect("send offer");
+    send.finish().expect("finish");
+    let raw = recv
+        .read_to_end(MAX_ENVELOPE_BYTES)
+        .await
+        .expect("read reply");
+    let reply: SignalEnvelope = serde_json::from_slice(&raw).expect("parse reply");
+
+    assert!(
+        matches!(reply, SignalEnvelope::Error { .. }),
+        "expected a refusal, got {reply:?}"
+    );
+    assert!(
+        producer_webrtc.has_session(&consumer_id),
+        "the existing session must be untouched"
+    );
+
+    signal.close(0u32.into(), b"done");
+    server.await.expect("server task");
+    consumer.close().await;
+    producer.close().await;
+}

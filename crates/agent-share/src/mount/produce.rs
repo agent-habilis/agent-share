@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
-use iroh::{Endpoint, EndpointId, SecretKey};
+use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::{Endpoint, SecretKey};
 use rand::RngCore;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::broadcast;
@@ -15,12 +15,12 @@ use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 
 use super::MountTicket;
 use super::ReadStatus;
+use super::WEBRTC_SIGNAL_ALPN;
 use super::live::LiveTree;
 use super::{
     MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN,
     wait_online,
 };
-use super::{WEBRTC_SIGNAL_ALPN, serve_signal};
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 
 /// Producer: share `dir` read-only. Scans at startup, then rescans whenever
@@ -117,6 +117,10 @@ pub(crate) async fn serve(
     let mut fallback_router = None;
     let share_mesh = match super::mesh::join(
         &secret,
+        // Read off the ticket, not off the local `lookups` binding that `bind`
+        // consumed. Same value, but this way the invariant — every peer of this
+        // share derives the mesh from what the ticket says — is literal.
+        &ticket.lookups,
         agent_habilis_mesh::runtime::InjectedEndpoint {
             endpoint: endpoint.clone(),
             webrtc: webrtc.clone(),
@@ -198,26 +202,6 @@ pub(super) async fn bind(
         flags: 0,
     };
     Ok((endpoint, ticket, secret, webrtc))
-}
-
-/// Route one inbound connection by the ALPN it negotiated.
-///
-/// The two protocols have opposite shapes — signalling is one short exchange
-/// then done, mounting is long-lived and stream-per-request — so they are
-/// separated here rather than multiplexed inside one handler.
-async fn accept_one(
-    incoming: Incoming,
-    secret: [u8; SECRET_LEN],
-    tree: Arc<LiveTree>,
-    local_id: EndpointId,
-    webrtc: &WebRtcHandle,
-    ice: &IceConfig,
-) -> Result<()> {
-    let conn = incoming.await.context("incoming connection failed")?;
-    if conn.alpn() == WEBRTC_SIGNAL_ALPN {
-        return serve_signal(&conn, local_id, webrtc, ice).await;
-    }
-    serve_established(conn, secret, tree).await
 }
 
 /// Serve every bi-stream on an established mount connection as an

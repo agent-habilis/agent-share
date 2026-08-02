@@ -17,11 +17,23 @@
 //! The relay is a rendezvous, not a transport: it carries the SDP exchange and
 //! never a byte of file data. When ICE fails there is no second data path — the
 //! dial fails loudly rather than quietly relaying.
+//!
+//! # One registry, two lanes
+//!
+//! Since the share and the mesh were put on one endpoint, this lane and the
+//! mesh's own signalling lane attach into the *same* session registry. Either
+//! can reach a peer first, and a registry that already holds a session for a
+//! peer refuses a second one. So both roles here ask the registry before
+//! negotiating and defer to it afterwards: a session is a session, whichever
+//! lane built it, and `custom_addr(remote)` routes over it either way.
+//!
+//! Without that, losing the race cost a full JSEP round and then dropped the
+//! mount to relay — with a perfectly good `WebRTC` channel sitting unused.
 
 use anyhow::{Context, Result};
 use fofoca_iroh_webrtc_transport::{
-    IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, answer_with, custom_addr,
-    offer_with,
+    IceConfig, MAX_ENVELOPE_BYTES, NegotiatedSession, SignalEnvelope, WebRtcHandle, answer_with,
+    custom_addr, offer_with,
 };
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
@@ -34,6 +46,38 @@ pub(crate) use agent_share_proto::framing::WEBRTC_SIGNAL_ALPN;
 /// DTLS/SCTP handshake, and a false timeout costs the whole connection.
 const JSEP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// An address that reaches `remote` over the data channel and nothing else.
+///
+/// Listing IP or relay paths alongside it would let the mount connection pick
+/// one, which is the whole thing this lane exists to avoid.
+pub(crate) fn webrtc_only_addr(remote: EndpointId) -> EndpointAddr {
+    EndpointAddr::from_parts(remote, [TransportAddr::Custom(custom_addr(remote))])
+}
+
+/// Attach `session`, or accept the one another lane attached first.
+///
+/// A duplicate is not a failure: the registry already holds a usable channel to
+/// `remote`, which is all the mount needs. The session we just negotiated is
+/// dropped, and the registry aborts its driver on that path, so nothing leaks.
+///
+/// Keyed on the registry's *state* rather than on the error's identity — the
+/// state is what licenses the reuse, and it stays correct even if the attach
+/// failed for a reason nobody anticipated.
+fn attach_or_reuse(
+    handle: &WebRtcHandle,
+    remote: EndpointId,
+    session: NegotiatedSession,
+) -> Result<()> {
+    match handle.attach(remote, session) {
+        Ok(()) => Ok(()),
+        Err(error) if handle.has_session(&remote) => {
+            tracing::debug!(%remote, %error, "another lane attached first; reusing that session");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Serve one inbound signalling connection: read the offer, answer it, attach
 /// the resulting session to the transport.
 ///
@@ -45,7 +89,7 @@ const JSEP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 /// # Errors
 /// The stream carries no readable envelope, the SDP is unusable, or the
 /// negotiation does not complete before [`JSEP_DEADLINE`].
-pub(crate) async fn serve_signal(
+pub async fn serve_signal(
     conn: &Connection,
     local: EndpointId,
     handle: &WebRtcHandle,
@@ -57,6 +101,33 @@ pub(crate) async fn serve_signal(
         .read_to_end(MAX_ENVELOPE_BYTES)
         .await
         .context("read signal offer")?;
+
+    // Refuse before gathering, not after. A session already exists — the mesh
+    // lane got here first — so a full STUN round would end in a refused attach
+    // anyway. Say so now, so the offerer stops spending its ICE budget and
+    // dials the channel it can already reach us on.
+    //
+    // Refuse rather than tear down and renegotiate: dropping a working mesh
+    // session to serve a mount dial is strictly worse, and the mount does not
+    // need its own session to begin with.
+    if handle.has_session(&remote) {
+        send.write_all(&serde_json::to_vec(&SignalEnvelope::error(
+            "a WebRTC session with you already exists; dial the custom addr",
+        ))?)
+        .await
+        .context("send signal refusal")?;
+        send.finish().context("finish signal stream")?;
+        // Wait for the acknowledgement before returning, because returning is
+        // what closes the connection. The answer path below gets away without
+        // this only by accident — it spends the next several seconds inside
+        // `complete()`, which is long enough for the flush. A refusal has no
+        // such pause, and the offerer saw `ConnectionLost` instead of the
+        // reason, which is the failure mode the refusal exists to replace.
+        let _ = send.stopped().await;
+        tracing::debug!(%remote, "refused a duplicate signal round; a session already exists");
+        return Ok(());
+    }
+
     let offer: SignalEnvelope = serde_json::from_slice(&raw).context("parse signal offer")?;
 
     let (pending, answer) = answer_with(local, &offer, ice)
@@ -72,7 +143,8 @@ pub(crate) async fn serve_signal(
     let session = Box::pin(pending.complete(JSEP_DEADLINE))
         .await
         .context("complete WebRTC answer")?;
-    handle.attach(remote, session).context("attach session")?;
+    // Tolerant of the narrow race where the other lane landed during our round.
+    attach_or_reuse(handle, remote, session).context("attach session")?;
     tracing::debug!(%remote, "webrtc lane attached (answerer)");
     Ok(())
 }
@@ -87,7 +159,7 @@ pub(crate) async fn serve_signal(
 /// # Errors
 /// The signalling dial fails, the producer refuses, or the negotiation does
 /// not complete before [`JSEP_DEADLINE`].
-pub(crate) async fn dial_webrtc(
+pub async fn dial_webrtc(
     endpoint: &Endpoint,
     producer: EndpointAddr,
     handle: &WebRtcHandle,
@@ -95,6 +167,15 @@ pub(crate) async fn dial_webrtc(
 ) -> Result<EndpointAddr> {
     let remote = producer.id;
     let local = endpoint.id();
+
+    // The other lane may already have a channel to this peer. It is the same
+    // registry and the same `custom_addr`, so there is nothing to negotiate —
+    // skipping the round here is what turns a lost race from a 20s stall
+    // ending in relay into a no-op.
+    if handle.has_session(&remote) {
+        tracing::debug!(%remote, "reusing the live WebRTC session; skipping JSEP");
+        return Ok(webrtc_only_addr(remote));
+    }
 
     let conn = endpoint
         .connect(producer, WEBRTC_SIGNAL_ALPN)
@@ -114,17 +195,26 @@ pub(crate) async fn dial_webrtc(
         .context("read signal answer")?;
     let answer: SignalEnvelope = serde_json::from_slice(&raw).context("parse signal answer")?;
 
+    // An explicit refusal, which the answerer now sends when it already holds a
+    // session with us. Handled here rather than left to `complete`, which would
+    // report it as "expected an answer envelope" and send the mount to relay.
+    if let SignalEnvelope::Error { reason, .. } = &answer {
+        conn.close(0u32.into(), b"jsep refused");
+        if handle.has_session(&remote) {
+            tracing::debug!(%remote, "producer refused a duplicate round; using the session we hold");
+            return Ok(webrtc_only_addr(remote));
+        }
+        anyhow::bail!("producer refused WebRTC signalling: {reason}");
+    }
+
     let session = Box::pin(pending.complete(&answer, JSEP_DEADLINE))
         .await
         .context("complete WebRTC offer")?;
-    handle.attach(remote, session).context("attach session")?;
+    attach_or_reuse(handle, remote, session).context("attach session")?;
 
     // Signalling is done; the data rides its own connection.
     conn.close(0u32.into(), b"jsep done");
     tracing::debug!(%remote, "webrtc lane attached (offerer)");
 
-    Ok(EndpointAddr::from_parts(
-        remote,
-        [TransportAddr::Custom(custom_addr(remote))],
-    ))
+    Ok(webrtc_only_addr(remote))
 }

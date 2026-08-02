@@ -43,6 +43,23 @@
 //! backend has no TURN client yet.
 
 mod addr;
+// Consumed by the browser backend. The host backend has its own equivalent in
+// `host::session`, built the same way for the same reasons — a generation per
+// session, and teardown on drop rather than on a cleanup branch.
+//
+// Compiled in every configuration even so, because this is the only place that
+// logic is *provable*: the browser backend cannot be tested at all (no
+// `RTCPeerConnection` in node, no webdriver in CI), so its decisions were
+// pulled out into a payload-generic type that `cargo test` reaches whatever
+// features are on.
+#[cfg_attr(
+    not(feature = "web"),
+    expect(
+        dead_code,
+        reason = "only the browser backend consumes it; its tests still run"
+    )
+)]
+mod registry;
 mod signaling;
 
 pub use addr::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};
@@ -66,9 +83,10 @@ mod web;
 
 #[cfg(feature = "web")]
 pub use web::{
-    BrowserHubTransport, BrowserRtcTransport, BrowserSession, IceServer, IceServers,
-    PendingAnswer as BrowserPendingAnswer, PendingOffer as BrowserPendingOffer,
-    answer as browser_answer, log_signal_sdps, offer as browser_offer,
+    AttachError, BrowserHubTransport, BrowserRtcTransport, BrowserSession, BrowserSessionGuard,
+    IceServer, IceServers, PendingAnswer as BrowserPendingAnswer,
+    PendingOffer as BrowserPendingOffer, answer as browser_answer, log_signal_sdps,
+    offer as browser_offer,
 };
 
 /// A registered `WebRTC` transport, ready to hand to an iroh endpoint builder.
@@ -115,6 +133,24 @@ impl WebRtcHandle {
     ) -> anyhow::Result<()> {
         self.inner.attach(remote, session)
     }
+
+    /// Whether a usable session for `remote` exists.
+    #[must_use]
+    pub fn has_session(&self, remote: &iroh_base::EndpointId) -> bool {
+        self.inner.has_session(remote)
+    }
+
+    /// How many usable sessions this handle's registry holds.
+    #[must_use]
+    pub fn session_count(&self) -> usize {
+        self.inner.session_count()
+    }
+
+    /// Tear down the session for `remote`, if any.
+    #[must_use]
+    pub fn detach(&self, remote: &iroh_base::EndpointId) -> bool {
+        self.inner.detach(remote)
+    }
 }
 
 #[cfg(all(feature = "web", not(feature = "host")))]
@@ -142,14 +178,36 @@ impl WebRtcHandle {
     /// Prefer calling [`BrowserPendingOffer::complete`] /
     /// [`BrowserPendingAnswer::complete`], which attach themselves; this is
     /// the escape hatch when the session pieces are already in hand.
+    ///
+    /// # Errors
+    /// The peer's slot is already claimed. The handles passed in are closed
+    /// before returning.
     pub fn attach_parts(
         &self,
         remote: iroh_base::EndpointId,
         peer_connection: web_sys::RtcPeerConnection,
         data_channel: web_sys::RtcDataChannel,
         callbacks: Vec<wasm_bindgen::JsValue>,
-    ) -> Result<(), String> {
+    ) -> Result<BrowserSessionGuard, AttachError> {
         self.inner
             .attach(remote, peer_connection, data_channel, callbacks)
+    }
+
+    /// Whether a usable session for `remote` exists.
+    #[must_use]
+    pub fn has_session(&self, remote: &iroh_base::EndpointId) -> bool {
+        self.inner.has_session(remote)
+    }
+
+    /// How many usable sessions this handle's registry holds.
+    #[must_use]
+    pub fn session_count(&self) -> usize {
+        self.inner.session_count()
+    }
+
+    /// Tear down the session for `remote`, if any.
+    #[must_use]
+    pub fn detach(&self, remote: &iroh_base::EndpointId) -> bool {
+        self.inner.detach(remote)
     }
 }

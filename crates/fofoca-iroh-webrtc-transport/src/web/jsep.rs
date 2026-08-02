@@ -251,9 +251,63 @@ impl std::fmt::Debug for BrowserSession {
     }
 }
 
+/// An `RTCPeerConnection` that closes itself unless it is released.
+///
+/// Every early return on the way to a session used to drop an open peer
+/// connection without closing it, leaving a live ICE agent — and, when the
+/// public TURN fallback is in play, a live TURN allocation — for as long as the
+/// tab lives. Failures here are routine by design (ICE fails, a peer vanishes
+/// mid-handshake, the offerer never opens its channel), so "routine" was
+/// leaking.
+///
+/// The newtype goes on the *field* rather than the outer struct because `Drop`
+/// and destructuring `let Self { .. } = self` cannot coexist.
+struct OpenPeerConnection {
+    inner: RtcPeerConnection,
+    armed: bool,
+}
+
+impl OpenPeerConnection {
+    fn new(inner: RtcPeerConnection) -> Self {
+        Self { inner, armed: true }
+    }
+
+    /// Hand the connection to whoever owns its lifetime from here — in
+    /// practice the hub, whose session keepalive closes it on drop.
+    fn release(mut self) -> RtcPeerConnection {
+        self.armed = false;
+        self.inner.clone()
+    }
+}
+
+impl std::ops::Deref for OpenPeerConnection {
+    type Target = RtcPeerConnection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Drop for OpenPeerConnection {
+    fn drop(&mut self) {
+        if self.armed {
+            self.inner.close();
+        }
+    }
+}
+
+impl std::fmt::Debug for OpenPeerConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenPeerConnection")
+            .field("armed", &self.armed)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Offerer state between producing the offer and applying the answer.
 pub struct PendingOffer {
-    peer_connection: RtcPeerConnection,
+    peer_connection: OpenPeerConnection,
     data_channel: RtcDataChannel,
     callbacks: Vec<JsValue>,
 }
@@ -268,7 +322,7 @@ impl std::fmt::Debug for PendingOffer {
 
 /// Answerer state between sending the answer and the channel opening.
 pub struct PendingAnswer {
-    peer_connection: RtcPeerConnection,
+    peer_connection: OpenPeerConnection,
     /// Filled by `ondatachannel` when the remote opens the channel.
     channel_rx: futures::channel::oneshot::Receiver<RtcDataChannel>,
     callbacks: Vec<JsValue>,
@@ -291,8 +345,10 @@ pub async fn offer(
     local: EndpointId,
     ice: &IceServers,
 ) -> Result<(PendingOffer, SignalEnvelope), JsValue> {
-    let peer_connection = RtcPeerConnection::new_with_configuration(&ice.to_configuration())
-        .map_err(|error| js_err("RTCPeerConnection", error))?;
+    let peer_connection = OpenPeerConnection::new(
+        RtcPeerConnection::new_with_configuration(&ice.to_configuration())
+            .map_err(|error| js_err("RTCPeerConnection", error))?,
+    );
     // Unreliable + unordered: the channel carries QUIC datagrams, and QUIC
     // already owns loss recovery and congestion control. Reliable ordered
     // SCTP underneath it would stack a second retransmission loop and
@@ -367,10 +423,20 @@ impl PendingOffer {
 
         // Attach before Open so inbound QUIC Initials are not lost between
         // the channel opening and the onmessage handler being installed.
-        let pc = peer_connection.clone();
-        hub.attach(remote, peer_connection, data_channel.clone(), callbacks)
-            .map_err(|error| JsValue::from_str(&error))?;
+        //
+        // The guard is what makes that early attach safe. If the channel never
+        // opens — ICE failed, or the deadline passed while it was still
+        // Connecting — dropping the guard on the way out removes the session
+        // and closes the handles. Without it the entry stayed forever, because
+        // a channel that never opened never fires `onclose` either: it counted
+        // toward the direct-peer total, answered `has_session` so the pair was
+        // never retried, and told QUIC it was a valid send address.
+        let pc = peer_connection.release();
+        let guard = hub
+            .attach(remote, pc.clone(), data_channel.clone(), callbacks)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         wait_channel_open(&data_channel, &pc).await?;
+        guard.commit();
         Ok(BrowserSession { remote })
     }
 }
@@ -389,8 +455,10 @@ pub async fn answer(
         return Err(JsValue::from_str("expected an offer envelope"));
     };
 
-    let peer_connection = RtcPeerConnection::new_with_configuration(&ice.to_configuration())
-        .map_err(|error| js_err("RTCPeerConnection", error))?;
+    let peer_connection = OpenPeerConnection::new(
+        RtcPeerConnection::new_with_configuration(&ice.to_configuration())
+            .map_err(|error| js_err("RTCPeerConnection", error))?,
+    );
 
     let (channel_tx, channel_rx) = futures::channel::oneshot::channel::<RtcDataChannel>();
     let channel_tx = std::cell::RefCell::new(Some(channel_tx));
@@ -476,11 +544,14 @@ impl PendingAnswer {
         };
 
         // Attach before Open — same race as the offerer path: the peer may
-        // dial the mount ALPN the instant its channel is open.
-        let pc = peer_connection.clone();
-        hub.attach(remote, peer_connection, data_channel.clone(), callbacks)
-            .map_err(|error| JsValue::from_str(&error))?;
+        // dial the mount ALPN the instant its channel is open. Same guard, for
+        // the same reason; see `PendingOffer::complete`.
+        let pc = peer_connection.release();
+        let guard = hub
+            .attach(remote, pc.clone(), data_channel.clone(), callbacks)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         wait_channel_open(&data_channel, &pc).await?;
+        guard.commit();
         Ok(BrowserSession { remote })
     }
 }

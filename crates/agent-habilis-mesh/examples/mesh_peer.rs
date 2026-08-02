@@ -7,7 +7,7 @@
 //! ```
 //!
 //! `MESH_TRANSPORT=webrtc` clears IP transports, so any data path that is not
-//! the WebRTC one is a failure rather than a silent fallback. The relay stays —
+//! the `WebRTC` one is a failure rather than a silent fallback. The relay stays —
 //! it is the rendezvous, and the JSEP exchange rides it.
 //!
 //! Prints one line per second: the gossip roster count and the number of live

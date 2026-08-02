@@ -219,19 +219,21 @@ pub struct EventLoopState {
     /// endpoint. Portable — it is the browser's only direct path, and an
     /// opportunistic extra one for a native peer. `None` on the beacon.
     pub(crate) webrtc: Option<fofoca_iroh_webrtc_transport::WebRtcHandle>,
-    /// Peers with a JSEP round in flight right now.
+    /// Who may start a JSEP round, and how many may run at once.
     ///
-    /// `has_session` only flips at *attach*, so without this a membership event
-    /// and a re-flood of the same `PeerInfo` both start a negotiation with the
-    /// same peer, and the loser fails on duplicate attach after paying a full
-    /// gathering budget.
+    /// `has_session` only flips at *attach*, so without an in-flight record a
+    /// membership event and a re-flood of the same `PeerInfo` both start a
+    /// negotiation with the same peer, and the loser fails on duplicate attach
+    /// after paying a full gathering budget.
     ///
-    /// Shared with the spawned negotiation rather than owned by the loop: the
-    /// task must clear its own entry, and it must do so whether it succeeded or
-    /// failed. Sweeping from the loop by "does a session exist yet" cannot tell
-    /// a failure from a round still in progress, and would leave a failed peer
-    /// permanently unretryable.
-    pub(crate) webrtc_dialing: Arc<std::sync::Mutex<HashSet<EndpointId>>>,
+    /// Shared with the signal *acceptor* on the Router, not owned by the loop,
+    /// so the direct-peer ceiling is one number for this node rather than one
+    /// per role. See [`crate::transport::SignalAdmission`].
+    pub(crate) webrtc_admission: crate::transport::SignalAdmission,
+    /// How far ICE may reach when this peer gathers candidates. Host-only on a
+    /// loopback mesh, which promises to make no external network call —
+    /// `IceConfig::default()` would query two public STUN servers.
+    pub(crate) webrtc_ice: crate::transport::IceProfile,
     /// Monotonic sequence for *our own* emitted link-state vectors, so peers keep
     /// the freshest and drop reorders.
     pub(crate) link_state_seq: u64,
@@ -469,7 +471,12 @@ impl EventLoopState {
             #[cfg(feature = "host")]
             multihop: None,
             webrtc: None,
-            webrtc_dialing: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            // Replaced by the one the Router's acceptor shares, in `run`.
+            // Defaulted here so `fresh_state` and friends need no argument.
+            webrtc_admission: crate::transport::SignalAdmission::new(
+                crate::transport::MAX_DIRECT_PEERS,
+            ),
+            webrtc_ice: crate::transport::IceProfile::default(),
             link_state_seq: 0,
             reclaim_until: None,
             next_rival_recheck: None,

@@ -19,6 +19,7 @@
 //! cross-transport dedup are identical on both planes.
 
 mod accept;
+mod admission;
 #[cfg(feature = "host")]
 pub(crate) mod ipc;
 mod pool;
@@ -41,12 +42,14 @@ mod send;
 pub(crate) mod sender;
 
 pub(crate) use accept::UnicastAcceptor;
+pub(crate) use admission::SignalAdmission;
 pub(crate) use pool::UnicastPool;
 pub use send::Lane;
 pub use send::deliver;
 pub(crate) use send::lane_for;
 pub use sender::MeshSender;
-pub(crate) use webrtc::{MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor, dial_signal};
+pub use webrtc::MAX_DIRECT_PEERS;
+pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor};
 
 /// ALPN for the unicast channel — a raw bidirectional QUIC stream with its own
 /// protocol identity, distinct from `GOSSIP_ALPN` and the application's own bridge ALPN.

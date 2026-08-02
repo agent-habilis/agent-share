@@ -61,14 +61,14 @@ mod tests {
         let first = share_mesh_key(&secret);
         assert_eq!(first, share_mesh_key(&secret), "derivation is not stable");
         assert_eq!(first.len(), 64, "expected a hex SHA-256");
-        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(first.chars().all(|character| character.is_ascii_hexdigit()));
     }
 
     #[test]
     fn distinct_secrets_give_distinct_meshes() {
-        let a = share_mesh_key(&[1u8; SECRET_LEN]);
-        let b = share_mesh_key(&[2u8; SECRET_LEN]);
-        assert_ne!(a, b, "two shares must not land on one mesh");
+        let one = share_mesh_key(&[1u8; SECRET_LEN]);
+        let two = share_mesh_key(&[2u8; SECRET_LEN]);
+        assert_ne!(one, two, "two shares must not land on one mesh");
     }
 
     /// The whole reason for hashing before handing the string to the engine:
@@ -78,7 +78,11 @@ mod tests {
     fn does_not_leak_the_secret() {
         let secret = [0xABu8; SECRET_LEN];
         let key = share_mesh_key(&secret);
-        let secret_hex: String = secret.iter().map(|byte| format!("{byte:02x}")).collect();
+        let secret_hex = secret.iter().fold(String::new(), |mut hex, byte| {
+            use std::fmt::Write as _;
+            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+            hex
+        });
         assert!(!key.contains(&secret_hex), "derivation echoed the secret");
     }
 }
