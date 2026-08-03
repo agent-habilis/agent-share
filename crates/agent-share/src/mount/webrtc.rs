@@ -87,7 +87,11 @@ pub(crate) fn path_summary(conn: &Connection) -> Vec<String> {
 /// selected path at all for the first moments — so this waits rather than
 /// sampling once. The predicate takes the whole connection because iroh does
 /// not export a nameable type for a single path.
-pub(crate) async fn ensure_selected<S, D>(conn: &Connection, satisfied: S, describe: D) -> Result<()>
+pub(crate) async fn ensure_selected<S, D>(
+    conn: &Connection,
+    satisfied: S,
+    describe: D,
+) -> Result<()>
 where
     S: Fn(&Connection) -> bool,
     D: Fn() -> String,

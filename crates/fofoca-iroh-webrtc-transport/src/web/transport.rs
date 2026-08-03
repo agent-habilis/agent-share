@@ -16,8 +16,8 @@ use iroh::endpoint::transports::{
     CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit,
 };
 use iroh_base::CustomAddr;
-use n0_watcher::Watchable;
 use js_sys::Reflect;
+use n0_watcher::Watchable;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -315,13 +315,10 @@ impl BrowserHubTransport {
     /// Returns `(address, candidate_type)` where `candidate_type` is the
     /// browser's string (`host` / `srflx` / `relay` / `prflx`). Address may be
     /// an mDNS `.local` name — browsers redact LAN IPs that way.
-    pub async fn selected_remote_candidate(
-        &self,
-        remote: &EndpointId,
-    ) -> Option<(String, String)> {
-        let peer_connection = self.sessions.with_live(remote, |handle| {
-            handle._keepalive.peer_connection.clone()
-        })?;
+    pub async fn selected_remote_candidate(&self, remote: &EndpointId) -> Option<(String, String)> {
+        let peer_connection = self
+            .sessions
+            .with_live(remote, |handle| handle._keepalive.peer_connection.clone())?;
         selected_candidate_from_stats(&peer_connection, "remoteCandidateId").await
     }
 
@@ -365,10 +362,7 @@ impl BrowserHubTransport {
     /// can name every peer's address but not its own, so the roster shows the
     /// local row with no ip at all — the one row where the answer is always
     /// available, since it comes from our own `getStats`.
-    pub async fn selected_local_candidate(
-        &self,
-        remote: &EndpointId,
-    ) -> Option<(String, String)> {
+    pub async fn selected_local_candidate(&self, remote: &EndpointId) -> Option<(String, String)> {
         let peer_connection = self
             .sessions
             .with_live(remote, |handle| handle._keepalive.peer_connection.clone())?;
@@ -411,7 +405,10 @@ impl std::fmt::Debug for BrowserHubTransport {
 /// would be a plausible-looking lie.
 async fn selected_pair_from_stats(
     peer_connection: &RtcPeerConnection,
-) -> Option<(std::collections::HashMap<String, js_sys::Object>, js_sys::Object)> {
+) -> Option<(
+    std::collections::HashMap<String, js_sys::Object>,
+    js_sys::Object,
+)> {
     let report = JsFuture::from(peer_connection.get_stats()).await.ok()?;
     let mut by_id: std::collections::HashMap<String, js_sys::Object> =
         std::collections::HashMap::new();

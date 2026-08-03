@@ -353,7 +353,6 @@ async fn the_mount_selects_webrtc_over_a_warm_relay_path() {
         .expect("attach session");
     signal.close(0u32.into(), b"jsep done");
 
-
     // 2. The mount dial, WebRTC-only address — which iroh will still merge with
     //    the relay it already knows.
     let webrtc_only = EndpointAddr::from_parts(
