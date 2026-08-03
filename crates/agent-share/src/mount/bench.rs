@@ -722,4 +722,168 @@ mod tests {
         conn.close(0u32.into(), b"done");
         endpoint.close().await;
     }
+
+    /// Stand up `sources` independent `WebRTC` bench producers, connect to all of
+    /// them, and drive every connection concurrently for `secs`.
+    ///
+    /// Returns `(aggregate_mib_s, per_source_mib_s, median_rtt_ms)`.
+    ///
+    /// The RTT matters as much as the throughput: it is what proves the link
+    /// emulator actually took effect. Without it a run where `pfctl` silently
+    /// failed to apply is indistinguishable from one where added delay changed
+    /// nothing.
+    async fn measure_k_sources(sources: usize, secs: u64) -> (f64, Vec<f64>, f64) {
+        let mut producers = Vec::new();
+        for _ in 0..sources {
+            producers.push(spawn_loopback_producer(BenchTransport::WebRtc).await);
+        }
+
+        // Connect to every producer *before* measuring, so ICE setup is not
+        // inside the measurement window.
+        let mut conns = Vec::new();
+        for (_, ticket) in &producers {
+            let transport = BenchTransport::from_ticket_flags(ticket.flags).unwrap();
+            let (endpoint, conn, path) = connect_forced(ticket, transport).await.expect("connect");
+            assert_eq!(
+                path, "webrtc",
+                "the SCTP ceiling claim is about WebRTC only"
+            );
+            conns.push((endpoint, conn, ticket.secret));
+        }
+
+        let mut set = tokio::task::JoinSet::new();
+        for (_, conn, secret) in &conns {
+            let conn = conn.clone();
+            let secret = *secret;
+            set.spawn(async move {
+                let stats = measure_window(&conn, &secret, Duration::from_secs(secs), false)
+                    .await
+                    .expect("window");
+                (stats.throughput_mib_s, stats.latency_ms.median)
+            });
+        }
+        let mut per_source = Vec::new();
+        let mut rtts = Vec::new();
+        while let Some(res) = set.join_next().await {
+            let (rate, rtt) = res.expect("bench task");
+            per_source.push(rate);
+            rtts.push(rtt);
+        }
+        rtts.sort_by(f64::total_cmp);
+        let median_rtt = rtts.get(rtts.len() / 2).copied().unwrap_or(f64::NAN);
+
+        for (endpoint, conn, _) in conns {
+            conn.close(0u32.into(), b"done");
+            endpoint.close().await;
+        }
+        for (endpoint, _) in producers {
+            endpoint.close().await;
+        }
+
+        (per_source.iter().sum(), per_source, median_rtt)
+    }
+
+    /// **S0.4 — the decisive experiment.**
+    ///
+    /// RFC 01 justifies swarming partly on throughput: the `WebRTC` data
+    /// channel ceiling is `SCTP`'s 128 `KiB` receive window, one source cannot
+    /// be tuned around it, and a second source is therefore worth ~2×. If that
+    /// holds, aggregate throughput scales with the number of sources. If
+    /// aggregate is flat, the ceiling is somewhere shared (CPU, loopback, the
+    /// `SCTP` stack itself) and RFC 01's throughput motivation collapses to
+    /// resilience and fan-out only.
+    ///
+    /// Measurement, not assertion — it prints a table and only asserts that
+    /// the run produced numbers. Loopback has no RTT, so this is the *most
+    /// favourable* case for a shared-ceiling result; a delayed-link run
+    /// (`dnctl`/`pfctl` at 50 ms) is the follow-up, not a substitute.
+    ///
+    /// Expensive (K `WebRTC` producers, full ICE each), so it is `#[ignore]`d
+    /// like `mount::real_mount_round_trip`. Run it by hand:
+    /// `cargo test -p agent-share --lib s04_ -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore = "measurement, not a regression guard; takes ~2min"]
+    async fn s04_multi_source_throughput_scaling() {
+        let secs: u64 = std::env::var("S04_SECS")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(5);
+        let reps: usize = std::env::var("S04_REPS")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(3);
+        let source_counts = [1usize, 2, 4];
+
+        // Repeat and interleave: a single pass through K=1,2,4 confounds the
+        // scaling question with order and warm-up. If repeats of the same K
+        // disagree with each other as much as different Ks do, the harness is
+        // not measuring link capacity and no scaling claim can be read off it.
+        let mut samples: std::collections::BTreeMap<usize, Vec<f64>> =
+            std::collections::BTreeMap::new();
+        let mut rtts: Vec<f64> = Vec::new();
+        for _ in 0..reps {
+            for count in source_counts {
+                let (aggregate, _, rtt) = measure_k_sources(count, secs).await;
+                samples.entry(count).or_default().push(aggregate);
+                rtts.push(rtt);
+            }
+        }
+        rtts.sort_by(f64::total_cmp);
+        let rtt_ms = rtts[rtts.len() / 2];
+
+        println!("\nS0.4 — aggregate throughput vs source count (WebRTC, loopback)");
+        println!("       {reps} reps x {secs}s per K, interleaved\n");
+        println!("   K       min      median         max      spread");
+        let mut medians = std::collections::BTreeMap::new();
+        for (count, values) in &samples {
+            let mut sorted = values.clone();
+            sorted.sort_by(f64::total_cmp);
+            let (min, max) = (sorted[0], sorted[sorted.len() - 1]);
+            let median = sorted[sorted.len() / 2];
+            medians.insert(*count, median);
+            println!(
+                "  {count:>2}   {min:>7.1}   {median:>9.1}   {max:>9.1}   {:>7.2}x",
+                if min > 0.0 { max / min } else { f64::NAN }
+            );
+        }
+
+        let base = medians[&1];
+        println!("\n  scaling vs K=1 (median):");
+        for (count, median) in &medians {
+            println!("    K={count}: {:.2}x", median / base);
+        }
+        // A per-connection window W bounds one connection to W/RTT. Printing
+        // the implied window makes the mechanism falsifiable instead of
+        // rhetorical: if the measured K=1 rate matches 128 KiB/RTT, RFC 01's
+        // stated cause is right; if it implies megabytes, the binding window is
+        // QUIC's, not SCTP's.
+        let implied_window_kib = base * 1024.0 * (rtt_ms / 1000.0);
+        println!("\n  measured median RTT: {rtt_ms:.1} ms");
+        println!(
+            "  K=1 rate {base:.1} MiB/s at that RTT implies a per-connection window of \
+             ~{implied_window_kib:.0} KiB"
+        );
+        if rtt_ms < 5.0 {
+            println!(
+                "\n  CAVEAT: RTT is ~0, so no window is binding and this run cannot\n  \
+                 test the per-connection-ceiling claim. Re-run under a link\n  \
+                 emulator (dnctl/pfctl dummynet on lo0)."
+            );
+        }
+        println!(
+            "\n  CAVEAT: all producers and consumers share one host and one CPU,\n  \
+             so CPU contention is a confound at higher K regardless of RTT.\n  \
+             Note also that this transport negotiates the data channel\n  \
+             **unreliable and unordered** (`MaxRetransmits {{ retransmits: 0 }}`,\n  \
+             fofoca-iroh-webrtc-transport host/jsep.rs), so the classic reliable-\n  \
+             SCTP receive-window stall RFC 01 cites is not the mechanism here.\n"
+        );
+
+        for values in samples.values() {
+            assert!(
+                values.iter().all(|rate| *rate > 0.0),
+                "every run must move bytes"
+            );
+        }
+    }
 }

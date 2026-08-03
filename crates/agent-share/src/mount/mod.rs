@@ -167,6 +167,170 @@ mod tests {
         (endpoint, client, producer)
     }
 
+    /// Stand up a producer serving `root` under a **caller-supplied** secret
+    /// rather than the one `bind` mints for it.
+    ///
+    /// This is the re-seeder shape exactly: a peer that holds the bytes serves
+    /// them under the *origin's* ticket secret. `serve_established` already
+    /// takes the secret as a parameter, so no production code moves to make
+    /// this possible — which is the claim under test.
+    async fn producer_under_secret(
+        root: &std::path::Path,
+        secret: [u8; SECRET_LEN],
+    ) -> (iroh::Endpoint, MountTicket, tokio::task::JoinHandle<()>) {
+        let (manifest, paths) = super::scan::scan(root).expect("scan");
+        let tree = Arc::new(super::live::LiveTree::new(
+            root.to_path_buf(),
+            manifest,
+            paths,
+        ));
+        let (endpoint, mut ticket, _minted, _webrtc) = produce::bind(LookupOpts::loopback())
+            .await
+            .expect("bind re-seeder");
+        // Advertise the origin's secret, not the freshly minted one.
+        ticket.secret = secret;
+        let accept_endpoint = endpoint.clone();
+        let task = tokio::spawn(async move {
+            while let Some(incoming) = accept_endpoint.accept().await {
+                let tree = Arc::clone(&tree);
+                tokio::spawn(async move {
+                    let Ok(conn) = incoming.await else { return };
+                    let _ = produce::serve_established(conn, secret, tree).await;
+                });
+            }
+        });
+        (endpoint, ticket, task)
+    }
+
+    /// Build a client that talks to `ticket`'s address using `ticket`'s secret.
+    async fn client_for(ticket: MountTicket) -> RemoteClient {
+        let endpoint = build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
+            .await
+            .expect("client endpoint");
+        add_peer_addr(&endpoint, ticket.addr.clone()).expect("add peer addr");
+        RemoteClient::new(endpoint, ticket)
+    }
+
+    /// **S0.2 — the symmetry claim RFC 01 rests on.**
+    ///
+    /// `produce.rs`'s authentication is one line — `&header[..SECRET_LEN] !=
+    /// secret` — with no binding to the serving endpoint's identity. So a peer
+    /// that is *not* the origin can serve the origin's ticket, and a consumer
+    /// cannot tell the difference. That is what makes a swarm possible with no
+    /// new auth code; if it were false, every phase after this gets more
+    /// expensive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_non_origin_peer_serves_the_origins_ticket_secret() {
+        // One secret, two independent hosts. Minting it here rather than
+        // taking the origin's makes the point explicit: the secret is the
+        // whole capability, and it is not bound to who serves it.
+        let mut secret = [0u8; SECRET_LEN];
+        rand::rng().fill_bytes(&mut secret);
+
+        let origin_tree = fixture_tree();
+        let (origin_endpoint, origin_ticket, origin_task) =
+            producer_under_secret(&origin_tree.path, secret).await;
+
+        // A second host with its own endpoint and its own copy of the bytes,
+        // serving under the origin's secret. A mirror, in other words.
+        let mirror_tree = fixture_tree();
+        let (mirror_endpoint, mirror_ticket, mirror_task) =
+            producer_under_secret(&mirror_tree.path, secret).await;
+        assert_ne!(
+            mirror_ticket.addr, origin_ticket.addr,
+            "the mirror must be a genuinely different endpoint"
+        );
+
+        // A consumer pointed at the mirror, holding only the origin's ticket
+        // secret, is served — no new code anywhere.
+        let mirror_client = client_for(mirror_ticket).await;
+        let manifest = mirror_client
+            .fetch_manifest()
+            .await
+            .expect("a peer must serve the origin's secret");
+        let hello = manifest
+            .files
+            .iter()
+            .position(|file| file.rel_path == "hello.txt")
+            .expect("hello.txt listed by the mirror");
+        let bytes = mirror_client
+            .read_range(u32::try_from(hello).expect("index"), 0, 5)
+            .await
+            .expect("ranged read from a non-origin peer");
+        assert_eq!(&bytes, b"hello");
+
+        origin_endpoint.close().await;
+        mirror_endpoint.close().await;
+        origin_task.abort();
+        mirror_task.abort();
+    }
+
+    /// **The other half of S0.2: the danger is real too.**
+    ///
+    /// A re-seeder whose tree has *diverged* from the origin's answers
+    /// plausibly and wrongly — same index, different bytes, no error. This is
+    /// why RFC 01's guard #1 (a manifest fingerprint on every card) is not
+    /// optional and not retrofittable. Pinned here as a failing-by-construction
+    /// demonstration so the guard cannot be quietly dropped later.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_diverged_peer_answers_plausibly_and_wrongly() {
+        let mut secret = [0u8; SECRET_LEN];
+        rand::rng().fill_bytes(&mut secret);
+
+        let origin_tree = fixture_tree();
+        let (origin_endpoint, origin_ticket, origin_task) =
+            producer_under_secret(&origin_tree.path, secret).await;
+        let origin_client = client_for(origin_ticket).await;
+
+        // Same shape, different contents — a stale mirror.
+        let stale = TempDir::new();
+        std::fs::create_dir_all(stale.path.join("docs")).unwrap();
+        std::fs::write(stale.path.join("hello.txt"), b"WRONG WORLD").unwrap();
+        std::fs::write(stale.path.join("docs/guide.md"), b"stale bytes").unwrap();
+
+        let (stale_endpoint, stale_ticket, stale_task) =
+            producer_under_secret(&stale.path, secret).await;
+        let stale_client = client_for(stale_ticket).await;
+
+        let origin_manifest = origin_client
+            .fetch_manifest()
+            .await
+            .expect("origin manifest");
+        let stale_manifest = stale_client.fetch_manifest().await.expect("stale manifest");
+        let idx = origin_manifest
+            .files
+            .iter()
+            .position(|file| file.rel_path == "hello.txt")
+            .expect("hello.txt");
+        let idx = u32::try_from(idx).expect("index");
+
+        let good = origin_client
+            .read_range(idx, 0, 5)
+            .await
+            .expect("origin read");
+        let bad = stale_client
+            .read_range(idx, 0, 5)
+            .await
+            .expect("stale read");
+
+        assert_eq!(&good, b"hello");
+        assert_ne!(
+            good, bad,
+            "the stale peer returned different bytes for the same index — \
+             it succeeded, which is exactly the silent-corruption class guard #1 exists to stop"
+        );
+        assert_ne!(
+            origin_manifest.encode(),
+            stale_manifest.encode(),
+            "a manifest fingerprint must be able to tell these two trees apart"
+        );
+
+        origin_endpoint.close().await;
+        stale_endpoint.close().await;
+        origin_task.abort();
+        stale_task.abort();
+    }
+
     fn fixture_tree() -> TempDir {
         let tmp = TempDir::new();
         std::fs::create_dir_all(tmp.path.join("docs")).unwrap();

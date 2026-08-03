@@ -17,8 +17,9 @@
 //! refuses the id, the share still serves and the file transfer is unaffected.
 //! Everything here degrades to "no peer counts" rather than to a broken share.
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use agent_habilis_mesh::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
@@ -97,6 +98,77 @@ fn share_card_gate() -> SelfWriteGate {
     }
 }
 
+/// Every peer's published card, keyed by endpoint id.
+///
+/// Shared with [`ShareMesh`] rather than owned by the driver: the driver lives
+/// inside the engine's event loop and is unreachable from the outside, so a
+/// handle that outlives a borrow of it is the only way a caller can read the
+/// roster. The browser peer carries the same split for the same reason.
+type CardBook = Arc<Mutex<HashMap<String, PeerCard>>>;
+
+/// Read every `/peers/<nick>/card` out of a meta document.
+///
+/// Free function rather than a method so the part with the interesting
+/// behaviour — what it tolerates — is testable without standing up an engine.
+///
+/// **Keyed by endpoint, not by nickname.** Nicknames are random per join
+/// ([`Nickname::random`] below), so the same machine that rejoins appears under
+/// a new one; the endpoint id is the identity that a mount session can actually
+/// be addressed by. A peer occupying two nicknames therefore collapses to one
+/// entry, which is the desired reading: it is one peer.
+fn cards_from_meta(doc: &serde_json::Value) -> HashMap<String, PeerCard> {
+    let mut cards = HashMap::new();
+    let Some(peers) = doc.get("peers").and_then(serde_json::Value::as_object) else {
+        return cards;
+    };
+    for peer in peers.values() {
+        let Some(card_value) = peer.get("card") else {
+            continue;
+        };
+        // A card this build cannot parse is skipped, never fatal: a peer on an
+        // older or newer shape must cost us that one peer, not the roster.
+        let Some(card) = PeerCard::from_card_value(card_value) else {
+            continue;
+        };
+        cards.insert(card.endpoint.clone(), card);
+    }
+    cards
+}
+
+/// Snapshot the roster out of a shared book.
+fn cards_from_book(book: &CardBook) -> Vec<PeerCard> {
+    book.lock()
+        .ok()
+        .map(|book| book.values().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Describe the *other* peers by role, for the `Peers` status line.
+///
+/// The raw count already says how many peers there are; what a user actually
+/// wants when a share misbehaves is whether the peer they can see is the one
+/// serving the bytes. `""` when the roster says nothing useful — a count with a
+/// misleading breakdown beside it is worse than a count alone, and the roster
+/// legitimately lags the gossip counter: a peer is on the mesh before it has
+/// published a card.
+fn roles_suffix(cards: &[PeerCard], local_endpoint: &str) -> String {
+    let mut producers = 0usize;
+    let mut consumers = 0usize;
+    for card in cards.iter().filter(|card| card.endpoint != local_endpoint) {
+        match card.role.as_deref() {
+            Some("producer") => producers += 1,
+            Some("consumer") => consumers += 1,
+            _ => {}
+        }
+    }
+    match (producers, consumers) {
+        (0, 0) => String::new(),
+        (serving, 0) => format!(" ({serving} producing)"),
+        (0, reading) => format!(" ({reading} reading)"),
+        (serving, reading) => format!(" ({serving} producing, {reading} reading)"),
+    }
+}
+
 /// Presence plus mesh/app metadata on the meta card. File bytes ride the mount
 /// protocol, not gossip.
 struct ShareDriver {
@@ -104,15 +176,37 @@ struct ShareDriver {
     runtime: String,
     transport: String,
     role: Option<String>,
+    book: CardBook,
 }
 
 impl ShareDriver {
-    fn new(version: String, runtime: String, transport: String, role: Option<String>) -> Self {
+    fn new(
+        version: String,
+        runtime: String,
+        transport: String,
+        role: Option<String>,
+        book: CardBook,
+    ) -> Self {
         Self {
             version,
             runtime,
             transport,
             role,
+            book,
+        }
+    }
+
+    /// Rebuild the endpoint → card map from the live meta document.
+    ///
+    /// A full rebuild per event rather than a patch. The document is the
+    /// authority and it is small — one card per peer — so re-reading it costs
+    /// nothing next to the gossip round-trip that triggered it, and it cannot
+    /// drift from what the CRDT actually says. `on_peer_left` needs the same
+    /// path anyway, since a departure is an absence rather than an edit.
+    fn refresh_book(&self, state: &EventLoopState) {
+        let next = cards_from_meta(&state.doc(Channel::Meta).to_json());
+        if let Ok(mut book) = self.book.lock() {
+            *book = next;
         }
     }
 
@@ -147,6 +241,9 @@ impl ShareDriver {
         {
             tracing::debug!(%error, "share meta client card publish failed");
         }
+        // Our own card is part of the roster, and publishing it is the one
+        // change that never arrives as an inbound meta event.
+        self.refresh_book(state);
     }
 }
 
@@ -171,8 +268,30 @@ impl NodeApp for ShareDriver {
         false
     }
 
+    /// Someone's meta card changed — including ours, echoed back.
+    fn on_meta_applied(
+        &mut self,
+        _author: &Nickname,
+        state: &mut EventLoopState,
+        _ctx: &HandlerCtx<'_>,
+    ) {
+        self.refresh_book(state);
+    }
+
     async fn on_meshed(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         self.publish_card(state, ctx).await;
+    }
+
+    /// A departure is an absence, not an edit, so nothing arrives on the meta
+    /// channel to trigger [`Self::refresh_book`] — without this hook a peer
+    /// that left would stay on the roster until the process ended.
+    async fn on_peer_left(
+        &mut self,
+        _nickname: &Nickname,
+        state: &mut EventLoopState,
+        _ctx: &HandlerCtx<'_>,
+    ) {
+        self.refresh_book(state);
     }
 }
 
@@ -196,6 +315,10 @@ pub(crate) struct ShareMesh {
     live: Arc<AtomicUsize>,
     webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
     node: Option<Node<ShareDriver>>,
+    book: CardBook,
+    /// Our own endpoint id, so the roster breakdown can report *other* peers
+    /// and agree with the count beside it, which already excludes self.
+    local_endpoint: String,
 }
 
 impl ShareMesh {
@@ -221,6 +344,8 @@ impl ShareMesh {
         }
         let live = Arc::clone(&self.live);
         let webrtc = self.webrtc.clone();
+        let book = Arc::clone(&self.book);
+        let local = self.local_endpoint.clone();
         tokio::spawn(async move {
             let mut last = None;
             loop {
@@ -249,7 +374,10 @@ impl ShareMesh {
                 }
                 crate::util::output::status(
                     "Peers",
-                    &format!("{gossip} on mesh · {direct} direct"),
+                    &format!(
+                        "{gossip} on mesh{} · {direct} direct",
+                        roles_suffix(&cards_from_book(&book), &local)
+                    ),
                 );
             }
         });
@@ -328,6 +456,8 @@ pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
     .resolve()
     .context("resolving the share mesh join")?;
 
+    // Read before `shared` is moved into the setup params below.
+    let local_endpoint = shared.endpoint.id().to_string();
     let live = Arc::new(AtomicUsize::new(0));
     let config = agent_habilis_mesh::runtime::setup_mesh(
         kind,
@@ -362,11 +492,13 @@ pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
     // take on the share mesh (iroh QUIC), distinct from a browser's webrtc/relay.
     // True of both roles: a consumer reads files over the mount protocol, but
     // its *mesh* traffic rides the same unicast plane the producer's does.
+    let book: CardBook = Arc::new(Mutex::new(HashMap::new()));
     let driver = ShareDriver::new(
         env!("CARGO_PKG_VERSION").to_owned(),
         "rust".to_owned(),
         "unicast".to_owned(),
         Some(role.as_card_str().to_owned()),
+        Arc::clone(&book),
     );
     // `handle_signals: false` is load-bearing, not a default. Registering
     // tokio's signal handlers suppresses the OS default-terminate for the
@@ -379,5 +511,244 @@ pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
         live,
         webrtc,
         node: Some(node),
+        book,
+        local_endpoint,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Role, cards_from_book, cards_from_meta, roles_suffix};
+    use agent_share_proto::PeerCard;
+
+    /// A meta document shaped the way `publish_card` writes one.
+    fn meta_with(peers: &[(&str, serde_json::Value)]) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        for (nick, card) in peers {
+            map.insert(
+                (*nick).to_owned(),
+                serde_json::json!({ "card": card.clone() }),
+            );
+        }
+        serde_json::json!({ "peers": serde_json::Value::Object(map) })
+    }
+
+    fn card(endpoint: &str, role: Role) -> serde_json::Value {
+        PeerCard::new(
+            endpoint,
+            "0.1.0",
+            "rust",
+            "unicast",
+            Some(role.as_card_str().to_owned()),
+        )
+        .to_card_value()
+    }
+
+    #[test]
+    fn an_empty_document_yields_an_empty_roster() {
+        assert!(cards_from_meta(&serde_json::json!({})).is_empty());
+        assert!(cards_from_meta(&meta_with(&[])).is_empty());
+    }
+
+    #[test]
+    fn every_published_card_lands_on_the_roster_with_its_role() {
+        let doc = meta_with(&[
+            ("alice", card("endpoint-a", Role::Producer)),
+            ("bob", card("endpoint-b", Role::Consumer)),
+        ]);
+        let roster = cards_from_meta(&doc);
+
+        assert_eq!(roster.len(), 2);
+        assert_eq!(
+            roster["endpoint-a"].role.as_deref(),
+            Some("producer"),
+            "the role a peer published is what a source-selector reads"
+        );
+        assert_eq!(roster["endpoint-b"].role.as_deref(), Some("consumer"));
+    }
+
+    /// A peer is on the mesh before it has published anything.
+    #[test]
+    fn a_peer_with_no_card_yet_is_skipped() {
+        let doc = serde_json::json!({
+            "peers": {
+                "alice": { "card": card("endpoint-a", Role::Producer) },
+                "bob": {},
+            }
+        });
+        let roster = cards_from_meta(&doc);
+        assert_eq!(roster.len(), 1);
+        assert!(roster.contains_key("endpoint-a"));
+    }
+
+    /// The one that matters: a peer we cannot parse must cost us that peer, not
+    /// the roster. Otherwise one bad card from a future build blinds us to
+    /// every good one.
+    #[test]
+    fn an_unparseable_card_costs_only_that_peer() {
+        let doc = serde_json::json!({
+            "peers": {
+                "alice": { "card": card("endpoint-a", Role::Producer) },
+                // No `endpoint` — the one field `from_card_value` requires.
+                "mallory": { "card": { "version": "9.9.9" } },
+                "eve": { "card": "not even an object" },
+            }
+        });
+        let roster = cards_from_meta(&doc);
+        assert_eq!(roster.len(), 1, "the good card must survive its neighbours");
+        assert!(roster.contains_key("endpoint-a"));
+    }
+
+    /// Nicknames are random per join, so a rejoining peer appears under a new
+    /// one. Keying by endpoint is what makes that one peer rather than two.
+    #[test]
+    fn one_peer_under_two_nicknames_collapses_to_one_entry() {
+        let doc = meta_with(&[
+            ("old-nick", card("endpoint-a", Role::Consumer)),
+            ("new-nick", card("endpoint-a", Role::Consumer)),
+        ]);
+        assert_eq!(cards_from_meta(&doc).len(), 1);
+    }
+
+    fn peer(endpoint: &str, role: Role) -> PeerCard {
+        PeerCard::new(
+            endpoint,
+            "0.1.0",
+            "rust",
+            "unicast",
+            Some(role.as_card_str().to_owned()),
+        )
+    }
+
+    /// The breakdown must agree with the count printed beside it, and that
+    /// count already excludes self.
+    #[test]
+    fn the_roles_breakdown_never_counts_us() {
+        let cards = vec![peer("me", Role::Consumer), peer("them", Role::Producer)];
+        assert_eq!(roles_suffix(&cards, "me"), " (1 producing)");
+        assert_eq!(
+            roles_suffix(&[peer("me", Role::Consumer)], "me"),
+            "",
+            "a lone peer has nobody to describe"
+        );
+    }
+
+    #[test]
+    fn the_roles_breakdown_names_both_sides() {
+        let cards = vec![
+            peer("a", Role::Producer),
+            peer("b", Role::Consumer),
+            peer("c", Role::Consumer),
+        ];
+        assert_eq!(roles_suffix(&cards, "me"), " (1 producing, 2 reading)");
+    }
+
+    /// The roster legitimately lags the gossip counter — a peer is on the mesh
+    /// before it publishes a card, and a future build may use a role word we do
+    /// not know. Either way, say nothing rather than something wrong.
+    #[test]
+    fn an_unknown_or_missing_role_is_described_as_nothing() {
+        let nameless = PeerCard::new("x", "0.1.0", "rust", "unicast", None);
+        let future = PeerCard::new("y", "0.1.0", "rust", "unicast", Some("relay".to_owned()));
+        assert_eq!(roles_suffix(&[nameless, future], "me"), "");
+    }
+
+    /// **Phase 0's actual claim**: two CLI peers of one share find each other on
+    /// the mesh its ticket derives, and each can name the other's role.
+    ///
+    /// Everything above tests parsing against a synthetic document; this is the
+    /// only test that exercises a real join, a real gossip round and the
+    /// `on_meta_applied` hook that carries a card from one process's driver to
+    /// another's roster.
+    /// Bind an endpoint and join the share mesh `secret` derives, as `role`.
+    async fn join_as(
+        secret: &[u8; super::SECRET_LEN],
+        lookups: &crate::protocol::swarm::LookupOpts,
+        role: Role,
+    ) -> super::ShareMesh {
+        use agent_habilis_mesh::runtime::InjectedEndpoint;
+        use fofoca_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+        use rand::RngCore;
+
+        let mut key_bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut key_bytes);
+        let key = iroh::SecretKey::from_bytes(&key_bytes);
+        let webrtc = WebRtcHandle::new(WebRtcTransport::new(key.public()));
+        let endpoint = crate::lookup::build_endpoint(
+            lookups,
+            Some(key),
+            None,
+            Vec::new(),
+            Some(webrtc.clone()),
+            false,
+        )
+        .await
+        .expect("bind endpoint");
+        super::join(super::JoinOpts {
+            secret,
+            lookups,
+            shared: InjectedEndpoint { endpoint, webrtc },
+            protocols: Vec::new(),
+            role,
+            transports: agent_habilis_mesh::net::TransportOpts::default(),
+        })
+        .await
+        .expect("join the share mesh")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_peers_of_one_share_see_each_other_on_the_mesh() {
+        use crate::protocol::swarm::LookupOpts;
+        use rand::RngCore;
+        use std::time::{Duration, Instant};
+
+        // One secret, so both peers derive the same mesh — the invariant the
+        // whole design rests on.
+        let mut secret = [0u8; super::SECRET_LEN];
+        rand::rng().fill_bytes(&mut secret);
+        let lookups = LookupOpts::loopback();
+
+        let producer = join_as(&secret, &lookups, Role::Producer).await;
+        let consumer = join_as(&secret, &lookups, Role::Consumer).await;
+        assert_eq!(
+            producer.mesh_id(),
+            consumer.mesh_id(),
+            "one ticket secret must derive one mesh"
+        );
+
+        // Poll rather than sleep a fixed time: gossip convergence is not
+        // bounded, and a fixed sleep is either flaky or slow.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let seen = loop {
+            let producer_sees_consumer = cards_from_book(&producer.book)
+                .iter()
+                .any(|card| card.role.as_deref() == Some("consumer"));
+            let consumer_sees_producer = cards_from_book(&consumer.book)
+                .iter()
+                .any(|card| card.role.as_deref() == Some("producer"));
+            if producer_sees_consumer && consumer_sees_producer {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+
+        assert!(
+            seen,
+            "each peer must find the other on the roster; producer saw {:?}, consumer saw {:?}",
+            cards_from_book(&producer.book)
+                .iter()
+                .map(|card| card.role.clone())
+                .collect::<Vec<_>>(),
+            cards_from_book(&consumer.book)
+                .iter()
+                .map(|card| card.role.clone())
+                .collect::<Vec<_>>(),
+        );
+
+        producer.leave().await;
+        consumer.leave().await;
+    }
 }

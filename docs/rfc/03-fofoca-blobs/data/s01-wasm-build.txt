@@ -1,0 +1,65 @@
+S0.1 — bao-tree wasm-cleanliness
+Captured 2026-08-03. M-series Mac (aarch64-apple-darwin), Rust 1.95.0.
+Spike crate: bao-tree 0.16.0, default-features = false, features = ["validate"].
+
+=== cargo tree --target wasm32-unknown-unknown ===
+s01-baotree-wasm v0.0.0
+├── bao-tree v0.16.0
+│   ├── blake3 v1.8.5
+│   │   ├── arrayref v0.3.9
+│   │   ├── arrayvec v0.7.8
+│   │   ├── cfg-if v1.0.4
+│   │   └── constant_time_eq v0.4.2
+│   │   [build-dependencies]
+│   │   └── cc v1.4.0
+│   ├── bytes v1.12.1
+│   ├── genawaiter v0.99.1
+│   │   └── futures-core v0.3.33
+│   ├── positioned-io v0.3.5
+│   ├── range-collections v0.4.6
+│   │   ├── binary-merge v0.1.2
+│   │   ├── inplace-vec-builder v0.1.1
+│   │   ├── ref-cast v1.0.26
+│   │   └── smallvec v1.15.2
+│   ├── self_cell v1.3.0
+│   └── smallvec v1.15.2
+├── blake3 v1.8.5 (*)
+└── bytes v1.12.1
+
+(proc-macro and build-dependency crates elided; they do not reach the wasm binary.)
+
+grep -iE "iroh-io|tokio|mio|socket"  ->  NONE
+
+=== module size and imports ===
+Import section parsed directly from the binary (wasm-tools not installed;
+parser at findings/, ~60 lines).
+
+  portable      121953 bytes,   0 imports    OK: no 'env' imports
+  +simd128      134138 bytes,   0 imports    OK: no 'env' imports
+
+Note: "0 imports" means the module imports nothing at all, not merely nothing
+from "env". It is fully self-contained.
+
+WARNING recorded during the spike: the first cdylib build was 367 bytes with 0
+imports because nothing was `extern "C"` and the linker stripped every path.
+A dependency-only wasm build proves nothing. The numbers above are from a build
+with a forced `#[unsafe(no_mangle)] pub extern "C"` entry point that exercises
+outboard construction, range encode, decode+verify, valid_ranges and hashing.
+
+=== SIMD codegen presence (0xFD is the WASM SIMD instruction prefix) ===
+  portable  0xFD-prefix bytes:    18   (incidental byte values)
+  simd      0xFD-prefix bytes:  2191   (real vector codegen)
+
+=== correctness (native, cargo test --release) ===
+  full_roundtrip_verifies ................................ ok
+  partial_range_verifies_against_the_same_root ........... ok
+  a_tampered_byte_is_rejected ............................ ok
+  outboard_overhead_is_measured_not_assumed .............. ok
+  hash_matches_blake3 .................................... ok
+  5 passed; 0 failed
+
+=== execution under node (both variants, identical result) ===
+  portable.wasm  checksum=16818158  best=62.5ms over 4MiB
+  simd.wasm      checksum=16818158  best=35.3ms over 4MiB
+
+Identical checksums: the SIMD backend agrees with the portable one bit-for-bit.
