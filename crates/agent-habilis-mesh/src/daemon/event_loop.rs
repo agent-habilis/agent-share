@@ -1434,9 +1434,16 @@ fn apply_rung_change(
         );
         params.bootstrap_relay = new;
         setup::register_rendezvous(endpoint, params);
-        // Drop the beacon: `maybe_cohost` → `beacon::ensure` rebuilds it
-        // homed on the new rung at the next heal/reclaim tick.
-        *rendezvous = None;
+        // Release the beacon so `maybe_cohost` → `beacon::ensure` rebuilds it
+        // homed on the new rung at the next heal/reclaim tick — `shed`, not a
+        // plain drop. The old endpoint is still open and still homed on the
+        // rung we are abandoning; dropping it leaves iroh to tear the socket
+        // down ungracefully and leaves peers linked to a corpse until the QUIC
+        // idle timeout. This fires exactly when relays are flaky, which is
+        // when a graceful handover matters most.
+        if let Some(old) = rendezvous.take() {
+            old.shed();
+        }
     }
 }
 

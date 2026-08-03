@@ -145,6 +145,17 @@ impl Rendezvous {
     }
 }
 
+/// Aborts both tasks — and **does not close the endpoint**, because it
+/// cannot: closing is async and `Drop` is not.
+///
+/// So a bare `drop` (or `*slot = None`, which is the same thing wearing a
+/// disguise) abandons a live, still-registered socket: iroh logs `Endpoint
+/// dropped without calling Endpoint::close. Aborting ungracefully.` and every
+/// peer linked to that beacon waits out the QUIC idle timeout instead of
+/// seeing a `NeighborDown`. Every release site must go through
+/// [`Rendezvous::shed`] (mid-run) or [`Rendezvous::shed_and_wait`] (on the way
+/// out) — the two plain drops that predated this note are the whole reason it
+/// is here.
 impl Drop for Rendezvous {
     fn drop(&mut self) {
         self.task.abort();
@@ -436,8 +447,13 @@ pub(crate) async fn claim_after_probe(
 }
 
 /// Whether the beacon slot is free to (re)claim: empty, or holding a
-/// rendezvous whose co-host task has ended. Clears a dead one on the way
-/// through — aborting is a harmless no-op on an already-finished task.
+/// rendezvous whose co-host task has ended.
+///
+/// A dead one is [`Rendezvous::shed`], never dropped: the co-host *task*
+/// ending says nothing about the endpoint, which is still open and still
+/// registered under `rendezvous_id`. Dropping it there abandons a live socket
+/// — iroh logs `Endpoint dropped without calling Endpoint::close` and joiners
+/// keep resolving to a corpse until the QUIC idle timeout.
 fn releasable(current: &mut Option<Rendezvous>) -> bool {
     if current
         .as_ref()
@@ -445,9 +461,9 @@ fn releasable(current: &mut Option<Rendezvous>) -> bool {
     {
         return false;
     }
-    if current.is_some() {
+    if let Some(dead) = current.take() {
         tracing::info!(target: "agent_habilis_mesh::beacon", "beacon released (co-host task ended); attempting re-stand-up");
-        *current = None;
+        dead.shed();
     }
     true
 }
@@ -572,14 +588,16 @@ async fn claim(
 
 #[cfg(test)]
 mod tests {
-    use super::{LookupOpts, RivalProbe, oneshot, probe_verdict, verdict_of};
+    use super::{
+        Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey, TopicId, ensure,
+        oneshot, probe_verdict, releasable, verdict_of, watch,
+    };
 
-    /// A probe wrapped around a channel we drive by hand. The endpoint is
-    /// real but inert — loopback, no lookups, no relay — because
-    /// `RivalProbe` retains one so a departure can close it, and these
-    /// tests are about the slot, not the dial.
-    async fn probe_for(rx: oneshot::Receiver<bool>) -> RivalProbe {
-        let endpoint = crate::lookup::build_endpoint(
+    /// A real endpoint that touches nothing: `LookupOpts::loopback` binds
+    /// 127.0.0.1 with relay, mDNS, DHT and the portmapper all off, so these
+    /// tests make zero external network calls.
+    async fn loopback_endpoint() -> Endpoint {
+        crate::lookup::build_endpoint(
             &LookupOpts::loopback(),
             None,
             None,
@@ -587,11 +605,64 @@ mod tests {
             crate::lookup::TransportHandles::default(),
         )
         .await
-        .expect("loopback endpoint");
+        .expect("loopback endpoint")
+    }
+
+    /// A probe wrapped around a channel we drive by hand. The endpoint is
+    /// real but inert, because `RivalProbe` retains one so a departure can
+    /// close it, and these tests are about the slot, not the dial.
+    async fn probe_for(rx: oneshot::Receiver<bool>) -> RivalProbe {
         RivalProbe {
             rx,
             task: n0_future::task::spawn(std::future::pending()),
+            endpoint: loopback_endpoint().await,
+        }
+    }
+
+    /// A beacon holding `endpoint`, whose co-host task is already finished —
+    /// the "dead beacon" `releasable` is meant to clear.
+    async fn dead_beacon(endpoint: Endpoint) -> Rendezvous {
+        let task = n0_future::task::spawn(async {});
+        // Let it finish, so `task.is_finished()` is true below.
+        for _ in 0..100 {
+            if task.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(task.is_finished(), "the co-host task should have ended");
+        Rendezvous {
+            task,
+            monitor: None,
             endpoint,
+        }
+    }
+
+    /// Params for the public probe-before-claim path: no `bind_ports` (so
+    /// `ensure` takes the public branch) and all-off lookups (so nothing
+    /// leaves the machine).
+    fn public_params() -> RendezvousParams {
+        let secret = SecretKey::generate();
+        let id = secret.public();
+        RendezvousParams {
+            topic_id: TopicId::from_bytes([7u8; 32]),
+            secret,
+            bind_ports: Vec::new(),
+            id,
+            lookups: LookupOpts::loopback(),
+            bootstrap_relay: None,
+            rung_tx: watch::channel(None).0,
+        }
+    }
+
+    /// Give a spawned close a chance to run, without pinning a duration the
+    /// scheduler has to honour.
+    async fn settle(endpoint: &Endpoint) {
+        for _ in 0..200 {
+            if endpoint.is_closed() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
@@ -637,5 +708,113 @@ mod tests {
         )
         .await;
         assert!(pending.is_err(), "an empty slot pends instead of firing");
+    }
+
+    #[tokio::test]
+    async fn shedding_a_beacon_closes_its_endpoint() {
+        let endpoint = loopback_endpoint().await;
+        let beacon = dead_beacon(endpoint.clone()).await;
+
+        beacon.shed();
+
+        settle(&endpoint).await;
+        assert!(endpoint.is_closed(), "`shed` must close, not just abort");
+    }
+
+    #[tokio::test]
+    async fn shed_and_wait_closes_before_it_returns() {
+        let endpoint = loopback_endpoint().await;
+        let beacon = dead_beacon(endpoint.clone()).await;
+
+        beacon.shed_and_wait().await;
+
+        // No settling: the whole point of the awaited form is that the close
+        // has happened by the time the departure path moves on.
+        assert!(
+            endpoint.is_closed(),
+            "the awaited shed must finish the close"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_a_dead_beacon_closes_its_endpoint() {
+        // Regression: this slot used to be cleared with `*current = None`.
+        // The co-host task ending says nothing about the endpoint, so the
+        // plain drop abandoned a live socket — iroh's `Endpoint dropped
+        // without calling Endpoint::close`, and peers linked to a corpse
+        // until the QUIC idle timeout.
+        let endpoint = loopback_endpoint().await;
+        let mut slot = Some(dead_beacon(endpoint.clone()).await);
+
+        assert!(releasable(&mut slot), "a dead beacon frees the slot");
+        assert!(slot.is_none(), "and is cleared out of it");
+
+        settle(&endpoint).await;
+        assert!(
+            endpoint.is_closed(),
+            "the dead beacon's endpoint must be closed, not dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_beacon_keeps_the_slot_and_its_endpoint() {
+        let endpoint = loopback_endpoint().await;
+        let mut slot = Some(Rendezvous {
+            task: n0_future::task::spawn(std::future::pending()),
+            monitor: None,
+            endpoint: endpoint.clone(),
+        });
+
+        assert!(!releasable(&mut slot), "a live beacon is not releasable");
+        assert!(slot.is_some(), "and is left alone");
+        assert!(!endpoint.is_closed(), "its endpoint stays open");
+    }
+
+    #[tokio::test]
+    async fn ensure_starts_the_probe_instead_of_waiting_for_it() {
+        // The invariant the departure bug came down to: `ensure` runs on the
+        // sole event loop, so it must not block on the probe. It used to,
+        // for the full `HEAL_PROBE_SECS` — long enough that `Node::leave`'s
+        // 3s budget expired and the graceful `Left` was never sent.
+        let params = public_params();
+        let peer = loopback_endpoint().await;
+        let mut beacon = None;
+        let mut probe = None;
+
+        let started = std::time::Instant::now();
+        let claimed = ensure(&params, &peer, &mut beacon, true, &mut probe).await;
+        let elapsed = started.elapsed();
+
+        // The structural assertion, not the clock, is what pins this: a call
+        // that *waited* would have consumed the verdict and left the slot
+        // empty. The timing bound below is only a coarse backstop — on
+        // loopback the dial fails fast, so a blocking `ensure` would still
+        // return quickly here.
+        assert!(
+            probe.is_some(),
+            "ensure must leave the probe running, not await it"
+        );
+        assert!(
+            !claimed,
+            "and claim nothing on the strength of a probe it never read"
+        );
+        assert!(beacon.is_none(), "and stand no beacon up");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "ensure must return without waiting out the probe, took {elapsed:?}"
+        );
+
+        // A second call must not stack a second probe answering the same
+        // question at the same cost.
+        let before = std::time::Instant::now();
+        assert!(!ensure(&params, &peer, &mut beacon, true, &mut probe).await);
+        assert!(
+            before.elapsed() < std::time::Duration::from_secs(1),
+            "and neither must the next tick"
+        );
+
+        if let Some(probe) = probe.take() {
+            probe.abort_and_close().await;
+        }
     }
 }
