@@ -623,12 +623,18 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 } else {
                     // Stream ended: resubscribe instead of healing a dead topic
                     // (see `resubscribe_tick`); the beacon keeps the mesh joinable.
-                    resubscribe_tick(
+                    // The loop's one error exit, and it must release the
+                    // beacon on the way out for the same reason the normal
+                    // one does — see `release_rendezvous`.
+                    if let Err(error) = resubscribe_tick(
                         &ResubscribeEnv { gossip: &gossip, params: &rendezvous_params, parts: &parts, exit_on_quit },
                         &mut state,
                         &mut app,
                         GossipLink { sender: &mut sender, receiver: &mut receiver, attempts: &mut resubscribe_attempts },
-                    ).await?;
+                    ).await {
+                        release_rendezvous(&mut rendezvous).await;
+                        return Err(error);
+                    }
                     let ctx = parts.ctx(&sender);
                     maybe_cohost(&mut state, &ctx, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous).await;
                 }
@@ -685,7 +691,31 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         app.drain_surfaced();
     }
 
+    release_rendezvous(&mut rendezvous).await;
     Ok(())
+}
+
+/// Close the co-hosted rendezvous endpoint before this loop's stack unwinds.
+///
+/// The `Rendezvous` is a loop local, and letting it merely *drop* aborts its
+/// tasks while leaving the endpoint open — iroh then logs `Endpoint dropped
+/// without calling Endpoint::close. Aborting ungracefully.` and tears the
+/// socket down without the QUIC close. Every co-hosting member hits this on
+/// every departure, which in a public mesh is every member.
+///
+/// A graceful close is not just quieter: it is the same courtesy
+/// [`beacon::Rendezvous::shed`] pays mid-run, so peers holding a link to our
+/// beacon see an immediate `NeighborDown` rather than waiting out the QUIC
+/// idle timeout on a corpse.
+///
+/// Not in `shutdown()` — the loop owns the `Rendezvous`, and the CLI's
+/// `exit_on_quit` path `process::exit`s from inside `shutdown` before any of
+/// this could run (that path skips every destructor by design, so there is no
+/// warning to silence there either).
+async fn release_rendezvous(rendezvous: &mut Option<beacon::Rendezvous>) {
+    if let Some(rendezvous) = rendezvous.take() {
+        rendezvous.shed_and_wait().await;
+    }
 }
 
 /// Graceful shutdown: remove the statusline state file first, then

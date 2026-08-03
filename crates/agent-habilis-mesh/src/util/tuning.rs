@@ -475,3 +475,21 @@ pub(crate) const RELAY_REPROBE_BACKOFF_MAX_SECS: u64 = 300;
 /// is only a guard against a pathological non-responding socket, kept
 /// tight so a contended-rung walk can't stall the event loop.
 pub(crate) const RENDEZVOUS_PROBE_SECS: u64 = 1;
+
+/// How long a departing member waits for its co-hosted rendezvous endpoint
+/// to close (`beacon::Rendezvous::shed_and_wait`).
+///
+/// Bounded because shutdown must not hang on a relay that stopped answering:
+/// `Node::leave` allows the whole wind-down 3s and the `Left` propagation
+/// sleep already spends 500ms of it, so this has to fit in what is left with
+/// room to spare. Exceeding the bound abandons the endpoint exactly as it was
+/// abandoned before this wait existed — a fallback to the old behaviour, never
+/// worse than it.
+///
+/// **Not a round number picked for looks.** At 1s it timed out on a live
+/// three-peer share: an endpoint homed on two relay rungs spends most of a
+/// second shutting its relay actors down (measured ~770ms under
+/// `iroh=debug`), so a one-second budget sits on the edge and the ungraceful
+/// drop this exists to prevent came straight back. 2s clears the measured cost
+/// with headroom and still leaves ~500ms of `Node::leave`'s budget unspent.
+pub(crate) const RENDEZVOUS_CLOSE_SECS: u64 = 2;

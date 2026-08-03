@@ -42,7 +42,9 @@ use tokio::sync::watch;
 
 use crate::lookup::{TransportHandles, add_peer_addr, build_endpoint, build_mesh, probe_connect};
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
-use crate::util::tuning::{HEAL_PROBE_SECS, RENDEZVOUS_PROBE_SECS, heal_interval_secs};
+use crate::util::tuning::{
+    HEAL_PROBE_SECS, RENDEZVOUS_CLOSE_SECS, RENDEZVOUS_PROBE_SECS, heal_interval_secs,
+};
 
 /// Everything [`ensure`] needs to (re)build the rendezvous endpoint.
 /// Cheap to clone-hold for the event loop's lifetime.
@@ -95,10 +97,11 @@ pub(crate) struct Rendezvous {
     /// The relay-rung liveness/discovery monitor (`spawn_relay_monitor`).
     /// `None` for private / relay-disabled meshes (nothing to monitor).
     monitor: Option<JoinHandle<()>>,
-    /// The co-hosted endpoint itself, retained so [`Self::shed`] can close
-    /// it gracefully — a plain drop (task abort) skips the orderly QUIC
-    /// close, and the peer's link to its own dead beacon lingers as
-    /// a zombie until the idle timeout, stalling the post-shed re-graft.
+    /// The co-hosted endpoint itself, retained so [`Self::shed`] and
+    /// [`Self::shed_and_wait`] can close it gracefully — a plain drop (task
+    /// abort) skips the orderly QUIC close, and the peer's link to its own
+    /// dead beacon lingers as a zombie until the idle timeout, stalling the
+    /// post-shed re-graft.
     endpoint: Endpoint,
 }
 
@@ -113,6 +116,32 @@ impl Rendezvous {
             endpoint.close().await;
         });
         // `self` drops here, aborting both tasks.
+    }
+
+    /// The same graceful release, *awaited* — for the event loop's teardown.
+    ///
+    /// [`Self::shed`] hands the close to a spawned task, which is right
+    /// mid-run and useless on the way out: the runtime is about to go away, so
+    /// a detached close is never polled and the endpoint reaches its `Drop`
+    /// still open. iroh says so — `Endpoint dropped without calling
+    /// Endpoint::close. Aborting ungracefully.` — on every departure of every
+    /// co-hosting member, which is all of them.
+    ///
+    /// Bounded, because winding down must not hang on a relay that stopped
+    /// answering: `Node::leave` gives the whole shutdown 3s and the `Left`
+    /// propagation sleep already spends 500ms of it. Past the bound we are no
+    /// worse off than before this existed.
+    pub(crate) async fn shed_and_wait(self) {
+        let endpoint = self.endpoint.clone();
+        // Abort the co-host and monitor tasks first, so neither is still
+        // driving the endpoint while it closes.
+        drop(self);
+        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), endpoint.close())
+            .await
+            .is_err()
+        {
+            tracing::debug!(target: "agent_habilis_mesh::beacon", "rendezvous endpoint close timed out; abandoning it");
+        }
     }
 }
 
