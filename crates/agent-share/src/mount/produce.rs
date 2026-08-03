@@ -115,18 +115,21 @@ pub(crate) async fn serve(
     // failure we stand up a plain Router with just the share's protocols and
     // carry on without peer counts, which is exactly the old behaviour.
     let mut fallback_router = None;
-    let share_mesh = match super::mesh::join(
-        &secret,
+    let share_mesh = match super::mesh::join(super::mesh::JoinOpts {
+        secret: &secret,
         // Read off the ticket, not off the local `lookups` binding that `bind`
         // consumed. Same value, but this way the invariant — every peer of this
         // share derives the mesh from what the ticket says — is literal.
-        &ticket.lookups,
-        agent_habilis_mesh::runtime::InjectedEndpoint {
+        lookups: &ticket.lookups,
+        shared: agent_habilis_mesh::runtime::InjectedEndpoint {
             endpoint: endpoint.clone(),
             webrtc: webrtc.clone(),
         },
-        protocols(),
-    )
+        protocols: protocols(),
+        role: super::mesh::Role::Producer,
+        // The producer never clears IP: it is the peer everyone else dials.
+        transports: agent_habilis_mesh::net::TransportOpts::default(),
+    })
     .await
     {
         Ok(mesh) => {

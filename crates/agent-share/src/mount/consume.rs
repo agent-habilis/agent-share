@@ -15,9 +15,10 @@ use crate::file::wire::read_u32;
 use crate::lookup::{add_peer_addr, build_endpoint};
 
 use super::MountTicket;
+use super::mesh::ShareMesh;
 use super::nfs;
 use super::nfs::{ByteSource, RemoteFs, TreeIds, build_tree};
-use super::{MAX_MANIFEST_BYTES, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH};
+use super::{MAX_MANIFEST_BYTES, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH, SECRET_LEN};
 use super::{MountManifest, ReadStatus};
 use super::{WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
@@ -71,8 +72,13 @@ pub(crate) async fn attach(
     )
     .await?;
     add_peer_addr(&endpoint, ticket.addr.clone())?;
+    // Taken before the ticket is moved into the client, and off the ticket
+    // rather than off the local bindings above: the mesh every peer of this
+    // share derives is the one the ticket describes.
+    let secret = ticket.secret;
+    let lookups = ticket.lookups.clone();
     let client = RemoteClient::new(endpoint.clone(), ticket)
-        .with_webrtc(webrtc)
+        .with_webrtc(webrtc.clone())
         .webrtc_only(webrtc_only);
 
     let client = Arc::new(client);
@@ -131,16 +137,90 @@ pub(crate) async fn attach(
         }
     }
 
+    // Last, on purpose. See `join_share_mesh`.
+    let share_mesh = join_share_mesh(MeshJoin {
+        secret: &secret,
+        lookups: &lookups,
+        endpoint: &endpoint,
+        webrtc: &webrtc,
+        webrtc_only,
+        json,
+    })
+    .await;
+
     tokio::signal::ctrl_c()
         .await
         .context("waiting for Ctrl-C failed")?;
     if mounted {
         unmount(&mountpoint).await;
     }
+    // Before the endpoint closes: `Left` has to go out over it, and peers that
+    // never hear it wait out a silence timeout counting us as present.
+    if let Some(mesh) = share_mesh {
+        mesh.leave().await;
+    }
     // Best-effort: leave nothing behind when the folder is empty / unused.
     let _ = std::fs::remove_dir(&mountpoint);
     endpoint.close().await;
     Ok(())
+}
+
+/// What this consumer joins the share's mesh as. Bundled because the two
+/// booleans are adjacent and would otherwise be swappable in silence.
+struct MeshJoin<'a> {
+    secret: &'a [u8; SECRET_LEN],
+    lookups: &'a agent_share_proto::lookup::LookupOpts,
+    endpoint: &'a Endpoint,
+    webrtc: &'a WebRtcHandle,
+    webrtc_only: bool,
+    json: bool,
+}
+
+/// Put this consumer on the share's mesh, so it is a peer of everyone else
+/// holding the link rather than a client of the producer alone.
+///
+/// Called *after* the bridge is up and the mount reported, and that ordering is
+/// the point: the mesh is additional to the mount protocol, never a
+/// precondition for it. File bytes ride the ticket's address either way, so
+/// nothing about standing a mesh up belongs in front of the thing the user
+/// asked for — and a relay it cannot reach must cost the mount nothing.
+///
+/// Non-fatal by the same rule: failure warns and returns `None`, which reads as
+/// "no peer counts" and never as "no mount".
+async fn join_share_mesh(join: MeshJoin<'_>) -> Option<ShareMesh> {
+    let result = super::mesh::join(super::mesh::JoinOpts {
+        secret: join.secret,
+        lookups: join.lookups,
+        shared: agent_habilis_mesh::runtime::InjectedEndpoint {
+            endpoint: join.endpoint.clone(),
+            webrtc: join.webrtc.clone(),
+        },
+        // A consumer answers no ALPN of its own — it dials the mount protocol,
+        // it does not serve it — so the mesh's Router is the only accept loop
+        // on this endpoint and everything it accepts belongs to the mesh.
+        protocols: Vec::new(),
+        role: super::mesh::Role::Consumer,
+        // Match the endpoint: `--transport webrtc` built it with IP cleared,
+        // and a mesh advertising paths its endpoint does not have is a mesh
+        // whose peers dial nowhere.
+        transports: if join.webrtc_only {
+            agent_habilis_mesh::net::TransportOpts::webrtc_only()
+        } else {
+            agent_habilis_mesh::net::TransportOpts::default()
+        },
+    })
+    .await;
+    match result {
+        Ok(mesh) => {
+            tracing::info!(mesh = mesh.mesh_id(), "joined the share mesh");
+            mesh.spawn_report(join.json);
+            Some(mesh)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "share mesh unavailable; mounting without peer discovery");
+            None
+        }
+    }
 }
 
 /// Keep the mounted tree in step with the producer's, for as long as the

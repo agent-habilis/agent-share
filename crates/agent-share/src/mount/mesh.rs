@@ -6,6 +6,12 @@
 //! other. Joining a mesh derived from the ticket's own secret makes them peers,
 //! with no ticket format change and nothing new for a user to pass around.
 //!
+//! *Every* peer of a share joins: both browser roles, the CLI producer, and the
+//! CLI consumer. A peer that stays off the mesh is invisible to it — it does not
+//! appear on anyone's roster, and it counts nobody — so a single hold-out makes
+//! every other peer's count wrong rather than merely incomplete. That is why
+//! [`join`] takes the peer's [`Role`] instead of assuming the producer's.
+//!
 //! Best-effort by construction. The mesh is *additional* to the mount protocol,
 //! never a precondition for it: if it cannot reach a relay, or the engine
 //! refuses the id, the share still serves and the file transfer is unaffected.
@@ -59,6 +65,29 @@ pub(crate) fn mesh_lookups(
 /// number a UI rendered and the number the engine enforced could drift apart,
 /// and did.
 use agent_habilis_mesh::net::MAX_DIRECT_PEERS;
+
+/// Which side of the share a peer is on, as its meta card spells it.
+///
+/// The two strings are a vocabulary shared with the browser peer — `role` on
+/// the meta card, rendered per peer by the web Info panel (`PeerRole` in
+/// `web/src/peerCard`). An enum rather than a `&str` argument so a typo is a
+/// compile error instead of a peer that renders as an unknown role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Role {
+    /// Serves the tree: `mount::produce`.
+    Producer,
+    /// Reads the tree: `mount::consume`.
+    Consumer,
+}
+
+impl Role {
+    fn as_card_str(self) -> &'static str {
+        match self {
+            Self::Producer => "producer",
+            Self::Consumer => "consumer",
+        }
+    }
+}
 
 /// Meta per-peer gate: only `<nick>` may write `/peers/<nick>/card`.
 fn share_card_gate() -> SelfWriteGate {
@@ -237,17 +266,46 @@ impl ShareMesh {
     }
 }
 
+/// What a peer brings to a share's mesh, and how it describes itself there.
+///
+/// A struct rather than six positional arguments: `protocols` and `transports`
+/// are both "empty/default for one role, not the other", and two adjacent
+/// defaultable arguments are exactly the shape that gets swapped silently.
+pub(crate) struct JoinOpts<'a> {
+    /// The ticket's bearer secret. Hashed into the mesh id, never carried on
+    /// it — see [`share_mesh_key`].
+    pub(crate) secret: &'a [u8; SECRET_LEN],
+    /// Read off the *ticket*, never off a local binding: every peer of a share
+    /// deriving its mesh from what the ticket says is what makes them agree.
+    pub(crate) lookups: &'a agent_share_proto::lookup::LookupOpts,
+    /// The endpoint this process already speaks the mount protocol on, so the
+    /// share and the mesh are one identity rather than two peers on one host.
+    pub(crate) shared: InjectedEndpoint,
+    /// ALPNs to serve on the mesh's Router. The producer's two ride here
+    /// because iroh permits one accept loop per endpoint; a consumer serves
+    /// none and passes an empty vec.
+    pub(crate) protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    pub(crate) role: Role,
+    /// Must match the reach the injected endpoint was built with. A consumer
+    /// run under `--transport webrtc` binds with IP cleared, so leaving the
+    /// mesh on the default would have it advertise paths that do not exist.
+    pub(crate) transports: TransportOpts,
+}
+
 /// Join the mesh this share's secret derives, and return a handle to it.
 ///
 /// # Errors
 /// The derived id is unusable, or the node cannot bind an endpoint / reach a
 /// relay. Callers treat this as non-fatal: the share serves either way.
-pub(crate) async fn join(
-    secret: &[u8; SECRET_LEN],
-    lookups: &agent_share_proto::lookup::LookupOpts,
-    shared: InjectedEndpoint,
-    protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
-) -> Result<ShareMesh> {
+pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
+    let JoinOpts {
+        secret,
+        lookups,
+        shared,
+        protocols,
+        role,
+        transports,
+    } = opts;
     // Hash first, then derive: the engine carries the topic *string* into its
     // state file and user-facing lines, so handing it the bearer secret would
     // print the secret. See `share_mesh_key`.
@@ -287,7 +345,7 @@ pub(crate) async fn join(
             endpoint: Some(shared),
             // The Router owns accept() now; the share's ALPNs ride along.
             protocols,
-            transports: TransportOpts::default(),
+            transports,
             multihop: false,
             per_peer_gate: Some(share_card_gate()),
             cohost: None,
@@ -302,12 +360,13 @@ pub(crate) async fn join(
     let router = config.router();
     // Native CLI peers advertise as unicast — that is the directed path they
     // take on the share mesh (iroh QUIC), distinct from a browser's webrtc/relay.
-    // This join path is the producer today (`mount::produce`).
+    // True of both roles: a consumer reads files over the mount protocol, but
+    // its *mesh* traffic rides the same unicast plane the producer's does.
     let driver = ShareDriver::new(
         env!("CARGO_PKG_VERSION").to_owned(),
         "rust".to_owned(),
         "unicast".to_owned(),
-        Some("producer".to_owned()),
+        Some(role.as_card_str().to_owned()),
     );
     // `handle_signals: false` is load-bearing, not a default. Registering
     // tokio's signal handlers suppresses the OS default-terminate for the
