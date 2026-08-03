@@ -95,10 +95,34 @@ It has to be two, because iroh only fans a connect's Initial out to candidate
 paths while the remote has no selected path — a live connection cannot be
 upgraded onto a newly attached transport.
 
-**The relay is a rendezvous, not a transport.** It carries the SDP exchange and
-never a byte of file data. The cost is that there is no data fallback: when ICE
-fails the transfer fails, and a symmetric-NAT-to-symmetric-NAT pair cannot
-connect at all. That is the price of the guarantee.
+For that handshake the relay is a rendezvous rather than a transport: it carries
+the SDP exchange, not file data.
+
+### Which transport carries bytes
+
+| pair | carries bytes | never |
+|---|---|---|
+| native ↔ native | iroh QUIC, else iroh relay | **WebRTC** |
+| native ↔ web | WebRTC, else iroh relay | — |
+| web ↔ web | WebRTC, else iroh relay | — |
+
+WebRTC exists because a browser has no UDP socket and cannot speak QUIC
+directly. That is the whole of its justification, so it never carries bytes
+between two native peers: measured with the transport as the only variable, the
+data channel gives **6× less throughput at 36× the latency** and an order of
+magnitude more run-to-run variance than plain QUIC (`docs/perf/`).
+
+The two ends behave differently when the preferred path fails, and both are
+deliberate. A **browser** falls back to the iroh relay when ICE fails, so it
+degrades rather than dying — at relay speed, but it connects. A **native** peer
+does not fall back onto the data channel: if it can reach the producer over
+neither IP nor relay, the mount fails. The pair that costs is one ICE could have
+joined while hole-punching and the relay both failed, which is narrow, since
+losing the relay usually means losing the network.
+
+`--transport webrtc` forces a native consumer onto the lane anyway. It exists to
+test the browser path from a native process and to let the benchmark harness
+measure it — not as a transport to choose.
 
 ### Building
 

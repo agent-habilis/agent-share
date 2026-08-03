@@ -14,9 +14,44 @@
 //!    an address containing *only* the `WebRTC` custom addr. No selected path,
 //!    so the Initial fans out over the data channel.
 //!
-//! The relay is a rendezvous, not a transport: it carries the SDP exchange and
-//! never a byte of file data. When ICE fails there is no second data path — the
-//! dial fails loudly rather than quietly relaying.
+//! For *this* lane the relay is a rendezvous, not a transport: it carries the
+//! SDP exchange and never a byte of file data, and when ICE fails the dial
+//! fails loudly rather than quietly relaying. That is a property of the native
+//! lane only — the browser client relays instead of failing. See below.
+//!
+//! # Which transport carries bytes
+//!
+//! | pair | carries bytes | never |
+//! |---|---|---|
+//! | native ↔ native | iroh QUIC, else iroh relay | **`WebRTC`** |
+//! | native ↔ web | `WebRTC`, else iroh relay | — |
+//! | web ↔ web | `WebRTC`, else iroh relay | — |
+//!
+//! `WebRTC` exists because a browser has no UDP socket and cannot speak QUIC
+//! directly. That is the whole of its justification, and it does not reach two
+//! native peers. Measured on identical request shape, with the transport as the
+//! only variable (`docs/perf/`):
+//!
+//! | | plain QUIC | over `WebRTC` |
+//! |---|---:|---:|
+//! | synthetic throughput | 116.05 MiB/s | 19.46 MiB/s |
+//! | round-trip latency | 0.08 ms | 2.87 ms |
+//! | real mount `cp` | 246.34 MiB/s | 4.11 MiB/s |
+//! | run-to-run spread | 1–4% | 21–51% |
+//!
+//! So a native consumer that cannot reach the producer over IP or relay
+//! **fails** rather than tunnelling QUIC inside SCTP inside DTLS: the cost is a
+//! pair that ICE could have joined where hole-punching and the relay both
+//! could not, which is narrow, because losing the relay usually means losing
+//! the network. Two things enforce it — [`super::consume::RemoteClient`] reaches
+//! this lane only through its `webrtc_only` flag, and the mesh negotiates a
+//! data channel only with peers advertising no IP transport
+//! (`agent_habilis_mesh::transport::webrtc::needs_webrtc_lane`).
+//!
+//! The browser client is the other half of the table and behaves differently on
+//! purpose: its default mode tries the data channel first and **does** fall back
+//! to the iroh relay when ICE fails (`agent-share-wasm-client/src/lib.rs`), so a
+//! browser peer degrades instead of failing.
 //!
 //! # One registry, two lanes
 //!

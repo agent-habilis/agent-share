@@ -301,8 +301,9 @@ pub(super) struct RemoteClient {
     endpoint: Endpoint,
     ticket: MountTicket,
     conn: Mutex<Option<Connection>>,
-    /// The `WebRTC` lane, when this consumer registered one. `None` keeps the
-    /// dial on IP/relay only, which is what the offline tests want.
+    /// The `WebRTC` lane. Read only when [`Self::webrtc_only`] is set — the
+    /// ordinary dial never touches it, so a native pair stays on iroh's own
+    /// transports.
     webrtc: Option<WebRtcHandle>,
     /// Refuse anything but the data channel: skip the IP/relay attempt entirely
     /// and fail loudly if the mount does not settle on `WebRTC`.
@@ -320,7 +321,10 @@ impl RemoteClient {
         }
     }
 
-    /// Register a `WebRTC` lane to fall back on.
+    /// Register the `WebRTC` lane, which only [`Self::webrtc_only`] can reach.
+    ///
+    /// Registering it does **not** put it in play: the handle is also what the
+    /// share mesh rides, and the mount dial ignores it unless forced.
     #[must_use]
     pub(super) fn with_webrtc(mut self, handle: WebRtcHandle) -> Self {
         self.webrtc = Some(handle);
@@ -331,23 +335,26 @@ impl RemoteClient {
     ///
     /// Not a preference — a requirement. The ordinary path is skipped rather
     /// than tried first, and the selected path is asserted afterwards, so a run
-    /// that claims `WebRTC` can be shown to be one. Without this the consumer
-    /// spends `DISCOVERY_DEADLINE` on IP/relay before it will even look at the
-    /// data channel, which is the right default for two native peers and
-    /// useless for testing the lane.
+    /// that claims `WebRTC` can be shown to be one.
+    ///
+    /// This is the *only* way a native consumer reaches the lane: without it
+    /// the dial stays on IP/relay and fails there rather than falling back.
+    /// It exists to test the browser lane from a native process, and to let the
+    /// bench harness measure it — not as a transport anyone should choose.
     #[must_use]
     pub(super) fn webrtc_only(mut self, only: bool) -> Self {
         self.webrtc_only = only;
         self
     }
 
-    /// Try the `WebRTC` lane: negotiate a data channel, then dial the mount
+    /// Take the `WebRTC` lane: negotiate a data channel, then dial the mount
     /// ALPN over an address carrying only that channel.
     ///
-    /// Tried **after** the ordinary path, not before. Two native peers are
-    /// better served by iroh's own hole-punching; tunnelling QUIC inside SCTP
-    /// inside DTLS stacks two congestion controllers for nothing. This earns
-    /// its place on the NATs that defeat hole-punching but not ICE.
+    /// Reached **only** through [`Self::webrtc_only`] — never as a fallback.
+    /// This is the browser lane, and a native consumer that cannot reach the
+    /// producer over IP or relay fails instead of tunnelling QUIC inside SCTP
+    /// inside DTLS. See this module's header for the rule and the measurements
+    /// behind it.
     async fn connect_over_webrtc(&self) -> Result<Connection> {
         let handle = self
             .webrtc
@@ -401,23 +408,14 @@ impl RemoteClient {
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
                 Err(error) => {
-                    // Out of retries on the ordinary path. If a WebRTC lane is
-                    // registered, negotiate one before giving up — that is the
-                    // whole point of carrying it.
-                    if self.webrtc.is_some() {
-                        tracing::debug!(%error, "IP/relay dial failed; trying the WebRTC lane");
-                        match Box::pin(self.connect_over_webrtc()).await {
-                            Ok(conn) => break conn,
-                            Err(webrtc_error) => {
-                                return Err(anyhow::anyhow!(
-                                    "could not reach the mount producer over IP/relay ({error}) \
-                                     or WebRTC ({webrtc_error})"
-                                ));
-                            }
-                        }
-                    }
+                    // Out of retries, and there is deliberately nothing left to
+                    // try. Two native peers use iroh's transports or they do
+                    // not connect: the `WebRTC` lane is the browser lane, and
+                    // tunnelling QUIC inside SCTP inside DTLS between two peers
+                    // that both speak UDP costs 6× throughput and 36× latency
+                    // for a path iroh already covers. See this module's header.
                     return Err(anyhow::anyhow!(
-                        "could not reach the mount producer: {error}"
+                        "could not reach the mount producer over IP or relay: {error}"
                     ));
                 }
             }

@@ -260,6 +260,112 @@ async fn webrtc_mode_mounts_over_data_channel_only() {
     let _ = std::fs::remove_dir_all(&tree);
 }
 
+/// **The native↔native pin: a data channel sitting right there must not win.**
+///
+/// `WebRTC` is the browser lane. Two native peers use iroh's own transports, and
+/// nothing in this repo asserted that before — the closest test,
+/// `the_mount_selects_webrtc_over_a_warm_relay_path` in `webrtc_mount.rs`,
+/// deliberately clears IP so the contest is webrtc-vs-relay, a different
+/// question.
+///
+/// So this sets up the adversarial case: a live, attached `WebRTC` session
+/// *and* a reachable IP path, then dials the ordinary ticket address. The
+/// selected path must be IP. Measured, the alternative is 6× less throughput at
+/// 36× the latency (`docs/perf/`), so a regression here is expensive and
+/// completely silent — every byte still arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_to_native_selects_ip_even_with_a_live_webrtc_session() {
+    let tree = temp_tree();
+    let secret = [17u8; SECRET_LEN];
+    let (producer, producer_webrtc) =
+        bind_webrtc(vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()]).await;
+    let producer_id = producer.id();
+    let producer_addr = producer.addr();
+    let server = spawn_signal_and_mount_server(
+        producer.clone(),
+        producer_webrtc,
+        producer_id,
+        secret,
+        tree.clone(),
+    );
+
+    // A native consumer that *does* carry the lane — exactly what `mount`
+    // builds, since the same handle is what the share mesh rides.
+    let (consumer, consumer_webrtc) = bind_webrtc(Vec::new()).await;
+    let consumer_id = consumer.id();
+
+    // Negotiate a real session, so the custom addr is live before we dial.
+    let signal = consumer
+        .connect(producer_addr.clone(), WEBRTC_SIGNAL_ALPN)
+        .await
+        .expect("dial signal");
+    let (mut send, mut recv) = signal.open_bi().await.expect("open signal");
+    let (pending, offer) = offer_with(consumer_id, &ice()).await.expect("offer");
+    send.write_all(&serde_json::to_vec(&offer).expect("encode"))
+        .await
+        .expect("send offer");
+    send.finish().expect("finish");
+    let raw = recv
+        .read_to_end(MAX_ENVELOPE_BYTES)
+        .await
+        .expect("read answer");
+    let answer: SignalEnvelope = serde_json::from_slice(&raw).expect("parse answer");
+    let session = Box::pin(pending.complete(&answer, Duration::from_secs(20)))
+        .await
+        .expect("complete");
+    consumer_webrtc
+        .attach(producer_id, session)
+        .expect("attach");
+    signal.close(0u32.into(), b"jsep done");
+
+    // The ordinary dial: the ticket address, which carries IP.
+    let mount = consumer
+        .connect(producer_addr, MOUNT_ALPN)
+        .await
+        .expect("dial mount over the ticket address");
+    assert_hello_readable(&mount, &secret).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if mount
+            .paths()
+            .iter()
+            .any(|path| path.is_selected() && path.is_ip())
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a native↔native mount must select an IP path, not the data channel \
+             (paths={:?}); WebRTC is the browser lane — see mount/webrtc.rs",
+            mount
+                .paths()
+                .iter()
+                .map(|path| {
+                    let kind = if path.is_relay() {
+                        "relay"
+                    } else if path.is_ip() {
+                        "ip"
+                    } else {
+                        "webrtc-or-other"
+                    };
+                    if path.is_selected() {
+                        format!("*{kind}")
+                    } else {
+                        kind.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    mount.close(0u32.into(), b"done");
+    producer.close().await;
+    server.abort();
+    let _ = std::fs::remove_dir_all(&tree);
+}
+
 /// `dynamic` fallback: when `WebRTC` cannot be used, mount still opens on the
 /// ticket address (direct IP here; iroh relay in production).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
