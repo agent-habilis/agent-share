@@ -37,12 +37,13 @@
 //! on one LAN and nowhere else. [`stun`] closes that on the host side; the
 //! browser's ICE agent does it natively once given `iceServers`.
 //!
-//! The iroh relay is still rendezvous-only for the SDP exchange. The browser
-//! backend may add a short-lived public TURN server to `iceServers` so ICE
-//! itself can relay when LAN/mDNS and NAT hairpin both fail. The host/`str0m`
-//! backend has no TURN client yet.
+//! The iroh relay carries the SDP exchange. **TURN is refused** — see
+//! [`accept_ice_uri`]: a consumer that cannot pair directly falls back to that
+//! same iroh relay rather than to a second relay at the ICE layer. Neither
+//! backend has a TURN client, and neither should grow one.
 
 mod addr;
+mod ice_uri;
 // Consumed by the browser backend. The host backend has its own equivalent in
 // `host::session`, built the same way for the same reasons — a generation per
 // session, and teardown on drop rather than on a cleanup branch.
@@ -60,9 +61,12 @@ mod addr;
     )
 )]
 mod registry;
+#[cfg(any(feature = "host", feature = "web"))]
+mod selector;
 mod signaling;
 
 pub use addr::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};
+pub use ice_uri::accept_ice_uri;
 pub use signaling::{MAX_ENVELOPE_BYTES, SIGNAL_VERSION, SignalEnvelope};
 
 /// Label of the single data channel each session carries. Both ends must use
@@ -122,6 +126,15 @@ impl WebRtcHandle {
         std::sync::Arc::clone(&self.inner)
     }
 
+    /// The path selector that keeps the relay a rendezvous, for
+    /// `Builder::path_selector`. Install it wherever [`Self::transport`] is
+    /// registered — see [`crate::selector`] for why registering the transport
+    /// alone is not enough.
+    #[must_use]
+    pub fn path_selector(&self) -> std::sync::Arc<dyn iroh::endpoint::transports::PathSelector> {
+        std::sync::Arc::new(selector::WebRtcPreferred)
+    }
+
     /// Attach a negotiated session for `remote`.
     ///
     /// # Errors
@@ -171,6 +184,15 @@ impl WebRtcHandle {
     #[must_use]
     pub fn transport(&self) -> std::sync::Arc<BrowserHubTransport> {
         std::sync::Arc::clone(&self.inner)
+    }
+
+    /// The path selector that keeps the relay a rendezvous, for
+    /// `Builder::path_selector`. Install it wherever [`Self::transport`] is
+    /// registered — see [`crate::selector`] for why registering the transport
+    /// alone is not enough.
+    #[must_use]
+    pub fn path_selector(&self) -> std::sync::Arc<dyn iroh::endpoint::transports::PathSelector> {
+        std::sync::Arc::new(selector::WebRtcPreferred)
     }
 
     /// Attach a negotiated browser session for `remote`.

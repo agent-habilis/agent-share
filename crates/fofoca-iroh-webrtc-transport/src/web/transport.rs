@@ -322,7 +322,57 @@ impl BrowserHubTransport {
         let peer_connection = self.sessions.with_live(remote, |handle| {
             handle._keepalive.peer_connection.clone()
         })?;
-        selected_remote_from_stats(&peer_connection).await
+        selected_candidate_from_stats(&peer_connection, "remoteCandidateId").await
+    }
+
+    /// Counters and round-trip time on the selected candidate pair.
+    ///
+    /// Returns `(bytes_sent, bytes_received, rtt_seconds)`. Wire bytes, not
+    /// payload: SCTP, DTLS and STUN framing are included, so this is what
+    /// actually crossed the network rather than what the application handed
+    /// over — the number that says where traffic really went.
+    ///
+    /// The counters are cumulative; a rate is the caller's job, from two
+    /// samples. WebRTC exposes no instantaneous throughput for a data channel
+    /// (`availableOutgoingBitrate` is media-bandwidth-estimation driven and is
+    /// absent here), so differencing is the only route.
+    ///
+    /// `rtt` is `None` when the pair has not been measured yet, rather than
+    /// zero — a real 0 ms and "not known" should not render alike.
+    pub async fn selected_pair_stats(
+        &self,
+        remote: &EndpointId,
+    ) -> Option<(f64, f64, Option<f64>)> {
+        let peer_connection = self
+            .sessions
+            .with_live(remote, |handle| handle._keepalive.peer_connection.clone())?;
+        let (_, pair) = selected_pair_from_stats(&peer_connection).await?;
+        let read = |key: &str| {
+            Reflect::get(&pair, &JsValue::from_str(key))
+                .ok()
+                .and_then(|value| value.as_f64())
+        };
+        Some((
+            read("bytesSent").unwrap_or(0.0),
+            read("bytesReceived").unwrap_or(0.0),
+            read("currentRoundTripTime"),
+        ))
+    }
+
+    /// Selected ICE **local** candidate for a live session, if any.
+    ///
+    /// The other half of [`Self::selected_remote_candidate`]. Without it a tab
+    /// can name every peer's address but not its own, so the roster shows the
+    /// local row with no ip at all — the one row where the answer is always
+    /// available, since it comes from our own `getStats`.
+    pub async fn selected_local_candidate(
+        &self,
+        remote: &EndpointId,
+    ) -> Option<(String, String)> {
+        let peer_connection = self
+            .sessions
+            .with_live(remote, |handle| handle._keepalive.peer_connection.clone())?;
+        selected_candidate_from_stats(&peer_connection, "localCandidateId").await
     }
 
     /// Tear down the session for `remote`, if any.
@@ -348,9 +398,20 @@ impl std::fmt::Debug for BrowserHubTransport {
 }
 
 /// Read the selected ICE pair's remote candidate via `RTCPeerConnection.getStats`.
-async fn selected_remote_from_stats(
+/// Address + candidate type for one side of the selected candidate pair.
+///
+/// `side` is the stats field naming the candidate to follow —
+/// `remoteCandidateId` for the peer, `localCandidateId` for us. Both sides come
+/// from the same `getStats` walk, so the pair a row reports is the pair that is
+/// actually carrying traffic.
+/// Index a `getStats` report by id, and find the selected candidate pair.
+///
+/// Shared so the candidate reader and the byte reader agree on *which* pair
+/// they are describing: an address from one pair and counters from another
+/// would be a plausible-looking lie.
+async fn selected_pair_from_stats(
     peer_connection: &RtcPeerConnection,
-) -> Option<(String, String)> {
+) -> Option<(std::collections::HashMap<String, js_sys::Object>, js_sys::Object)> {
     let report = JsFuture::from(peer_connection.get_stats()).await.ok()?;
     let mut by_id: std::collections::HashMap<String, js_sys::Object> =
         std::collections::HashMap::new();
@@ -396,8 +457,21 @@ async fn selected_remote_from_stats(
         }
     }
     let pair_id = selected_pair_id?;
-    let pair = by_id.get(&pair_id)?;
-    let remote_id = Reflect::get(pair, &JsValue::from_str("remoteCandidateId"))
+    let pair = by_id.get(&pair_id)?.clone();
+    Some((by_id, pair))
+}
+
+/// Address + candidate type for one side of the selected pair.
+///
+/// `side` is the stats field naming the candidate to follow —
+/// `remoteCandidateId` for the peer, `localCandidateId` for us.
+async fn selected_candidate_from_stats(
+    peer_connection: &RtcPeerConnection,
+    side: &str,
+) -> Option<(String, String)> {
+    let (by_id, pair) = selected_pair_from_stats(peer_connection).await?;
+    let pair = &pair;
+    let remote_id = Reflect::get(pair, &JsValue::from_str(side))
         .ok()
         .and_then(|v| v.as_string())?;
     let remote = by_id.get(&remote_id)?;

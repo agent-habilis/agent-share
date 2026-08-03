@@ -313,13 +313,26 @@ remains future work.
 
 **Effort:** Low.
 
-### 11. Investigate `PathSelector` to collapse the two-connection dance — research task
+### 11. `PathSelector` does **not** collapse the two-connection dance — answered, shipped
 
-**What:** iroh 1.0-rc.1 added a gated `PathSelector` trait for controlling which path/transport a connection uses ([#3848](https://github.com/n0-computer/iroh/issues/3848)). Spike whether it — or upstream multipath work — lets a live signal connection adopt the WebRTC path, collapsing signal-connection + fresh-dial (and the wasm two-endpoints-one-key workaround) into one connection.
+**Answer: no.** A `PathSelector` chooses among paths that are *already open*; it cannot open one. When the JSEP exchange has warmed a relay path, the mount connection ends up with exactly **one** path — the relay — and the WebRTC path is never opened at all, so there is nothing for a selector to pick. Measured, consumer with IP cleared so the contest is relay-vs-webrtc:
 
-**Why:** The two-connection dance is our largest source of incidental complexity, and it exists purely because of an iroh path-selection limitation n0 is actively building API around. Since we already pin an iroh fork, we are well-positioned to prototype.
+| consumer shape | paths on the mount connection |
+|---|---|
+| one endpoint, no selector | `["*relay"]` |
+| one endpoint + selector | `["*relay"]` |
+| one endpoint + selector + 1.5s settle | `["*relay"]` |
+| **two endpoints, same key, mount relay-free** | `["*webrtc"]` |
 
-**Effort:** A day of reading + a spike / potentially the biggest simplification available, but gated on upstream.
+Root cause is the one this document already records at "Why two connections": iroh fans a connect's Initial out to candidate paths only *while the remote has no selected path*. The warm relay answers first and becomes the sole path. `webrtc_only_addr` cannot prevent that, because iroh merges the dialled address into an address book that already holds the relay from the signal dial.
+
+**What shipped anyway:** `crates/fofoca-iroh-webrtc-transport/src/selector.rs` — tiers `ip > webrtc > relay > other custom`, with a `best_of` that treats an *unmeasured* path as a live candidate (iroh's `BiasedRttPathSelector` skips `stats() == None` and only re-selects on connection/path events, so a path that opens just before its first RTT sample is passed over once and never reconsidered). It is correct policy and worth having, but it is **not** what fixes the relay-wins bug — the two-endpoint split is.
+
+**The dance got deeper, not shallower.** The fix is a *second endpoint*: signal endpoint keeps the relay for JSEP; mount endpoint has the relay disabled and carries the WebRTC transport; both bind the **same secret key**, so the producer sees one identity and the peer count stays honest. Regression test: `the_mount_selects_webrtc_over_a_warm_relay_path` in `crates/agent-share/tests/webrtc_mount.rs`, which fails without the split.
+
+**Constraint discovered while building it:** only the *signal* endpoint may hold a relay. Two same-key endpoints both registering with one relay fight over the registration and ICE never completes — the data channel simply times out.
+
+**Still open upstream:** in-place path upgrade. If iroh ever gains the ability to open a custom path on a live connection, the split collapses and both this and recommendation 6 resolve together.
 
 ### 12. WebTransport + certhash lane for reachable native producers — park (future direction)
 

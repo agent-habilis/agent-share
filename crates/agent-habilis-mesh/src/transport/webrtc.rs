@@ -691,7 +691,8 @@ mod backend {
         _handle: &WebRtcHandle,
         _profile: IceProfile,
     ) -> Result<Offer> {
-        let ice = IceServers::with_turn_fallback().await;
+        // STUN only: TURN is refused by `fofoca-iroh-webrtc-transport`.
+        let ice = IceServers::default();
         let (pending, envelope) = browser_offer(local, &ice)
             .await
             .map_err(|error| anyhow::anyhow!("build WebRTC offer: {error:?}"))?;
@@ -732,7 +733,8 @@ mod backend {
         offer: &SignalEnvelope,
         _profile: IceProfile,
     ) -> Result<Answer> {
-        let ice = IceServers::with_turn_fallback().await;
+        // STUN only: TURN is refused by `fofoca-iroh-webrtc-transport`.
+        let ice = IceServers::default();
         let (pending, envelope) = browser_answer(local, offer, &ice)
             .await
             .map_err(|error| anyhow::anyhow!("build WebRTC answer: {error:?}"))?;

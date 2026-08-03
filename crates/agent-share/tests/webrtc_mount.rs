@@ -170,6 +170,246 @@ async fn a_share_is_readable_over_a_webrtc_data_channel() {
     let _ = std::fs::remove_dir_all(&tree);
 }
 
+// ── the relay must lose the mount dial ──────────────────────────────────────
+
+/// Bind an endpoint on a real relay, with `WebRTC` and the path selector.
+///
+/// Unlike [`endpoint_with_webrtc`] this keeps a relay: the whole point is to
+/// have a *warm* non-`WebRTC` path in the address book when the mount is
+/// dialled.
+async fn endpoint_on_relay(
+    relay: iroh::RelayMap,
+    alpns: Vec<Vec<u8>>,
+    with_selector: bool,
+    clear_ip: bool,
+) -> (Endpoint, WebRtcHandle) {
+    let mut key_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
+    let key = SecretKey::from_bytes(&key_bytes);
+    let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
+    let mut builder = Endpoint::builder(presets::Minimal)
+        .secret_key(key)
+        .relay_mode(iroh::RelayMode::Custom(relay))
+        // `run_relay_server` serves self-signed certs, so an endpoint that
+        // verifies them never completes the relay handshake and simply reports
+        // no relay URL at all — which reads as "the relay is fine, the address
+        // is just empty". iroh's own tests do exactly this.
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+        .clear_address_lookup()
+        .alpns(alpns)
+        .add_custom_transport(handle.transport());
+    if clear_ip {
+        // Stand in for a browser, which is the case this bug is about: iroh's
+        // whole IP stack is `cfg(not(wasm_browser))`, so a tab's only paths are
+        // the relay and WebRTC. Leaving IP on would make the contest ip-vs-
+        // webrtc, which `ip` correctly wins under this selector's tier order —
+        // a different question than the one under test.
+        builder = builder.clear_ip_transports();
+    }
+    if with_selector {
+        builder = builder.path_selector(handle.path_selector());
+    }
+    let endpoint = builder.bind().await.expect("bind endpoint");
+    (endpoint, handle)
+}
+
+/// The regression this whole change exists for.
+///
+/// Sequence, exactly as the browser does it: JSEP over the relay, then a
+/// *fresh* mount dial against a `WebRTC`-only address. Because the signal dial
+/// already put the producer's relay URL in this endpoint's address book, iroh
+/// fans the mount Initial across both and the warm relay answers first. That
+/// alone would be fine — iroh re-selects as paths open — except its default
+/// selector skips a path whose RTT is not sampled yet and only re-selects on
+/// connection/path events, so the WebRTC path is passed over once and the relay
+/// stays selected for the life of the connection.
+///
+/// The assertion is on the **selected** path, not on a `WebRTC` path merely
+/// existing: the old code asserted existence and passed while every byte went
+/// over the relay.
+///
+/// Run with the selector off (`with_selector = false` below) and this fails —
+/// that is what proves the selector is doing the work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_mount_selects_webrtc_over_a_warm_relay_path() {
+    let (relay_map, relay_url, _relay_guard) = iroh::test_utils::run_relay_server()
+        .await
+        .expect("spawn a local relay");
+
+    let (producer, producer_webrtc) = endpoint_on_relay(
+        relay_map.clone(),
+        vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()],
+        true,
+        false,
+    )
+    .await;
+    let producer_id = producer.id();
+    // Race `online()` with a deadline the way `wait_online` and the browser
+    // producer both do: it never resolves when the relay handshake stalls.
+    let _ = tokio::time::timeout(Duration::from_secs(15), producer.online()).await;
+    // Name the relay explicitly rather than trusting `endpoint.addr()` — the
+    // point of the test is that the signal dial warms *the relay*, so the
+    // address it dials must carry the relay and nothing else. (iroh's own relay
+    // tests build the peer address the same way.)
+    let producer_addr = EndpointAddr::new(producer_id).with_relay_url(relay_url);
+
+    let accept_endpoint = producer.clone();
+    let accept_webrtc = producer_webrtc.clone();
+    let server = tokio::spawn(async move {
+        while let Some(incoming) = accept_endpoint.accept().await {
+            let webrtc = accept_webrtc.clone();
+            tokio::spawn(async move {
+                let Ok(conn) = incoming.await else { return };
+                if conn.alpn() != WEBRTC_SIGNAL_ALPN {
+                    // Hold the mount connection open so its paths stay live
+                    // while the consumer inspects them.
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    return;
+                }
+                let (mut send, mut recv) = conn.accept_bi().await.expect("accept signal");
+                let raw = recv
+                    .read_to_end(MAX_ENVELOPE_BYTES)
+                    .await
+                    .expect("read offer");
+                let offer: SignalEnvelope = serde_json::from_slice(&raw).expect("parse offer");
+                let (pending, answer) = answer_with(producer_id, &offer, &ice())
+                    .await
+                    .expect("build answer");
+                send.write_all(&serde_json::to_vec(&answer).expect("encode answer"))
+                    .await
+                    .expect("send answer");
+                send.finish().expect("finish");
+                let session = Box::pin(pending.complete(Duration::from_secs(20)))
+                    .await
+                    .expect("complete answer");
+                webrtc.attach(conn.remote_id(), session).expect("attach");
+            });
+        }
+    });
+
+    // EXPERIMENT (consumer-land): the signal endpoint keeps the relay, and a
+    // *second* endpoint bound on the SAME key, sharing the SAME hub, carries
+    // the mount with the relay transport removed entirely.
+    let mut key_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
+    let consumer_key = SecretKey::from_bytes(&key_bytes);
+    let consumer_webrtc = WebRtcHandle::new(WebRtcTransport::new(consumer_key.public()));
+    // The signal endpoint deliberately does NOT register the WebRTC transport:
+    // it only speaks JSEP over the relay, and a transport can bind to one
+    // endpoint. The session it negotiates is attached to the hub the *mount*
+    // endpoint owns, which is all that matters.
+    let consumer = Endpoint::builder(presets::Minimal)
+        .secret_key(consumer_key.clone())
+        .relay_mode(iroh::RelayMode::Custom(relay_map.clone()))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+        .clear_address_lookup()
+        .clear_ip_transports()
+        .bind()
+        .await
+        .expect("bind consumer signal endpoint");
+    let mount_ep = Endpoint::builder(presets::Minimal)
+        .secret_key(consumer_key)
+        // Relay OFF, and load-bearing: two endpoints on one key both
+        // registering with the same relay fight over the registration and ICE
+        // never completes (measured — the data channel times out). Only the
+        // signal endpoint may hold the relay.
+        .relay_mode(iroh::RelayMode::Disabled)
+        .clear_address_lookup()
+        .clear_ip_transports()
+        .clear_relay_transports()
+        .add_custom_transport(consumer_webrtc.transport())
+        .bind()
+        .await
+        .expect("bind consumer mount endpoint");
+    assert_eq!(
+        consumer.id(),
+        mount_ep.id(),
+        "both endpoints must share one identity, or the producer counts two peers"
+    );
+    let consumer_id = consumer.id();
+    let _ = tokio::time::timeout(Duration::from_secs(15), consumer.online()).await;
+
+    // 1. JSEP over the relay. This is what warms the relay path.
+    let signal = consumer
+        .connect(producer_addr, WEBRTC_SIGNAL_ALPN)
+        .await
+        .expect("dial signal ALPN");
+    let (mut send, mut recv) = signal.open_bi().await.expect("open signal stream");
+    let (pending, offer) = offer_with(consumer_id, &ice()).await.expect("build offer");
+    send.write_all(&serde_json::to_vec(&offer).expect("encode offer"))
+        .await
+        .expect("send offer");
+    send.finish().expect("finish");
+    let raw = recv
+        .read_to_end(MAX_ENVELOPE_BYTES)
+        .await
+        .expect("read answer");
+    let answer: SignalEnvelope = serde_json::from_slice(&raw).expect("parse answer");
+    let session = Box::pin(pending.complete(&answer, Duration::from_secs(20)))
+        .await
+        .expect("complete offer");
+    consumer_webrtc
+        .attach(producer_id, session)
+        .expect("attach session");
+    signal.close(0u32.into(), b"jsep done");
+
+
+    // 2. The mount dial, WebRTC-only address — which iroh will still merge with
+    //    the relay it already knows.
+    let webrtc_only = EndpointAddr::from_parts(
+        producer_id,
+        [TransportAddr::Custom(custom_addr(producer_id))],
+    );
+    let mount = mount_ep
+        .connect(webrtc_only, MOUNT_ALPN)
+        .await
+        .expect("dial the mount ALPN");
+
+    // 3. The assertion: the *selected* path settles on WebRTC.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let (selected_is_webrtc, observed) = loop {
+        let observed = mount
+            .paths()
+            .iter()
+            .map(|path| {
+                let kind = match path.remote_addr() {
+                    TransportAddr::Relay(..) => "relay",
+                    TransportAddr::Ip(_) => "ip",
+                    TransportAddr::Custom(addr)
+                        if addr.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID =>
+                    {
+                        "webrtc"
+                    }
+                    TransportAddr::Custom(_) | _ => "other",
+                };
+                if path.is_selected() {
+                    format!("*{kind}")
+                } else {
+                    kind.to_owned()
+                }
+            })
+            .collect::<Vec<_>>();
+        if observed.iter().any(|label| label == "*webrtc") {
+            break (true, observed);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break (false, observed);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(
+        selected_is_webrtc,
+        "the mount must select the WebRTC path, not the warm relay \
+         (paths={observed:?}); a WebRTC path merely *existing* is what the old \
+         check tested, and it passed while every byte went over the relay"
+    );
+
+    mount.close(0u32.into(), b"done");
+    server.abort();
+    consumer.close().await;
+    producer.close().await;
+}
+
 async fn fetch_manifest(
     conn: &iroh::endpoint::Connection,
     secret: &[u8; SECRET_LEN],

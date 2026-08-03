@@ -202,7 +202,10 @@ impl Default for IceConfig {
             // Two operators, so one being down is not an outage. These only
             // ever learn our public ip:port — no traffic flows through them.
             stun_servers: vec![
-                "stun.l.google.com:19302".to_owned(),
+                // `stun1`, not the bare `stun.l.google.com` — see the note in
+                // `web/jsep.rs`. Blocklists null-route the bare name to 0.0.0.0,
+                // which costs a timeout per gather rather than failing fast.
+                "stun1.l.google.com:19302".to_owned(),
                 "stun.cloudflare.com:3478".to_owned(),
             ],
             stun_timeout: Duration::from_secs(2),

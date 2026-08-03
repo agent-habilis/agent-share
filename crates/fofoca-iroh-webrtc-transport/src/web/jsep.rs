@@ -16,7 +16,7 @@ use web_sys::{
     RtcIceGatheringState, RtcPeerConnection, RtcSdpType, RtcSessionDescriptionInit,
 };
 
-use crate::{DATA_CHANNEL_LABEL, SIGNAL_VERSION, SignalEnvelope};
+use crate::{DATA_CHANNEL_LABEL, SIGNAL_VERSION, SignalEnvelope, accept_ice_uri};
 
 use super::transport::BrowserHubTransport;
 use iroh_base::EndpointId;
@@ -24,40 +24,19 @@ use iroh_base::EndpointId;
 /// How long to wait for the data channel after the answer is applied.
 const CHANNEL_OPEN_DEADLINE_MS: f64 = 60_000.0;
 /// How long to let gathering run before settling for the candidates in hand.
-/// TURN allocate is slower than host/srflx; give it room before we freeze SDP.
+/// Host is instant and srflx costs one STUN round trip, so this is generous —
+/// it was sized for TURN allocate, which no longer happens.
 const ICE_GATHERING_DEADLINE_MS: f64 = 10_000.0;
 const POLL_MS: i32 = 50;
 
-/// Public short-lived TURN credentials (elixir-webrtc Rel). Not for production
-/// traffic volume — replace with a project-owned TURN when that matters.
-const ELIXIR_TURN_CREDENTIALS_URL: &str =
-    "https://turn.elixir-webrtc.org/?service=turn&username=agent-share";
-/// Give up on the credential fetch after this long; negotiation continues
-/// STUN-only, same as a failed fetch.
-const TURN_FETCH_TIMEOUT_MS: i32 = 1_500;
-/// Cache lifetime when the credential expiry cannot be read from the username.
-const TURN_CACHE_FALLBACK_TTL_MS: f64 = 120_000.0;
-/// Refresh this long before the credential's declared expiry.
-const TURN_EXPIRY_MARGIN_MS: f64 = 60_000.0;
-
-/// Cached TURN credentials, so repeated connects in one tab do not each pay a
-/// third-party round-trip inside negotiation. wasm is single-threaded.
-struct CachedTurn {
-    server: IceServer,
-    expires_at_ms: f64,
-}
-
-thread_local! {
-    static TURN_CACHE: std::cell::RefCell<Option<CachedTurn>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// One `RTCIceServer` entry (STUN or credentialed TURN).
+/// One `RTCIceServer` entry.
+///
+/// No `username`/`credential`: those exist only for TURN, which this crate
+/// refuses (see [`crate::accept_ice_uri`]). Dropping the fields means a
+/// credentialed server cannot be expressed, let alone configured.
 #[derive(Debug, Clone)]
 pub struct IceServer {
     pub urls: Vec<String>,
-    pub username: Option<String>,
-    pub credential: Option<String>,
 }
 
 /// ICE servers for the browser's own agent.
@@ -68,11 +47,21 @@ impl Default for IceServers {
     fn default() -> Self {
         Self(vec![IceServer {
             urls: vec![
-                "stun:stun.l.google.com:19302".to_owned(),
+                // `stun1`, not the bare `stun.l.google.com`: blocklists name the
+                // latter explicitly and null-route it to 0.0.0.0, which is worse
+                // than NXDOMAIN — the agent waits out a timeout on an
+                // unroutable address instead of failing fast, spending part of
+                // `ICE_GATHERING_DEADLINE_MS` on a server that cannot answer.
+                // Measured behind an AdGuard resolver: `stun.l.google.com` →
+                // 0.0.0.0, `stun1..4.l.google.com` → 74.125.250.129.
+                //
+                // Two servers, deliberately, and from two *operators* — that is
+                // the redundancy that counts. `stun2/3/4` share one address with
+                // `stun1`, so they would be redundancy in name only, and every
+                // extra server costs a srflx candidate per local interface.
+                "stun:stun1.l.google.com:19302".to_owned(),
                 "stun:stun.cloudflare.com:3478".to_owned(),
             ],
-            username: None,
-            credential: None,
         }])
     }
 }
@@ -83,45 +72,23 @@ impl IceServers {
         Self(Vec::new())
     }
 
-    /// STUN defaults plus a short-lived public TURN relay when the fetch works.
-    ///
-    /// Browser↔browser on the same NAT often cannot use mDNS host candidates
-    /// (macOS Local Network) or hairpin on `srflx`. TURN is the path that still
-    /// connects. A failed or slow fetch leaves STUN-only — same as before.
-    /// Credentials are cached until shortly before their expiry, so repeated
-    /// connects pay the third-party round-trip at most once.
-    pub async fn with_turn_fallback() -> Self {
-        let mut servers = Self::default();
-        if let Some(turn) = cached_or_fetch_turn().await {
-            servers.0.push(turn);
-        }
-        servers
-    }
-
     fn to_configuration(&self) -> RtcConfiguration {
         let config = RtcConfiguration::new();
         let servers = js_sys::Array::new();
         for server in &self.0 {
             let entry = js_sys::Object::new();
             let urls = js_sys::Array::new();
-            for url in &server.urls {
-                urls.push(&JsValue::from_str(url));
+            // The enforcement point: anything `accept_ice_uri` refuses never
+            // reaches the browser. TURN cannot be configured here even by
+            // mistake, and a query string Safari would throw on is stripped
+            // before it can take down the whole peer connection.
+            for url in server.urls.iter().filter_map(|url| accept_ice_uri(url)) {
+                urls.push(&JsValue::from_str(&url));
+            }
+            if urls.length() == 0 {
+                continue;
             }
             let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("urls"), &urls);
-            if let Some(username) = &server.username {
-                let _ = js_sys::Reflect::set(
-                    &entry,
-                    &JsValue::from_str("username"),
-                    &JsValue::from_str(username),
-                );
-            }
-            if let Some(credential) = &server.credential {
-                let _ = js_sys::Reflect::set(
-                    &entry,
-                    &JsValue::from_str("credential"),
-                    &JsValue::from_str(credential),
-                );
-            }
             servers.push(&entry);
         }
         config.set_ice_servers(&servers);
@@ -129,112 +96,26 @@ impl IceServers {
     }
 }
 
-/// Cached credentials if still fresh, else one bounded fetch. `None` means
-/// STUN-only this round (fetch failed or timed out).
-async fn cached_or_fetch_turn() -> Option<IceServer> {
-    let now_ms = js_sys::Date::now();
-    let cached = TURN_CACHE.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .filter(|cached| now_ms < cached.expires_at_ms)
-            .map(|cached| cached.server.clone())
-    });
-    if cached.is_some() {
-        return cached;
-    }
-
-    let fetch = fetch_elixir_turn();
-    let timeout = sleep_ms(TURN_FETCH_TIMEOUT_MS);
-    futures::pin_mut!(fetch);
-    futures::pin_mut!(timeout);
-    match futures::future::select(fetch, timeout).await {
-        futures::future::Either::Left((Ok(turn), _)) => {
-            web_sys::console::log_1(&JsValue::from_str(&format!(
-                "[agent-share webrtc] TURN ready ({})",
-                turn.urls.join(", ")
-            )));
-            TURN_CACHE.with(|cell| {
-                *cell.borrow_mut() = Some(CachedTurn {
-                    server: turn.clone(),
-                    expires_at_ms: turn_expiry_ms(&turn, now_ms),
-                });
-            });
-            Some(turn)
-        }
-        futures::future::Either::Left((Err(error), _)) => {
+/// Build an `RTCPeerConnection`, degrading rather than failing when the browser
+/// refuses a server entry.
+///
+/// The constructor validates every ICE URL and throws on the first bad one, so
+/// a single unusable entry costs the whole connection. [`accept_ice_uri`]
+/// filters what we control, but the configuration can still be rejected for a
+/// reason we have not met yet — and a peer connection with no ICE servers still
+/// gathers host candidates, which is strictly better than none at all.
+fn new_peer_connection(ice: &IceServers) -> Result<RtcPeerConnection, JsValue> {
+    match RtcPeerConnection::new_with_configuration(&ice.to_configuration()) {
+        Ok(peer_connection) => Ok(peer_connection),
+        Err(error) => {
             web_sys::console::warn_1(&JsValue::from_str(&format!(
-                "[agent-share webrtc] TURN credentials unavailable; STUN-only: {error:?}"
+                "[agent-share webrtc] the browser refused the ICE configuration \
+                 ({error:?}); retrying with no ICE servers (host candidates only)"
             )));
-            None
-        }
-        futures::future::Either::Right(((), _)) => {
-            web_sys::console::warn_1(&JsValue::from_str(&format!(
-                "[agent-share webrtc] TURN credential fetch exceeded \
-                 {TURN_FETCH_TIMEOUT_MS}ms; STUN-only"
-            )));
-            None
+            RtcPeerConnection::new_with_configuration(&IceServers::host_only().to_configuration())
+                .map_err(|error| js_err("RTCPeerConnection", error))
         }
     }
-}
-
-/// When to drop cached credentials. TURN-REST usernames are
-/// `<unix-expiry>:<id>`; trust that minus a margin, else a fixed TTL.
-fn turn_expiry_ms(server: &IceServer, now_ms: f64) -> f64 {
-    server
-        .username
-        .as_deref()
-        .and_then(|username| username.split(':').next())
-        .and_then(|stamp| stamp.parse::<f64>().ok())
-        .map(|expiry_secs| expiry_secs * 1000.0 - TURN_EXPIRY_MARGIN_MS)
-        .filter(|expiry_ms| *expiry_ms > now_ms)
-        .unwrap_or(now_ms + TURN_CACHE_FALLBACK_TTL_MS)
-}
-
-#[derive(serde::Deserialize)]
-struct ElixirTurnResponse {
-    username: String,
-    password: String,
-    uris: Vec<String>,
-}
-
-async fn fetch_elixir_turn() -> Result<IceServer, JsValue> {
-    let window = web_sys::window().ok_or_else(|| JsValue::from_str("no Window"))?;
-    let opts = web_sys::RequestInit::new();
-    opts.set_method("POST");
-    let request = web_sys::Request::new_with_str_and_init(ELIXIR_TURN_CREDENTIALS_URL, &opts)
-        .map_err(|error| js_err("TURN request", error))?;
-    let response = JsFuture::from(window.fetch_with_request(&request))
-        .await
-        .map_err(|error| js_err("TURN fetch", error))?;
-    let response: web_sys::Response = response
-        .dyn_into()
-        .map_err(|_| JsValue::from_str("TURN fetch: not a Response"))?;
-    if !response.ok() {
-        return Err(JsValue::from_str(&format!(
-            "TURN credentials HTTP {}",
-            response.status()
-        )));
-    }
-    let text = JsFuture::from(
-        response
-            .text()
-            .map_err(|error| js_err("TURN response text", error))?,
-    )
-    .await
-    .map_err(|error| js_err("TURN response body", error))?;
-    let text = text
-        .as_string()
-        .ok_or_else(|| JsValue::from_str("TURN response was not a string"))?;
-    let parsed: ElixirTurnResponse =
-        serde_json::from_str(&text).map_err(|error| any_err("TURN credentials JSON", error))?;
-    if parsed.uris.is_empty() {
-        return Err(JsValue::from_str("TURN credentials had no uris"));
-    }
-    Ok(IceServer {
-        urls: parsed.uris,
-        username: Some(parsed.username),
-        credential: Some(parsed.password),
-    })
 }
 
 /// A negotiated browser session attached into a [`BrowserHubTransport`].
@@ -345,10 +226,7 @@ pub async fn offer(
     local: EndpointId,
     ice: &IceServers,
 ) -> Result<(PendingOffer, SignalEnvelope), JsValue> {
-    let peer_connection = OpenPeerConnection::new(
-        RtcPeerConnection::new_with_configuration(&ice.to_configuration())
-            .map_err(|error| js_err("RTCPeerConnection", error))?,
-    );
+    let peer_connection = OpenPeerConnection::new(new_peer_connection(ice)?);
     // Unreliable + unordered: the channel carries QUIC datagrams, and QUIC
     // already owns loss recovery and congestion control. Reliable ordered
     // SCTP underneath it would stack a second retransmission loop and
@@ -455,10 +333,7 @@ pub async fn answer(
         return Err(JsValue::from_str("expected an offer envelope"));
     };
 
-    let peer_connection = OpenPeerConnection::new(
-        RtcPeerConnection::new_with_configuration(&ice.to_configuration())
-            .map_err(|error| js_err("RTCPeerConnection", error))?,
-    );
+    let peer_connection = OpenPeerConnection::new(new_peer_connection(ice)?);
 
     let (channel_tx, channel_rx) = futures::channel::oneshot::channel::<RtcDataChannel>();
     let channel_tx = std::cell::RefCell::new(Some(channel_tx));

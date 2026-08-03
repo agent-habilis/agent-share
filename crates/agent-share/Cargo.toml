@@ -74,3 +74,12 @@ async-trait = "0.1.89"
 # fallback, which on a 70k-file share would cost a full stat sweep per tick.
 notify = "8"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+# `test-utils` brings `iroh::test_utils::run_relay_server`, which the path
+# selection regression test needs: reproducing "the warm relay wins the mount
+# dial and is pinned forever" requires a real relay path in the address book,
+# and every other test here runs with `RelayMode::Disabled` precisely to stay
+# off the network. A dev-dependency, so the feature is not unified into the
+# shipped binary (resolver 3 keeps dev-only features out of a plain build).
+iroh = { version = "1.0.1", features = ["tls-ring", "unstable-custom-transports", "test-utils"] }

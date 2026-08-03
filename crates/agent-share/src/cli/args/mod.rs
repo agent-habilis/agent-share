@@ -40,6 +40,13 @@ pub(crate) struct Cli {
     #[arg(long, hide = true)]
     pub no_mount: bool,
 
+    /// Mount data path: `webrtc` forces the data channel and fails if the
+    /// mount settles anywhere else. Omit for the default, which prefers iroh's
+    /// own hole-punched paths and falls to `WebRTC` only after the discovery
+    /// deadline.
+    #[arg(long)]
+    pub transport: Option<String>,
+
     /// Output format: human (default) or json (the bare mount command).
     #[arg(long, default_value = "human")]
     pub output: OutputFormat,

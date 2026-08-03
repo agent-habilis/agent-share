@@ -56,9 +56,9 @@ with `IceConfig`; `IceConfig::host_only()` keeps the tests offline.
 
 The browser needs none of this: `IceServers` goes into the `RtcConfiguration`
 and the platform's ICE agent gathers for free. Prefer
-`IceServers::with_turn_fallback()` so ICE can also pick up a short-lived public
-TURN relay when LAN/mDNS and NAT hairpin both fail. The iroh relay remains
-rendezvous-only for the SDP exchange; host/`str0m` still has no TURN client.
+`IceServers::default()` — STUN only. **TURN is refused** by `accept_ice_uri`:
+this project relays through its own iroh relay, so a peer that cannot pair
+directly falls back there rather than to a second relay at the ICE layer.
 
 ## Building for wasm on macOS
 

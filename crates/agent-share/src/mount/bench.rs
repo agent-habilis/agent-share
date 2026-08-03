@@ -334,19 +334,43 @@ async fn connect_forced(
             Ok((endpoint, conn, "relay"))
         }
         BenchTransport::WebRtc => {
+            // Two endpoints on one key — the same split the browser client
+            // uses, and for the same reason. The signal endpoint keeps whatever
+            // transports the ticket implies, because JSEP has to reach the
+            // producer somehow (on a loopback ticket that is IP, since there is
+            // no relay at all). The mount endpoint has IP cleared and the relay
+            // disabled, so the only path it *can* select is the data channel.
+            //
+            // Clearing IP on a single endpoint cannot work: the same endpoint
+            // has to dial the signal ALPN, and on loopback that would leave it
+            // with no transport at all. Without the split the assertion below
+            // fires with `paths=["*ip", "relay"]` — measured.
             let webrtc = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-            let endpoint = build_endpoint(
+            let signal_endpoint = build_endpoint(
                 &ticket.lookups,
+                Some(key.clone()),
+                None,
+                Vec::new(),
+                None,
+                false,
+            )
+            .await?;
+            add_peer_addr(&signal_endpoint, ticket.addr.clone())?;
+
+            let mut mount_lookups = ticket.lookups.clone();
+            mount_lookups.relay = crate::protocol::swarm::RelayChoice::Disabled;
+            let endpoint = build_endpoint(
+                &mount_lookups,
                 Some(key),
                 None,
                 Vec::new(),
                 Some(webrtc.clone()),
-                false,
+                true,
             )
             .await?;
-            add_peer_addr(&endpoint, ticket.addr.clone())?;
+
             let webrtc_only = Box::pin(dial_webrtc(
-                &endpoint,
+                &signal_endpoint,
                 ticket.addr.clone(),
                 &webrtc,
                 &IceConfig::default(),
@@ -357,6 +381,8 @@ async fn connect_forced(
                 .connect(webrtc_only, MOUNT_ALPN)
                 .await
                 .context("dial mount over WebRTC")?;
+            super::webrtc::ensure_webrtc_selected(&conn, "webrtc bench").await?;
+            signal_endpoint.close().await;
             Ok((endpoint, conn, "webrtc"))
         }
     }

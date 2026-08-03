@@ -37,7 +37,13 @@ const RETRY_DELAY: Duration = Duration::from_secs(3);
 /// # Errors
 /// A malformed ticket, an unreachable producer, a hostile manifest, a bad
 /// target directory, or the NFS bridge failing to bind.
-pub(crate) async fn attach(ticket: &str, target: &Path, no_mount: bool, json: bool) -> Result<()> {
+pub(crate) async fn attach(
+    ticket: &str,
+    target: &Path,
+    no_mount: bool,
+    json: bool,
+    webrtc_only: bool,
+) -> Result<()> {
     let ticket = MountTicket::decode(ticket)?;
     // Pin a key so the WebRTC transport advertises the identity this endpoint
     // binds — the producer does the same, for the same reason.
@@ -47,17 +53,27 @@ pub(crate) async fn attach(ticket: &str, target: &Path, no_mount: bool, json: bo
     let webrtc = WebRtcHandle::new(fofoca_iroh_webrtc_transport::WebRtcTransport::new(
         key.public(),
     ));
+    // `clear_ip` under `--transport webrtc`, for the same reason the bench's
+    // WebRTC arm sets it: a lane is pinned by removing the alternatives, not by
+    // hoping the preferred one wins a race. The address book is seeded with the
+    // producer's IP and relay below (the JSEP dial needs them), iroh fans the
+    // mount Initial across everything it knows, and on one host the direct IP
+    // path answers first — measured, the assertion reports
+    // `paths=["*ip", "relay"]`. The WebRTC lane keeps its own UDP socket, so
+    // ICE is unaffected; the relay stays for rendezvous.
     let endpoint = build_endpoint(
         &ticket.lookups,
         Some(key),
         None,
         Vec::new(),
         Some(webrtc.clone()),
-        false,
+        webrtc_only,
     )
     .await?;
     add_peer_addr(&endpoint, ticket.addr.clone())?;
-    let client = RemoteClient::new(endpoint.clone(), ticket).with_webrtc(webrtc);
+    let client = RemoteClient::new(endpoint.clone(), ticket)
+        .with_webrtc(webrtc)
+        .webrtc_only(webrtc_only);
 
     let client = Arc::new(client);
     let manifest = client.fetch_manifest().await?;
@@ -208,6 +224,9 @@ pub(super) struct RemoteClient {
     /// The `WebRTC` lane, when this consumer registered one. `None` keeps the
     /// dial on IP/relay only, which is what the offline tests want.
     webrtc: Option<WebRtcHandle>,
+    /// Refuse anything but the data channel: skip the IP/relay attempt entirely
+    /// and fail loudly if the mount does not settle on `WebRTC`.
+    webrtc_only: bool,
 }
 
 impl RemoteClient {
@@ -217,6 +236,7 @@ impl RemoteClient {
             ticket,
             conn: Mutex::new(None),
             webrtc: None,
+            webrtc_only: false,
         }
     }
 
@@ -224,6 +244,20 @@ impl RemoteClient {
     #[must_use]
     pub(super) fn with_webrtc(mut self, handle: WebRtcHandle) -> Self {
         self.webrtc = Some(handle);
+        self
+    }
+
+    /// Make the `WebRTC` lane the *only* lane.
+    ///
+    /// Not a preference — a requirement. The ordinary path is skipped rather
+    /// than tried first, and the selected path is asserted afterwards, so a run
+    /// that claims `WebRTC` can be shown to be one. Without this the consumer
+    /// spends `DISCOVERY_DEADLINE` on IP/relay before it will even look at the
+    /// data channel, which is the right default for two native peers and
+    /// useless for testing the lane.
+    #[must_use]
+    pub(super) fn webrtc_only(mut self, only: bool) -> Self {
+        self.webrtc_only = only;
         self
     }
 
@@ -265,6 +299,14 @@ impl RemoteClient {
             && conn.close_reason().is_none()
         {
             return Ok(conn.clone());
+        }
+        if self.webrtc_only {
+            let conn = Box::pin(self.connect_over_webrtc())
+                .await
+                .context("webrtc-only mount: the data channel could not be established")?;
+            super::webrtc::ensure_webrtc_selected(&conn, "webrtc-only mount").await?;
+            *guard = Some(conn.clone());
+            return Ok(conn);
         }
         let start = Instant::now();
         let conn = loop {

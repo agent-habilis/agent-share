@@ -7,9 +7,12 @@
 //!
 //! Unlike the experiment this was ported from, the peer connection is built
 //! with an `RtcConfiguration` carrying `iceServers`, so the browser's ICE agent
-//! gathers server-reflexive (and, when [`IceServers::with_turn_fallback`] is
-//! used, relay) candidates. Without them a tab advertises host candidates only
-//! and connects on one LAN.
+//! gathers server-reflexive candidates too. Without them a tab advertises host
+//! candidates only and connects on one LAN.
+//!
+//! STUN only — relay candidates are deliberately unavailable, because
+//! [`crate::accept_ice_uri`] refuses `turn:`. A peer that cannot pair directly
+//! falls back to the iroh relay, which this project already runs.
 
 mod jsep;
 mod transport;

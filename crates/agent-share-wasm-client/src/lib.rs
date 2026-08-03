@@ -23,9 +23,11 @@
 //! 2. Open a **fresh** connection to `agent-share/mount/1` against an address
 //!    carrying only the `WebRTC` custom addr.
 //!
-//! When host/mDNS and NAT hairpin both fail, ICE can still connect through a
-//! short-lived public TURN server in `IceServers`. Under `dynamic`, a failed
-//! ICE then uses the iroh relay for mount bytes.
+//! When host/mDNS and NAT hairpin both fail there is no ICE path left: TURN is
+//! refused by policy, because this project already relays through its own iroh
+//! relay and running a second relay at the ICE layer would mean operating two
+//! systems for one job. Under `dynamic` a failed ICE simply uses that relay for
+//! mount bytes; under `webrtc` it fails loudly.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -71,6 +73,53 @@ struct MeshEndpoint {
 /// Cached ICE remote candidate for one peer endpoint id.
 type IpCache = Rc<RefCell<HashMap<String, (Option<String>, Option<String>)>>>;
 
+/// Per-peer transport stats: cumulative counters, derived rates, and RTT.
+///
+/// `f64` throughout because that is what `getStats` hands back — the counters
+/// sit well under 2^53, so nothing is lost and converting would only invent
+/// precision.
+#[derive(Debug, Clone, Copy, Default)]
+struct PeerStats {
+    sent: f64,
+    received: f64,
+    /// Bytes per second since the previous sample. Zero until there are two.
+    up_bps: f64,
+    down_bps: f64,
+    /// Round-trip time in milliseconds, when the pair has been measured.
+    rtt_ms: Option<f64>,
+    /// `js_sys::Date::now()` of this sample, for the next difference.
+    at_ms: f64,
+}
+
+impl PeerStats {
+    /// Fold a fresh reading in, carrying rates over from `self`.
+    ///
+    /// Rates come from differencing cumulative counters — WebRTC exposes no
+    /// instantaneous throughput for a data channel. A non-advancing clock or a
+    /// counter that went backwards (a renegotiated pair resets them) yields no
+    /// rate rather than a negative or infinite one.
+    fn sample(self, sent: f64, received: f64, rtt: Option<f64>, now_ms: f64) -> Self {
+        let elapsed_s = (now_ms - self.at_ms) / 1000.0;
+        let rate = |current: f64, previous: f64| {
+            if self.at_ms > 0.0 && elapsed_s > 0.0 && current >= previous {
+                (current - previous) / elapsed_s
+            } else {
+                0.0
+            }
+        };
+        Self {
+            up_bps: rate(sent, self.sent),
+            down_bps: rate(received, self.received),
+            sent,
+            received,
+            rtt_ms: rtt.map(|seconds| seconds * 1000.0),
+            at_ms: now_ms,
+        }
+    }
+}
+
+type BytesCache = Rc<RefCell<HashMap<String, PeerStats>>>;
+
 /// A connected share, ready to list and read.
 #[wasm_bindgen]
 pub struct ShareClient {
@@ -80,12 +129,22 @@ pub struct ShareClient {
     data_path: String,
     /// Requested connect mode (`webrtc` / `relay` / `dynamic`).
     mount_mode: String,
+    /// Why `dynamic` ended up on the relay, when it did. `None` on a clean
+    /// connect. Surfaced on the info pane: a fallback that only warns to the
+    /// console is a fallback nobody can diagnose from the UI.
+    fallback_reason: Option<String>,
+    /// Relay URLs of the *signal* endpoint, captured before it moves into the
+    /// mesh. The mount endpoint is relay-free on the WebRTC path, so this is
+    /// the only place the rendezvous relay is still observable.
+    rendezvous_relays: Vec<String>,
     /// Producer ticket lookups — labeled "producer reach" in the info pane.
     lookups: LookupOpts,
     /// `js_sys::Date::now()` when connect resolved (UI wall clock).
     connected_at_ms: f64,
     /// Last-known getStats IPs, keyed by endpoint id string.
     ip_cache: IpCache,
+    /// Last-known wire byte counters, keyed by endpoint id string.
+    bytes_cache: BytesCache,
     // Held so the hub (and its data channel) outlives the connection when used.
     _hub: Option<Arc<BrowserHubTransport>>,
     _session: Option<BrowserSession>,
@@ -114,9 +173,12 @@ fn new_share_client(
         secret,
         data_path,
         mount_mode: "dynamic".to_owned(),
+        fallback_reason: None,
+        rendezvous_relays: Vec::new(),
         lookups: LookupOpts::public_preset(),
         connected_at_ms: now_ms(),
         ip_cache: Rc::new(RefCell::new(HashMap::new())),
+        bytes_cache: Rc::new(RefCell::new(HashMap::new())),
         _hub: hub,
         _session: session,
         mesh_endpoint,
@@ -201,22 +263,59 @@ impl ShareClient {
         js_sys::JSON::parse(&json.to_string()).unwrap_or(JsValue::NULL)
     }
 
-    /// Refresh ICE remote-candidate addresses for live mesh sessions.
+    /// Refresh ICE remote-candidate addresses for live sessions.
+    ///
+    /// Both hubs, for the same reason [`Self::peers_direct`] counts both: the
+    /// producer's session is in the mount hub, so sweeping only the mesh's
+    /// would leave the producer's row showing no IP at all.
     ///
     /// # Errors
     /// Never fails today — reserved for future hard errors from getStats.
     #[wasm_bindgen]
     pub async fn refresh_peer_ips(&self) -> Result<(), JsValue> {
-        let Some(mesh) = self.mesh.as_ref() else {
-            return Ok(());
-        };
-        let hub = mesh.hub();
-        for id in hub.live_peer_ids() {
-            let key = id.to_string();
-            if let Some((ip, kind)) = hub.selected_remote_candidate(&id).await {
-                self.ip_cache
-                    .borrow_mut()
-                    .insert(key, (Some(ip), Some(kind)));
+        let local_key = self._endpoint.id().to_string();
+        let mut local_seen = false;
+        // A peer can hold a session in *both* hubs (mount and mesh). Sampling
+        // it twice in one sweep computes the second rate over a few
+        // milliseconds with no byte delta, which overwrites the real rate with
+        // zero — the counters climb while the UI insists nothing is moving.
+        let mut sampled: HashSet<String> = HashSet::new();
+        let mesh_hub = self.mesh.as_ref().map(mesh::MeshPeer::hub);
+        let hubs = [mesh_hub, self._hub.as_ref()];
+        for hub in hubs.into_iter().flatten() {
+            for id in hub.live_peer_ids() {
+                let key = id.to_string();
+                if !sampled.insert(key.clone()) {
+                    continue;
+                }
+                if let Some((ip, kind)) = hub.selected_remote_candidate(&id).await {
+                    self.ip_cache
+                        .borrow_mut()
+                        .insert(key.clone(), split_candidate(ip, kind));
+                }
+                if let Some((sent, received, rtt)) = hub.selected_pair_stats(&id).await {
+                    let now = now_ms();
+                    let mut cache = self.bytes_cache.borrow_mut();
+                    let previous = cache.get(&key).copied().unwrap_or_default();
+                    cache.insert(key, previous.sample(sent, received, rtt, now));
+                }
+                // Our own address, from the same selected pair. Any live
+                // session answers it — they all run on this tab's ICE agent —
+                // so the first one that does is enough.
+                //
+                // The `local_seen` flag rather than a `contains_key` in the
+                // condition: a `RefCell` borrow taken inside an `&&` chain
+                // lives across the `.await` that follows it, which is how a
+                // single-threaded runtime earns an `already borrowed` panic
+                // from code that reads as a plain short-circuit.
+                if !local_seen
+                    && let Some((ip, kind)) = hub.selected_local_candidate(&id).await
+                {
+                    self.ip_cache
+                        .borrow_mut()
+                        .insert(local_key.clone(), split_candidate(ip, kind));
+                    local_seen = true;
+                }
             }
         }
         Ok(())
@@ -229,12 +328,18 @@ impl ShareClient {
         self.mesh.as_ref().map_or(0, mesh::MeshPeer::peers_gossip)
     }
 
-    /// Peers we hold a direct `WebRTC` data channel with, on the share's mesh
-    /// hub (including the producer when the mount session shares that hub).
+    /// Peers we hold a direct `WebRTC` data channel with.
+    ///
+    /// The union of two hubs, not one. The mount rides a relay-free endpoint
+    /// (that is what keeps its bytes off the relay) while the mesh rides the
+    /// signal endpoint, so each owns its own hub and the producer's session
+    /// lives only in the mount's. Reading the mesh hub alone would report `0
+    /// direct` on a tab happily streaming files over a direct channel — the
+    /// exact miscount the single-endpoint shape was meant to avoid.
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn peers_direct(&self) -> u32 {
-        self.mesh.as_ref().map_or(0, mesh::MeshPeer::peers_direct)
+        u32::try_from(self.direct_peer_ids().len()).unwrap_or(u32::MAX)
     }
 
     /// The direct-session ceiling this tab negotiates up to.
@@ -455,12 +560,25 @@ impl ShareClient {
         let peers_gossip = self.peers_gossip();
         let peers_direct = self.peers_direct();
         let max_direct = self.max_direct();
-        let relay_urls: Vec<String> = self
-            ._endpoint
-            .addr()
-            .relay_urls()
-            .map(|url| url.to_string())
-            .collect();
+        // The *rendezvous* endpoint's relays, not the mount's. On the WebRTC
+        // path the mount endpoint is deliberately relay-free, so reading it
+        // reports "no live relay URLs" on a tab that is very much talking to
+        // one — the relay still carries rendezvous and gossip, just not file
+        // bytes.
+        // Live, not the connect-time snapshot: iroh re-selects when a path
+        // opens or is abandoned, and a pane that froze its answer would keep
+        // asserting a path the connection had already left.
+        let live_path =
+            selected_path_label(&self.connection).unwrap_or_else(|| self.data_path.clone());
+        let relay_urls: Vec<String> = if self.rendezvous_relays.is_empty() {
+            self._endpoint
+                .addr()
+                .relay_urls()
+                .map(|url| url.to_string())
+                .collect()
+        } else {
+            self.rendezvous_relays.clone()
+        };
         let producer_reach = serde_json::json!({
             "mdns": self.lookups.mdns,
             "dht": self.lookups.dht,
@@ -473,7 +591,7 @@ impl ShareClient {
         let peers = self.swarm_peers_json(&local, &producer);
         serde_json::json!({
             "general": {
-                "transport": self.data_path,
+                "transport": live_path,
                 "identity_fingerprint": identity_fingerprint(&self.secret),
                 "mesh_up": mesh_up,
                 "nickname": nickname,
@@ -493,14 +611,38 @@ impl ShareClient {
             },
             "transfer": {
                 "mount_mode": self.mount_mode,
-                "mount_path": self.data_path,
+                "mount_path": live_path,
                 "mount_paths": path_labels(&self.connection),
+                "mount_fallback_reason": self.fallback_reason,
             },
         })
     }
 
+    /// Endpoint ids we hold a live data channel with, across both hubs.
+    ///
+    /// Deduplicated: a mesh peer that is also the producer would otherwise be
+    /// counted twice, since it can appear in either hub.
+    fn direct_peer_ids(&self) -> HashSet<String> {
+        let mut ids: HashSet<String> = self
+            .mesh
+            .as_ref()
+            .map(|mesh| {
+                mesh.hub()
+                    .live_peer_ids()
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(hub) = self._hub.as_ref() {
+            ids.extend(hub.live_peer_ids().into_iter().map(|id| id.to_string()));
+        }
+        ids
+    }
+
     fn swarm_peers_json(&self, local: &str, producer: &str) -> Vec<serde_json::Value> {
         let cache = self.ip_cache.borrow();
+        let bytes = self.bytes_cache.borrow();
         // Self label comes from the meta card the TS consumer published; this
         // is only a last-resort row if the book has not been seeded yet.
         let self_card = agent_share_proto::PeerCard::new(
@@ -536,9 +678,15 @@ impl ShareClient {
             let version = card.as_ref().map(|c| c.version.clone());
             let runtime = card.as_ref().map(|c| c.runtime.clone());
             let app_role = card.as_ref().and_then(|c| c.role.clone());
+            let stats = bytes.get(id).copied().unwrap_or_default();
             serde_json::json!({
                 "id": id,
                 "role": role,
+                "bytes_sent": stats.sent,
+                "bytes_received": stats.received,
+                "up_bps": stats.up_bps,
+                "down_bps": stats.down_bps,
+                "rtt_ms": stats.rtt_ms,
                 "flags": flags,
                 "client": client,
                 "version": version,
@@ -551,26 +699,20 @@ impl ShareClient {
         };
 
         let mut rows = Vec::new();
+        let (local_ip, local_ip_kind) = cache.get(local).cloned().unwrap_or((None, None));
         rows.push(peer_row(
             local,
             "self",
             "*".to_owned(),
             &self.data_path,
-            None,
-            None,
+            local_ip,
+            local_ip_kind,
         ));
 
-        let live: Vec<String> = self
-            .mesh
-            .as_ref()
-            .map(|m| {
-                m.hub()
-                    .live_peer_ids()
-                    .into_iter()
-                    .map(|id| id.to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Both hubs: the producer's session lives in the mount's, every other
+        // direct peer in the mesh's. Reading one would drop the `D` flag off
+        // whichever half it missed.
+        let live: Vec<String> = self.direct_peer_ids().into_iter().collect();
         let producer_direct = live.iter().any(|id| id == producer);
         let (ip, ip_kind) = cache
             .get(producer)
@@ -636,20 +778,57 @@ fn identity_fingerprint(secret: &[u8; SECRET_LEN]) -> String {
     format!("{head}…{tail}")
 }
 
+/// One path's transport, as the label the UI and the mode assertion both use.
+///
+/// `data_path`, `mount_paths` and the WebRTC-mode check have to agree on what
+/// counts as "webrtc", so they share this rather than each carrying a copy of
+/// the match.
+fn path_label(addr: &TransportAddr) -> String {
+    match addr {
+        TransportAddr::Relay(_) => "relay".to_owned(),
+        TransportAddr::Ip(_) => "ip".to_owned(),
+        TransportAddr::Custom(custom)
+            if custom.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID =>
+        {
+            "webrtc".to_owned()
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+/// Split a getStats candidate into the cache's `(address, kind)` shape.
+///
+/// Chrome blanks the **local** candidate's `address`/`ip` — deliberately, for
+/// the same privacy reason host candidates are mDNS names. The candidate *type*
+/// survives, and it is the more useful half anyway: `host` versus `srflx`
+/// versus `relay` is what says whether a peer is direct. So an empty address
+/// becomes `None` rather than an empty string the UI would render as a value.
+fn split_candidate(address: String, kind: String) -> (Option<String>, Option<String>) {
+    let address = (!address.trim().is_empty()).then_some(address);
+    let kind = (!kind.trim().is_empty()).then_some(kind);
+    (address, kind)
+}
+
+/// The path carrying bytes **right now**, or `None` before selection settles.
+///
+/// `data_path` is a snapshot taken once, seconds after connect. iroh can
+/// re-select later — a path opening or being abandoned re-runs selection — so a
+/// stored string is a claim about the past presented as the present. The info
+/// pane asks this instead, and only falls back to the stored value while
+/// nothing is selected yet.
+fn selected_path_label(connection: &Connection) -> Option<String> {
+    connection
+        .paths()
+        .iter()
+        .find(|path| path.is_selected())
+        .map(|path| path_label(path.remote_addr()))
+}
+
 fn path_labels(connection: &Connection) -> Vec<String> {
     connection
         .paths()
         .iter()
-        .map(|path| match path.remote_addr() {
-            TransportAddr::Relay(_) => "relay".to_owned(),
-            TransportAddr::Ip(_) => "ip".to_owned(),
-            TransportAddr::Custom(addr)
-                if addr.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID =>
-            {
-                "webrtc".to_owned()
-            }
-            other => format!("{other:?}"),
-        })
+        .map(|path| path_label(path.remote_addr()))
         .collect()
 }
 
@@ -952,6 +1131,41 @@ async fn ensure_relay_selected(conn: &Connection) -> Result<(), JsValue> {
     }
 }
 
+/// How long [`settled_path_label`] waits for the connection to pick a path.
+const PATH_SETTLE_MS: f64 = 3_000.0;
+
+/// Wait for path selection, then label the path that won.
+///
+/// Reading `paths()` the instant `connect` resolves reports a race, not a
+/// result: a fresh connection has no selected path yet, and the mount dial runs
+/// on the same endpoint that just spoke JSEP over the relay — so the producer's
+/// relay addr is still a live candidate and can beat a data channel that is
+/// only just coming up. Same settle-then-read shape as
+/// [`ensure_relay_selected`], but it reports rather than judges: the caller
+/// decides whether the answer is acceptable for its mode.
+///
+/// `None` means nothing was selected before the deadline.
+async fn settled_path_label(conn: &Connection) -> Option<String> {
+    let deadline = now_ms() + PATH_SETTLE_MS;
+    loop {
+        // Scoped so the `PathList` borrow of `conn` ends before the await.
+        let selected = {
+            let paths = conn.paths();
+            paths
+                .iter()
+                .find(|path| path.is_selected())
+                .map(|path| path_label(path.remote_addr()))
+        };
+        if selected.is_some() {
+            return selected;
+        }
+        if now_ms() >= deadline {
+            return None;
+        }
+        wait_ms(50).await;
+    }
+}
+
 enum WatchEnd {
     /// Clean stream end before any frame — producer does not do live watch.
     Unsupported,
@@ -1038,96 +1252,149 @@ async fn connect_webrtc(
     let producer = ticket.addr.id;
     ensure_reachable_addr(&ticket.addr)?;
 
-    // **One** endpoint, not two.
+    // **Two** endpoints on one key — and the split is what puts mount bytes on
+    // the data channel at all.
     //
-    // The old shape bound a `signaller` for JSEP and a separate
-    // `data_endpoint` for the mount, on the theory that a custom transport must
-    // be registered at build time while the session does not exist until JSEP
-    // has run. That reasoning conflates the *hub* with a *session*: the hub is
-    // built here, empty, and registered at build time; sessions are attached to
-    // it later. The browser producer has always done exactly this
-    // (`produce.rs`), so one endpoint serves both roles.
+    // One endpoint cannot do both jobs. The JSEP exchange rides the relay, so
+    // by the time the mount is dialled the endpoint's address book holds a warm
+    // relay path for this producer. iroh merges a dial's address into that book
+    // and only fans a connect's Initial out while the remote has no selected
+    // path, so the relay answers first and becomes the connection's *only*
+    // path — the WebRTC path is never opened, and no `path_selector` can pick a
+    // path that does not exist. Measured, not assumed: with one endpoint the
+    // mount connection reports `paths=["*relay"]`, with the split it reports
+    // `paths=["*webrtc"]` (see `the_mount_selects_webrtc_over_a_warm_relay_path`
+    // in `crates/agent-share/tests/webrtc_mount.rs`).
     //
-    // Collapsing them is what makes the peer count honest. Two endpoints meant
-    // two identities and two hubs, so the mount session lived in a hub the mesh
-    // counter never read — a tab showed `0 direct` while happily streaming
-    // files over a direct channel.
+    // Both endpoints bind the *same* secret key, which is what makes this
+    // different from the old two-endpoint shape this replaced. That one minted
+    // two keys, so a producer counted the tab twice and the mount session lived
+    // in a hub the mesh counter never read. One key means one endpoint id: the
+    // producer attaches the session under the id the signal connection came
+    // from, and the mount dial arrives under the same one.
+    //
+    // Only the signal endpoint may hold the relay. Two same-key endpoints both
+    // registering with one relay fight over the registration and ICE never
+    // completes — measured, the data channel simply times out.
     let key = SecretKey::generate();
     let local = key.public();
-    let hub = BrowserHubTransport::new(local);
-    let handle = WebRtcHandle::new(Arc::clone(&hub));
 
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .secret_key(key)
+    // The mesh gossips over the relay, so it rides the signal endpoint and gets
+    // its own hub for its own direct sessions. The mount's hub is separate;
+    // `peers_direct` unions the two so the count stays honest.
+    let mesh_hub = BrowserHubTransport::new(local);
+    let mesh_handle = WebRtcHandle::new(Arc::clone(&mesh_hub));
+    let signal_endpoint = Endpoint::builder(presets::Minimal)
+        .secret_key(key.clone())
         .relay_mode(relay_mode(&ticket))
-        .add_custom_transport(handle.transport())
+        .add_custom_transport(mesh_handle.transport())
+        .path_selector(mesh_handle.path_selector())
         .bind()
         .await
-        .map_err(|error| err("bind endpoint", &error))?;
+        .map_err(|error| err("bind signal endpoint", &error))?;
 
-    let session = match negotiate(&endpoint, ticket.addr.clone(), local, &hub).await {
+    let hub = BrowserHubTransport::new(local);
+    let handle = WebRtcHandle::new(Arc::clone(&hub));
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .secret_key(key)
+        // No relay, deliberately: this endpoint's whole purpose is to have no
+        // path to lose the mount dial to.
+        .relay_mode(RelayMode::Disabled)
+        .add_custom_transport(handle.transport())
+        .path_selector(handle.path_selector())
+        .bind()
+        .await
+        .map_err(|error| err("bind mount endpoint", &error))?;
+
+    // JSEP on the signal endpoint, attached into the *mount* endpoint's hub.
+    // Decoupling those two is the point: the producer keys the session by the
+    // id the signal connection came from, which is the same id either way.
+    let session = match negotiate(&signal_endpoint, ticket.addr.clone(), local, &hub).await {
         Ok(session) => session,
         Err(error) if allow_relay_fallback => {
+            let reason = format!("WebRTC signal/ICE failed: {}", describe(&error));
             web_sys::console::warn_1(&JsValue::from_str(&format!(
-                "[agent-share] WebRTC signal/ICE failed ({error:?}); falling back to iroh relay/IP"
+                "[agent-share] {reason}; falling back to iroh relay/IP"
             )));
-            return finish_relay_fallback(endpoint, ticket).await;
+            endpoint.close().await;
+            // The fallback needs a relay, so it runs on the signal endpoint.
+            return finish_relay_fallback(signal_endpoint, ticket, reason).await;
         }
         Err(error) => {
             endpoint.close().await;
+            signal_endpoint.close().await;
             return Err(error);
         }
     };
 
-    // The address lists *only* the WebRTC path, so the Initial fans out over
-    // the data channel. With one endpoint the relay is still registered, which
-    // is why the selected path is checked below rather than assumed — the old
-    // `RelayMode::Disabled` on a throwaway endpoint used to enforce this
-    // structurally, and that lever is gone.
+    // The mount endpoint has no relay and (in a tab) no IP, so this address is
+    // the only one it can reach the producer on.
     let webrtc_only =
         EndpointAddr::from_parts(producer, [TransportAddr::Custom(custom_addr(producer))]);
     match endpoint.connect(webrtc_only, MOUNT_ALPN).await {
         Ok(connection) => {
-            let on_webrtc = connection.paths().iter().any(|path| {
-                matches!(
-                    path.remote_addr(),
-                    TransportAddr::Custom(addr)
-                        if addr.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID
-                )
-            });
+            // The *selected* path, not "is a WebRTC path present". Scanning
+            // every path with `any()` answered a different question than the
+            // one that matters — a connection can hold a WebRTC path it does
+            // not send on — so it could report `webrtc` while the relay
+            // carried the bytes, and the reverse.
+            let selected = settled_path_label(&connection).await;
+            let on_webrtc = selected.as_deref() == Some("webrtc");
             if !on_webrtc && !allow_relay_fallback {
+                let observed = path_labels(&connection);
                 endpoint.close().await;
-                return Err(JsValue::from_str(
-                    "mount connected but not over WebRTC, and webrtc mode forbids a fallback",
-                ));
+                signal_endpoint.close().await;
+                return Err(JsValue::from_str(&format!(
+                    "mount connected but selected {} rather than WebRTC (paths={observed:?}), \
+                     and webrtc mode forbids a fallback",
+                    selected.as_deref().unwrap_or("no path"),
+                )));
             }
-            Ok(new_share_client(
+            // Captured before the endpoint moves into the mesh below.
+            let rendezvous_relays: Vec<String> = signal_endpoint
+                .addr()
+                .relay_urls()
+                .map(|url| url.to_string())
+                .collect();
+            let mut client = new_share_client(
                 connection,
                 ticket.secret,
                 // Report what was actually selected. Previously this said
                 // "webrtc" unconditionally on this path, which was a guess.
-                if on_webrtc {
-                    "webrtc".to_owned()
-                } else {
-                    "relay".to_owned()
-                },
+                selected.clone().unwrap_or_else(|| "relay".to_owned()),
                 Some(hub),
                 Some(session),
+                // The mesh rides the *signal* endpoint, the one with a relay to
+                // gossip over, with its own hub.
                 Some(MeshEndpoint {
-                    endpoint: endpoint.clone(),
-                    webrtc: handle,
+                    endpoint: signal_endpoint,
+                    webrtc: mesh_handle,
                 }),
                 endpoint,
-            ))
+            );
+            client.rendezvous_relays = rendezvous_relays;
+            if !on_webrtc {
+                // With no relay and no IP on this endpoint there is nothing for
+                // the mount to settle on *but* WebRTC, so this is now a
+                // "selection never settled" report rather than a lost race.
+                client.fallback_reason = Some(format!(
+                    "the mount reported {} rather than WebRTC on a relay-free endpoint",
+                    selected.as_deref().unwrap_or("no path before the settle deadline"),
+                ));
+            }
+            Ok(client)
         }
         Err(error) if allow_relay_fallback => {
+            let reason = format!("WebRTC mount dial failed: {error}");
             web_sys::console::warn_1(&JsValue::from_str(&format!(
-                "[agent-share] WebRTC mount dial failed ({error}); falling back to iroh relay/IP"
+                "[agent-share] {reason}; falling back to iroh relay/IP"
             )));
-            finish_relay_fallback(endpoint, ticket).await
+            endpoint.close().await;
+            finish_relay_fallback(signal_endpoint, ticket, reason).await
         }
         Err(error) => {
             endpoint.close().await;
+            signal_endpoint.close().await;
             Err(err("dial the mount ALPN over WebRTC", &error))
         }
     }
@@ -1136,12 +1403,13 @@ async fn connect_webrtc(
 async fn finish_relay_fallback(
     endpoint: Endpoint,
     ticket: MountTicket,
+    reason: String,
 ) -> Result<ShareClient, JsValue> {
     let connection = endpoint
         .connect(ticket.addr.clone(), MOUNT_ALPN)
         .await
         .map_err(|error| err("dial the mount ALPN over iroh relay/IP (fallback)", &error))?;
-    Ok(new_share_client(
+    let mut client = new_share_client(
         connection,
         ticket.secret,
         "relay".to_owned(),
@@ -1149,7 +1417,17 @@ async fn finish_relay_fallback(
         None,
         None,
         endpoint,
-    ))
+    );
+    client.fallback_reason = Some(reason);
+    Ok(client)
+}
+
+/// A `JsValue` error as one line of prose, without the `JsValue("…")` wrapper
+/// `{:?}` puts around a string.
+fn describe(error: &JsValue) -> String {
+    error
+        .as_string()
+        .unwrap_or_else(|| format!("{error:?}"))
 }
 
 fn ensure_reachable_addr(addr: &EndpointAddr) -> Result<(), JsValue> {
@@ -1188,7 +1466,10 @@ async fn negotiate(
         .await
         .map_err(|error| err("open signal stream", &error))?;
 
-    let ice = IceServers::with_turn_fallback().await;
+    // STUN only — TURN is refused by policy; the iroh relay is this
+    // project's relay, and running a second one at the ICE layer would mean
+    // operating two systems for one job.
+    let ice = IceServers::default();
     let (pending, offer) = browser_offer(local, &ice)
         .await
         .map_err(|error| js_stage("build offer", error))?;
@@ -1262,7 +1543,12 @@ fn relay_mode(ticket: &MountTicket) -> RelayMode {
     use agent_share_proto::lookup::RelayChoice;
     match &ticket.lookups.relay {
         RelayChoice::Disabled => RelayMode::Disabled,
-        RelayChoice::Pinned => iroh::endpoint::default_relay_mode(),
+        // Our relay first, n0's as fallback — the same rungs the mesh gossips
+        // over, taken from the one list rather than a second copy. A ticket
+        // that says "pinned" carries no URLs, so the producer and this tab
+        // resolve the name independently; if the two lists ever disagreed the
+        // pair would home on different relays and simply never meet.
+        RelayChoice::Pinned => RelayMode::custom(pinned_ladder()),
         RelayChoice::Custom(ladder) => RelayMode::custom(ladder.iter().cloned()),
     }
 }
@@ -1274,4 +1560,15 @@ fn err(context: &str, error: &impl std::fmt::Display) -> JsValue {
 fn serde_wasm<T: serde::Serialize>(value: &T) -> Result<JsValue, JsValue> {
     let json = serde_json::to_string(value).map_err(|error| err("serialize", &error))?;
     js_sys::JSON::parse(&json)
+}
+
+/// The `Pinned` ladder, from `agent-habilis-mesh` — see [`relay_mode`].
+fn pinned_ladder() -> Vec<iroh::RelayUrl> {
+    agent_habilis_mesh::RENDEZVOUS_RELAY_LADDER
+        .iter()
+        .map(|raw| {
+            raw.parse()
+                .expect("RENDEZVOUS_RELAY_LADDER entries are valid relay URLs")
+        })
+        .collect()
 }

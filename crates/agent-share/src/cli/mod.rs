@@ -67,5 +67,15 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             "usage: agent-share <ticket> <target>, agent-share serve <dir>, or agent-share bench"
         );
     };
-    crate::mount::attach(&ticket, &mountpoint, cli.no_mount, json).await
+    let webrtc_only = match cli.transport.as_deref().map(str::trim) {
+        None | Some("") => false,
+        Some(raw) => match raw.to_ascii_lowercase().as_str() {
+            "webrtc" | "webrtc_only" | "webrtc-only" => true,
+            "dynamic" | "default" => false,
+            other => anyhow::bail!(
+                "unknown transport {other:?}; expected webrtc (or omit for the default)"
+            ),
+        },
+    };
+    crate::mount::attach(&ticket, &mountpoint, cli.no_mount, json, webrtc_only).await
 }

@@ -55,7 +55,7 @@ use crate::util::tuning::{
 /// `relay.agent-habilis.com` cutover then moved rung 0 itself: binaries
 /// from before it home on the retired `swarm-relay.…` host, so they
 /// cannot relay-direct rendezvous with binaries from after.
-const RENDEZVOUS_RELAY_LADDER: [&str; 5] = [
+pub const RENDEZVOUS_RELAY_LADDER: [&str; 5] = [
     // No trailing-dot FQDN on rung 0: Cloudflare routes by exact Host
     // header and 404s the dotted form (including the /relay websocket
     // upgrade); n0's infra tolerates the dot.

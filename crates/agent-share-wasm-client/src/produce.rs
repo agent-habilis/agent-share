@@ -96,6 +96,7 @@ impl ShareProducer {
             .relay_mode(iroh::endpoint::default_relay_mode())
             .alpns(vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()])
             .add_custom_transport(handle.transport())
+            .path_selector(handle.path_selector())
             .bind()
             .await
             .map_err(|error| err("bind producer endpoint", &error))?;
@@ -395,6 +396,7 @@ impl BenchProducer {
             builder
                 .alpns(vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()])
                 .add_custom_transport(handle.transport())
+                .path_selector(handle.path_selector())
         } else {
             // Browser endpoints have no IP transports; relay-only ALPN is enough.
             builder.alpns(vec![MOUNT_ALPN.to_vec()])
@@ -705,7 +707,8 @@ async fn serve_signal(
     let offer: SignalEnvelope =
         serde_json::from_slice(&raw).map_err(|error| err("parse signal offer", &error))?;
 
-    let ice = IceServers::with_turn_fallback().await;
+    // STUN only — see the note at the consumer's `negotiate`.
+    let ice = IceServers::default();
     let (pending, answer) = browser_answer(local, &offer, &ice).await?;
     let encoded = serde_json::to_vec(&answer).map_err(|error| err("encode answer", &error))?;
     send.write_all(&encoded)

@@ -54,6 +54,87 @@ pub(crate) fn webrtc_only_addr(remote: EndpointId) -> EndpointAddr {
     EndpointAddr::from_parts(remote, [TransportAddr::Custom(custom_addr(remote))])
 }
 
+/// Every path on `conn`, `*` marking the selected one.
+pub(crate) fn path_summary(conn: &Connection) -> Vec<String> {
+    conn.paths()
+        .iter()
+        .map(|path| {
+            let kind = if path.is_relay() {
+                "relay"
+            } else if path.is_ip() {
+                "ip"
+            } else if matches!(
+                path.remote_addr(),
+                TransportAddr::Custom(addr)
+                    if addr.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID
+            ) {
+                "webrtc"
+            } else {
+                "other"
+            };
+            if path.is_selected() {
+                format!("*{kind}")
+            } else {
+                kind.to_owned()
+            }
+        })
+        .collect()
+}
+
+/// Poll until `satisfied` holds for `conn`, or fail with `describe`.
+///
+/// Selection is not settled when `connect` resolves — a fresh connection has no
+/// selected path at all for the first moments — so this waits rather than
+/// sampling once. The predicate takes the whole connection because iroh does
+/// not export a nameable type for a single path.
+pub(crate) async fn ensure_selected<S, D>(conn: &Connection, satisfied: S, describe: D) -> Result<()>
+where
+    S: Fn(&Connection) -> bool,
+    D: Fn() -> String,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if satisfied(conn) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("{}", describe());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Require the mount's *selected* path to be the `WebRTC` custom transport.
+///
+/// The check that was missing everywhere. Registering the transport and dialling
+/// a WebRTC-only address does not make the connection use it: iroh merges that
+/// address into a book that already holds the producer's relay (the JSEP dial
+/// put it there) and the warm path can answer first. A caller that then reports
+/// "webrtc" is reporting its intent, not the wire.
+pub(crate) async fn ensure_webrtc_selected(conn: &Connection, whose: &str) -> Result<()> {
+    ensure_selected(
+        conn,
+        |conn| {
+            conn.paths().iter().any(|path| {
+                path.is_selected()
+                    && matches!(
+                        path.remote_addr(),
+                        TransportAddr::Custom(addr)
+                            if addr.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID
+                    )
+            })
+        },
+        || {
+            format!(
+                "{whose} selected a non-WebRTC path (paths={:?}); the mount rode \
+                 another transport",
+                path_summary(conn)
+            )
+        },
+    )
+    .await
+}
+
 /// Attach `session`, or accept the one another lane attached first.
 ///
 /// A duplicate is not a failure: the registry already holds a usable channel to

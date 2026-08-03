@@ -30,7 +30,7 @@ use crate::protocol::mesh::{LookupOpts, RelayChoice};
 pub use capability::{NetworkCapability, probe as capability_probe};
 pub(crate) use relay::RungRefresh;
 pub(crate) use relay::{plan_rung_refresh, select_bootstrap_rung, spawn_relay_monitor};
-pub use relay::{probe_ladder, relay_ladder};
+pub use relay::{RENDEZVOUS_RELAY_LADDER, probe_ladder, relay_ladder};
 
 /// Build an iroh endpoint for a mesh's lookups.
 ///
@@ -240,6 +240,12 @@ pub async fn build_endpoint(
     // NATs that defeat hole-punching but not ICE.
     if let Some(handle) = transports.webrtc {
         builder = builder.add_custom_transport(handle.transport());
+        // MUST come after `builder.preset(handle)` for multihop above: there is
+        // a single `path_selector` slot and the last call wins. Safe only
+        // because this selector's bottom tier ranks foreign custom transports
+        // below the relay, reproducing MultihopBackup's own policy. Do not
+        // "tidy" this above the preset.
+        builder = builder.path_selector(handle.path_selector());
     }
     // Data-plane exclusivity: with IP cleared, a WebRTC-only peer cannot
     // silently fall back onto a hole-punched path, so a run that *claims* to be

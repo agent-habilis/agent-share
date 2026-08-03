@@ -96,6 +96,10 @@ pub(crate) async fn build_endpoint(
     // hole-punching but not ICE.
     if let Some(handle) = webrtc {
         builder = builder.add_custom_transport(handle.transport());
+        // Tier order ip > webrtc > relay. On a native peer iroh's own
+        // hole-punched IP path still wins; this only says the relay is a
+        // rendezvous rather than a data path.
+        builder = builder.path_selector(handle.path_selector());
     }
 
     if clear_ip {
