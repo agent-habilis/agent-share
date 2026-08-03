@@ -11,7 +11,9 @@ use agent_share_proto::framing::{
     MAX_BENCH_FILL_BYTES, decode_bench_request_prefix, decode_response_header,
     encode_bench_echo_request, encode_bench_fill_request,
 };
-use agent_share_proto::ticket::{TICKET_FLAG_BENCH_RELAY, TICKET_FLAG_BENCH_WEBRTC};
+use agent_share_proto::ticket::{
+    TICKET_FLAG_BENCH_QUIC, TICKET_FLAG_BENCH_RELAY, TICKET_FLAG_BENCH_WEBRTC,
+};
 use anyhow::{Context, Result, bail};
 use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr};
@@ -32,6 +34,12 @@ use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 pub(crate) enum BenchTransport {
     WebRtc,
     Relay,
+    /// Plain iroh QUIC over UDP: no `WebRTC` wrapper, no forced relay.
+    ///
+    /// The control leg. Without it the only synthetic numbers available are
+    /// wrapped ones, and the wrapper's cost cannot be separated from the
+    /// request shape without going through NFS as well.
+    Quic,
 }
 
 impl BenchTransport {
@@ -39,7 +47,8 @@ impl BenchTransport {
         match raw.trim().to_ascii_lowercase().as_str() {
             "webrtc" | "webrtc_only" | "webrtc-only" => Ok(Self::WebRtc),
             "relay" | "relay_only" | "relay-only" | "iroh_relay" | "iroh-relay" => Ok(Self::Relay),
-            other => bail!("unknown transport {other:?}; expected webrtc or relay"),
+            "quic" | "direct" | "udp" => Ok(Self::Quic),
+            other => bail!("unknown transport {other:?}; expected webrtc, relay or quic"),
         }
     }
 
@@ -47,6 +56,7 @@ impl BenchTransport {
         match self {
             Self::WebRtc => "webrtc",
             Self::Relay => "relay",
+            Self::Quic => "quic",
         }
     }
 
@@ -54,6 +64,7 @@ impl BenchTransport {
         match self {
             Self::WebRtc => TICKET_FLAG_BENCH_WEBRTC,
             Self::Relay => TICKET_FLAG_BENCH_RELAY,
+            Self::Quic => TICKET_FLAG_BENCH_QUIC,
         }
     }
 
@@ -61,8 +72,9 @@ impl BenchTransport {
         match flags {
             TICKET_FLAG_BENCH_WEBRTC => Ok(Self::WebRtc),
             TICKET_FLAG_BENCH_RELAY => Ok(Self::Relay),
+            TICKET_FLAG_BENCH_QUIC => Ok(Self::Quic),
             other => bail!(
-                "ticket has no bench transport (flags={other}); produce with --transport webrtc|relay"
+                "ticket has no bench transport (flags={other}); produce with --transport webrtc|relay|quic"
             ),
         }
     }
@@ -78,6 +90,8 @@ pub(crate) struct LatencyStats {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct BenchReport {
     pub transport: String,
+    /// Fill requests kept in flight. `1` is the historical serial behaviour.
+    pub depth: usize,
     pub connect_ms: f64,
     pub duration_s: f64,
     pub latency_ms: LatencyStats,
@@ -139,6 +153,20 @@ async fn bind_bench(
                 vec![MOUNT_ALPN.to_vec()],
                 None,
                 true,
+            )
+            .await?;
+            (endpoint, None)
+        }
+        BenchTransport::Quic => {
+            // Nothing forced and nothing cleared: whatever iroh would pick for
+            // an ordinary share. On a loopback swarm that is a direct IP path.
+            let endpoint = build_endpoint(
+                &lookups,
+                Some(key),
+                None,
+                vec![MOUNT_ALPN.to_vec()],
+                None,
+                false,
             )
             .await?;
             (endpoint, None)
@@ -271,7 +299,10 @@ async fn serve_bench_stream(
 }
 
 /// Consumer: connect using the transport encoded in the ticket flags.
-pub(crate) async fn run(ticket: &str, duration_secs: u64, json: bool) -> Result<()> {
+pub(crate) async fn run(ticket: &str, duration_secs: u64, depth: usize, json: bool) -> Result<()> {
+    if depth == 0 {
+        bail!("--depth must be at least 1");
+    }
     let ticket = MountTicket::decode(ticket)?;
     let transport = BenchTransport::from_ticket_flags(ticket.flags)?;
     if !json {
@@ -288,10 +319,11 @@ pub(crate) async fn run(ticket: &str, duration_secs: u64, json: bool) -> Result<
     if !json {
         crate::util::output::status_out("Benching", &format!("{}s", duration.as_secs()));
     }
-    let measured = measure_window(&conn, &ticket.secret, duration, !json).await?;
+    let measured = measure_window(&conn, &ticket.secret, duration, !json, depth).await?;
 
     let report = BenchReport {
         transport: path.to_owned(),
+        depth,
         connect_ms,
         duration_s: measured.duration_s,
         latency_ms: measured.latency_ms,
@@ -332,6 +364,16 @@ async fn connect_forced(
             let conn = dial_with_retry(&endpoint, relay_only).await?;
             ensure_relay_selected(&conn).await?;
             Ok((endpoint, conn, "relay"))
+        }
+        BenchTransport::Quic => {
+            // The control leg, so it forces nothing — no `ensure_*_selected`
+            // gate, because "whatever iroh picks" is exactly the path an
+            // ordinary mount would take.
+            let endpoint =
+                build_endpoint(&ticket.lookups, Some(key), None, Vec::new(), None, false).await?;
+            add_peer_addr(&endpoint, ticket.addr.clone())?;
+            let conn = dial_with_retry(&endpoint, ticket.addr.clone()).await?;
+            Ok((endpoint, conn, "quic"))
         }
         BenchTransport::WebRtc => {
             // Two endpoints on one key — the same split the browser client
@@ -468,6 +510,7 @@ async fn measure_window(
     secret: &[u8; SECRET_LEN],
     duration: Duration,
     progress: bool,
+    depth: usize,
 ) -> Result<WindowStats> {
     let start = Instant::now();
     let deadline = start + duration;
@@ -478,6 +521,7 @@ async fn measure_window(
     let mut next_tick = start + tick_every;
     let mut samples = Vec::new();
     let mut transferred = 0u64;
+    let mut inflight: tokio::task::JoinSet<Result<u64>> = tokio::task::JoinSet::new();
 
     while Instant::now() < deadline {
         let now = Instant::now();
@@ -489,9 +533,32 @@ async fn measure_window(
         if Instant::now() >= next_echo {
             samples.push(echo_once(conn, secret).await?);
             next_echo = Instant::now() + echo_every;
-        } else {
-            transferred += fill_once(conn, secret, MAX_BENCH_FILL_BYTES).await?;
+            continue;
         }
+        if depth == 1 {
+            // Kept inline rather than routed through the JoinSet so the
+            // depth-1 number stays exactly the shape the committed baseline
+            // measured — no task spawn between the request and the wire.
+            transferred += fill_once(conn, secret, MAX_BENCH_FILL_BYTES).await?;
+            continue;
+        }
+        while inflight.len() < depth {
+            let conn_task = conn.clone();
+            let secret_task = *secret;
+            inflight.spawn(async move {
+                fill_once(&conn_task, &secret_task, MAX_BENCH_FILL_BYTES).await
+            });
+        }
+        if let Some(joined) = inflight.join_next().await {
+            transferred += joined.context("bench fill task panicked")??;
+        }
+    }
+
+    // Drain rather than abort: `duration_s` is read from the clock *after*
+    // this, so the bytes and the seconds describe the same window either way,
+    // and aborting would silently discard up to `depth` MiB of real transfer.
+    while let Some(joined) = inflight.join_next().await {
+        transferred += joined.context("bench fill task panicked")??;
     }
 
     // Guarantee at least one latency sample on very short windows.
@@ -713,7 +780,7 @@ mod tests {
             .await
             .expect("connect webrtc");
         assert_eq!(path, "webrtc");
-        let stats = measure_window(&conn, &ticket.secret, Duration::from_secs(1), false)
+        let stats = measure_window(&conn, &ticket.secret, Duration::from_secs(1), false, 1)
             .await
             .expect("window");
         assert!(stats.pings >= 1);

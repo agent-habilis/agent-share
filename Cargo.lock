@@ -4990,6 +4990,8 @@ dependencies = [
  "cargo-zigbuild",
  "clap",
  "clap_mangen",
+ "serde",
+ "serde_json",
  "xshell",
 ]
 

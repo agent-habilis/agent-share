@@ -17,14 +17,20 @@ pub const TICKET_FLAG_BENCH_WEBRTC: u8 = 1;
 /// Bench producer chose the iroh relay / ticket address for the mount data path.
 pub const TICKET_FLAG_BENCH_RELAY: u8 = 2;
 
+/// Bench producer chose plain iroh `QUIC` over UDP — no `WebRTC` wrapper, no
+/// forced relay. The control leg the other two are measured against.
+pub const TICKET_FLAG_BENCH_QUIC: u8 = 3;
+
 /// A decoded mount ticket — the bearer secret, the share's discovery config,
 /// and the producer's address. Payload layout mirrors the file ticket:
 /// `secret(32) ‖ flags(1) ‖ lookups ‖ address-json` (lookups is
 /// self-delimiting, so the address occupies the remainder).
 ///
 /// `flags` is `0` for ordinary shares. Bench tickets set
-/// [`TICKET_FLAG_BENCH_WEBRTC`] or [`TICKET_FLAG_BENCH_RELAY`] so the consumer
-/// knows which path the producer opened.
+/// [`TICKET_FLAG_BENCH_WEBRTC`], [`TICKET_FLAG_BENCH_RELAY`] or
+/// [`TICKET_FLAG_BENCH_QUIC`] so the consumer knows which path the producer
+/// opened. Values are dense rather than bit flags, so a peer built before a
+/// value existed rejects it outright instead of misreading it.
 ///
 /// The secret is a pure bearer capability: whoever holds this string can read
 /// the share. The web client puts it in the path (`/files/<ticket>`,
@@ -87,8 +93,8 @@ impl MountTicket {
 #[cfg(test)]
 mod tests {
     use super::{
-        MountTicket, SECRET_LEN, TICKET_FLAG_BENCH_RELAY, TICKET_FLAG_BENCH_WEBRTC,
-        TICKET_FLAG_NONE,
+        MountTicket, SECRET_LEN, TICKET_FLAG_BENCH_QUIC, TICKET_FLAG_BENCH_RELAY,
+        TICKET_FLAG_BENCH_WEBRTC, TICKET_FLAG_NONE,
     };
     use crate::lookup::LookupOpts;
     use crate::token::{self, TokenType};
@@ -121,7 +127,11 @@ mod tests {
 
     #[test]
     fn bench_flags_round_trip() {
-        for flags in [TICKET_FLAG_BENCH_WEBRTC, TICKET_FLAG_BENCH_RELAY] {
+        for flags in [
+            TICKET_FLAG_BENCH_WEBRTC,
+            TICKET_FLAG_BENCH_RELAY,
+            TICKET_FLAG_BENCH_QUIC,
+        ] {
             let mut ticket = sample();
             ticket.flags = flags;
             let decoded = MountTicket::decode(&ticket.encode()).expect("decode");

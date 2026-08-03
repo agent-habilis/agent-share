@@ -39,18 +39,24 @@ pub(crate) enum MountAction {
     },
     /// Synthetic throughput / latency bench (no real directory).
     ///
-    /// No ticket → producer; `--transport webrtc|relay` is required and is
+    /// No ticket → producer; `--transport webrtc|relay|quic` is required and is
     /// encoded in the ticket. With ticket → consumer (uses the producer's
     /// transport; no `--transport` flag).
     Bench {
         /// Ticket from a bench producer. Omit to produce.
         ticket: Option<String>,
-        /// Mount data path the producer opens: `webrtc` or `relay` (producer only).
+        /// Mount data path the producer opens: `webrtc`, `relay` or `quic`
+        /// (producer only). `quic` is plain iroh QUIC over UDP — the control
+        /// leg the wrapped transports are measured against.
         #[arg(long)]
         transport: Option<String>,
         /// Measurement window after connect, in seconds (consumer).
         #[arg(long, default_value_t = DEFAULT_BENCH_DURATION_SECS)]
         duration: u64,
+        /// Fill requests kept in flight (consumer). `1` is strictly serial,
+        /// which caps throughput at one request per round trip.
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
         /// Output format: human (default) or json.
         #[arg(long, default_value = "human")]
         output: OutputFormat,

@@ -18,6 +18,7 @@ too-many-lines-threshold = 120
 doc-valid-idents = [
     "iroh",
     "QUIC",
+    "WebRTC",
     "HyParView",
     "Plumtree",
     "Base58Check",
