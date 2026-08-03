@@ -174,12 +174,18 @@ Three properties follow:
   endpoint id already authenticates that. An outboard is built only for a file
   a swarm fetch is about to touch, so `serve` stays an instant `stat` walk on
   both runtimes.
-- **The ticket does not change and no issued ticket breaks.** The trust chain is
-  already intact: a consumer learns hashes from the origin over a channel
-  authenticated to the ticket's endpoint id, then accepts bytes from anyone,
-  verified against those hashes. A hostile peer can only refuse or fail
-  verification — bounded harm. A hostile *producer* can lie, but always could;
-  it owns the bytes.
+- **The trust chain is already intact.** A consumer learns hashes from the origin
+  over a channel authenticated to the ticket's endpoint id, then accepts bytes
+  from anyone, verified against those hashes. A hostile peer can only refuse or
+  fail verification — bounded harm. A hostile *producer* can lie, but always
+  could; it owns the bytes.
+
+  > **AMENDED.** This bullet used to open "The ticket does not change and no
+  > issued ticket breaks." That is no longer a constraint:
+  > [RFC 03](03-fofoca-blobs/README.md) ships as a required part of fofoca with
+  > **no backwards compatibility**, so breaking issued tickets is permitted. The
+  > argument above never depended on it — it is about who authenticates what,
+  > and stands on its own.
 - **Partial-file seeding works**, because bao verifies *ranges*. A peer serves
   the chunk ranges it holds. This is what fan-out on one big file requires and
   what a whole-file-hash design cannot give.
@@ -220,8 +226,16 @@ Two ~20-line sibling constructors carry this plus the size/mtime gate:
 ### Availability on the existing card
 
 Two optional fields on `PeerCard` (`agent-share-proto/src/client.rs:34`), both
-`skip_serializing_if`, so old peers stay parseable — `from_card_value` already
-tolerates missing fields via `unwrap_or`. Purely additive.
+`skip_serializing_if`.
+
+> **AMENDED.** The original reason given was "so old peers stay parseable",
+> which is void — there are no old peers. The fields are optional for a reason
+> that outlived it: **a peer genuinely does not know these yet.** The browser
+> joins the share mesh inside its client constructor
+> (`agent-share-wasm-client/src/lib.rs:236-250`), before it has fetched any
+> manifest, so it has no tree to publish at join and must republish once it
+> does. `from_card_value` still tolerates missing fields, now as robustness —
+> a truncated or corrupt CRDT entry must cost one peer, not the whole roster.
 
 - `tree: Option<String>` — 16 hex chars of `sha256(manifest_bytes)` over the
   exact bytes `OP_MANIFEST` returned. **The more important of the two**: it is
@@ -332,9 +346,13 @@ across restarts — see *What this still cannot do*.
   "no `fs`"; see the corrected fact above) and `blake3`; `OP_HASH = 5`
   returning root + outboard for one index, plus `MAX_OUTBOARD_BYTES`; extend the
   `wire_constants_are_pinned` golden test.
-  **Do not touch `MountManifest::encode`** — an op an older producer doesn't
-  know costs one stream (the `OP_WATCH`/`OP_BENCH` precedent), a changed
-  manifest encoding breaks every issued ticket.
+  **Do not put hashes in `MountManifest`** — not because the encoding is frozen
+  (it no longer is), but because filling that field means hashing at scan time,
+  and `manifest.rs:18-20` refuses exactly that: bytes are fetched lazily, so
+  hashing the tree up-front defeats the point. `serve` staying a `stat` walk is
+  the property that separates this design from `iroh-blobs`. A new op is the
+  right shape regardless, and it no longer needs a degradation path for a
+  producer that does not know it — there are no such producers.
 - The origin hashes one file on demand, caching the outboard beside the file
   (native) or in OPFS (browser — this would be the first OPFS use in the repo,
   and **[measured]** it works: [S0.5](03-fofoca-blobs/findings/s05-opfs-worker.md)).

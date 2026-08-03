@@ -7,6 +7,12 @@ Scope decided with the user: chunk/range serving *and* content-addressed
 identity are both in scope; **browser seeding is a hard requirement**. Those two
 together disqualify `iroh-blobs` and motivate a small crate of our own.
 
+Added later, and it moved a decision: **every peer must be able to see which
+chunks every other peer can seed** — the painted grid a BitTorrent client
+shows. See *The availability grid*. It is the reason chunk-level availability
+is a v1 concern rather than the phase-4 deferral this document originally
+recorded, and the reason a third plane exists.
+
 ## Layout
 
 This RFC is a folder because it carries measurements, and measurements outlive
@@ -110,6 +116,82 @@ This list is the discipline that keeps it ~2k lines instead of iroh-blobs'
   exactly how iroh-blobs gets rebuilt by accident.
 - No GC, no tags, no collections/HashSeq. `MountManifest` is the collection.
 
+### The isolation rule
+
+**Everything blob-shaped lives in `fofoca-blobs`. fofoca is not allowed to
+learn about it.** This is a hard constraint, not a preference, and it runs in
+both directions:
+
+- **`fofoca-blobs` must not depend on `agent-share` or `agent-share-proto`.** It
+  never sees a `MountManifest`, a ticket, a mesh, or an ALPN. It takes a key, a
+  size, an mtime and byte ranges, and hands back verified bytes. That is what
+  makes it publishable and what stops it growing into a second copy of the
+  share protocol.
+- **fofoca must not name a blob concept.** No `bao-tree`, no `blake3`, no
+  outboard, no `ChunkRanges`, no store, in `agent-share` or
+  `agent-share-proto`. Those crates keep working with the blob layer absent.
+
+**Isolation is about modularity, not optionality.** `fofoca-blobs` is a
+*required* dependency of `agent-share` — no cargo feature, no no-blobs build.
+Once this ships it is the only way files move, and there is no compatibility
+path back to a build without it. The crate is separate so its seam stays honest
+and so it can be published on its own, not so it can be switched off.
+
+One thing this must not be read as removing. **Lazy hashing is a runtime
+property, not a compatibility shim.** RFC 01 phase 4's "a file with no hash yet
+falls back to the origin" describes a file nobody has asked for yet, so nobody
+has paid to hash it — which is exactly what keeps `serve` a `stat` walk and is
+the whole reason we are not using `iroh-blobs`. That fallback stays. What goes
+away is any notion of a peer or a build that does not understand hashes at all.
+
+Two boundaries worth naming before they are crossed:
+
+- **`OP_HASH`.** Wire constants are pinned in `agent-share-proto/framing.rs` by
+  the `wire_constants_are_pinned` golden test, so the op *number* has to be
+  reserved there. Nothing else about it does: the payload's meaning and every
+  byte of its implementation belong to `fofoca-blobs`. Reserving a number is
+  not learning about blobs.
+- **The availability grid.** Its data comes from `BlobStore::present()`, but
+  the broadcast frame, the debounce and the rendering are fofoca's. The seam is
+  `ChunkRanges` in, announcement out — fofoca decides *how* to announce, blobs
+  only says *what is held*.
+
+The manifest fingerprint added in RFC 01 phase 1 is **not** blob work, despite
+being a hash. It is a tree-generation marker over the manifest bytes, it uses
+`sha2` which `mesh_key.rs` already pulled in, and RFC 01 guard #1 needs it
+whether or not content addressing ever lands. Content addressing is BLAKE3 over
+*file* bytes and lives on the other side of the line.
+
+### The compatibility tax, and what survives it
+
+Both RFCs were written assuming issued tickets and older peers had to keep
+working. They do not. Several constraints were justified on that basis and are
+now void — but some of them *also* hold for reasons that have nothing to do with
+versions, and those must survive verbatim. Recorded once here so the distinction
+is cited rather than re-derived, in either direction.
+
+| Constraint | Was justified by | Verdict |
+|---|---|---|
+| `MountManifest::encode` frozen | "breaks every issued ticket" | **Void as stated.** The encoding may change; hashes still may not go in it, because that means hashing at scan time. |
+| New ops degrade for an older producer | "costs one stream" | **Void.** `OP_HASH` / `OP_HAVE` assume a peer that understands them. |
+| The ticket never changes | compat | **Void.** Spent once, on extensibility — see below. |
+| Card fields optional | "old peers stay parseable" | **Reason void, shape survives.** The browser has no manifest when it joins, so `tree` has a real unknown state. |
+| `from_card_value` tolerates missing fields | compat via `unwrap_or` | **Survives, restated as robustness.** A corrupt CRDT entry must cost one peer, not the roster. |
+| Index stability, tombstones, append-only `LiveTree` | correctness — a stale index reads a *different file* | **Survives untouched.** Never had anything to do with versions. |
+| Lazy hashing | `manifest.rs:18-20` | **Survives untouched.** Design, and the reason `iroh-blobs` was rejected. |
+
+**The expensive mistake, stated so nobody makes it:** reading "no backwards
+compatibility" as licence to simplify tombstones or index stability. Those are
+*within-serve* invariants — an index that shifts under a consumer makes it read
+the wrong file, in one session, with one build on both ends. `mount/live.rs`
+exists to prevent that and none of it is about versioning.
+
+**What the freedom actually bought.** Not much, and that is fine. The obvious
+prize — per-file hashes in the manifest — is still forbidden by laziness. New ops
+skip a degradation branch. And the ticket got one structural fix: its payload
+used to end in an open-ended address field, so nothing could ever be appended;
+length-prefixing it means the *next* change does not cost another break.
+
 ### Placement and dependencies
 
 `crates/fofoca-blobs/`, a normal workspace member, consumed by the standalone
@@ -142,7 +224,7 @@ unanswered, and Stage 4 needs it.
 |---|---|---|---|
 | Automerge `Meta` (`PeerCard`) | replicated, read locally | 0 RTT, **permanent history** | file-level `serving` + `tree` |
 | **Directed App frame** (`to: Some`, `corr: Some`) | **unicast** over an existing mesh link | 1 RTT, **no ICE**, ≤3840 B | **chunk availability, pre-connect** |
-| Broadcast App frame (`to: None`) | gossip fan-out | O(N) mesh traffic, ≤3840 B | rare "who has root H?" once the origin is dead |
+| **Broadcast App frame** (`to: None`) | gossip fan-out, **not retained** | O(N²) per round, ≤3840 B | **the availability grid**; also rare "who has root H?" once the origin is dead |
 | `MOUNT_ALPN` stream | direct QUIC/`WebRTC` | a JSEP round, 20 s deadline, 1 of 16 slots | bytes, plus `OP_HAVE` once connected |
 
 **The constraint that decides it:** RFC 01 forbids opening a session for a fetch
@@ -168,12 +250,122 @@ So two tiers, introduced in Stage 4, not Stage 1:
   unbounded, refreshed as the peer acquires chunks. This is
   `BlobStore::present(root) -> ChunkRanges` surfaced on the wire.
 
-**Neither is needed in v1.** Least-outstanding dispatch discovers availability
-implicitly — ask, get `BadIndex` or a short read, demote. With ~4 peers that is
-cheap and needs zero new protocol. Chunk queries earn their place only when
-peers hold *disjoint* chunk subsets of one large file; `"*"` covers ~100% of
-whole-tree seeders and `syncMount` writes in manifest order, so partial mirrors
-are prefix runs. Recorded as a deliberate deferral with a named trigger.
+**Neither would be needed in v1 for *fetching*.** Least-outstanding dispatch
+discovers availability implicitly — ask, get `BadIndex` or a short read, demote.
+With ~4 peers that is cheap and needs zero new protocol. Chunk queries would
+earn their place only when peers hold *disjoint* chunk subsets of one large
+file.
+
+The availability **grid** below changes that: it is a v1 requirement, and it
+needs a third plane neither tier provides.
+
+## The availability grid
+
+**Requirement:** every peer can see, for every other peer, which chunks that
+peer is able to seed — the painted grid a BitTorrent client shows.
+
+This is a *display* requirement, and taking it seriously changes the design,
+because neither plane above can serve it. Directed `HAVE?` covers only the peers
+you chose to ask, which is ~4 of them; a grid wants all of them. And the CRDT is
+still the wrong home for the reason RFC 01 gives — automerge retains history, so
+a bitfield that churns as chunks arrive writes an op per change forever and
+every late joiner syncs the lot.
+
+### The third plane: ephemeral broadcast
+
+Broadcast App frames (`to: None`), which the table above reserves for the rare
+origin-dead lookup, are the right carrier. They fan out to everyone, which is
+what a whole-mesh view needs, and — decisively — **they are not retained**: a
+`classify()` returning `loggable: false, chained: false` keeps them out of the
+message log and out of the cross-author DAG, so unlike the CRDT they leave no
+history behind. This is the one genuinely broadcast-shaped use case in the whole
+design.
+
+### What makes it cheap: display resolution is not verification resolution
+
+The obvious objection is size. At the 64 KiB chunk groups
+[S0.3](findings/s03-hash-throughput.md) recommends, a 1 GiB file is 16 384
+groups and a 10 GiB file is 163 840 — nowhere near the 3840-byte frame ceiling.
+
+But **a grid does not want one cell per chunk group.** No UI usefully renders
+more than a few hundred cells; BitTorrent clients bucket for exactly this
+reason. So broadcast a fixed number of *display buckets* per file — say 512,
+independent of file size — each holding two bits (none / partial / all). That is
+**128 bytes per file** whatever the file's size, so a whole tree fits one frame,
+and a complete peer sends `"*"` in one byte.
+
+The exact ranges a *scheduler* needs stay where they were: `OP_HAVE` on an open
+`MOUNT_ALPN` stream, at full chunk-group resolution, for the handful of peers we
+are actually pulling from. Two resolutions, two planes, two jobs.
+
+### Seeding in the UI
+
+The grid above answers *what can other peers serve*. Three further requirements
+answer *what can I serve, and how do I make that more*:
+
+1. **Every file and folder shows whether it is held locally and seedable.**
+2. **A sync control, top right,** fetches the whole share and makes it seedable.
+3. **A sync control on a file or folder's detail view,** scoped to that subtree.
+
+These are the same data as the grid at a different granularity — `present(root)`
+per file, aggregated up a folder — so they share a source and should share a
+vocabulary. Three points where the obvious reading would be wrong:
+
+**Sync *is* `mirror`, and that is the point.** RFC 01 is deliberate that "lazy
+mounts consume from the swarm but never join it without an explicit `mirror`",
+because a lazy mount holds nothing durable to serve. These controls are that
+explicit opt-in, given a surface. The top-right one is `syncMount` over the whole
+tree; the detail-view one is the same thing scoped. Nothing starts seeding
+because a user merely browsed a file.
+
+**Three states, not two.** "Held or not" is the wrong model once bytes arrive in
+ranges: a file part-fetched is *partially* seedable, and saying so is the whole
+reason bao verifies ranges rather than whole files. The indicator needs
+none / partial / complete, matching the grid's buckets, and a folder is
+"partial" whenever its children disagree.
+
+**"In memory" needs to mean persisted.** Bytes held only in RAM vanish on
+reload, and a peer that advertises them then fails to serve is worse for the
+swarm than one that never advertised. Seedable therefore means *in the store* —
+OPFS in the browser ([S0.5](findings/s05-opfs-worker.md) measured it at
+~1 GiB/s and confirmed it survives reload), the file in place natively. The
+indicator must reflect what survives a restart, not what is currently cached.
+
+Two consequences worth stating before they surprise someone. Sync makes a peer's
+reading progress public, per the privacy note below — a user pressing it is
+opting into being seen, and the control should not pretend otherwise. And a
+whole-share sync on a large share is a long, resumable operation, not a click
+that completes: it needs progress, cancellation, and to survive a reload, which
+is what the persisted `ChunkRanges` are for.
+
+### Costs, and the caps that follow
+
+Every peer broadcasting to every peer is O(N²) deliveries per interval. At N=10
+and a 2 s debounce that is roughly 190 KB/s of mesh traffic, which is fine; at
+N=50 it is ~4.8 MB/s, which is not. Three caps, all required:
+
+- **Broadcast on change, debounced**, never on a fixed timer. RFC 01's warning
+  applies unchanged: `syncMount` writes files one at a time, so a per-file
+  announce is a broadcast storm.
+- **A complete peer stops announcing.** `"*"` does not change, so it is sent
+  once and on join.
+- **Scale the debounce floor with roster size**, so a large mesh degrades to
+  coarse refreshes rather than saturating.
+
+### Two things this must not be mistaken for
+
+**The grid is advisory, not authoritative.** A painted cell means "that peer
+said so, up to a debounce ago, at bucket resolution". A scheduler that treats it
+as fact will ask for chunks a peer does not have. That is already handled —
+least-outstanding dispatch with demote-on-failure — but the grid must not be
+wired into fetch decisions as though it were exact.
+
+**It publishes reading progress to the whole share.** RFC 01 risk #5 notes that
+announcing content hashes lets members correlate files; a broadcast availability
+map is strictly more than that, since it says what each peer has fetched so far,
+continuously, to everyone holding the link. Membership already implies the full
+read capability so this is not a new class of exposure, but it is a new
+*degree*, and `--no-seed` must suppress announcing as well as serving.
 
 Two further notes. **[verified]** `send_app` refusing an oversized frame is
 accurate, but the engine *does* reassemble multipart bodies (`surface_logical`,
@@ -261,7 +453,9 @@ re-run it unchanged per backend.
 
 - **2a — trait + `MemStore`.** *Kill-gate:* if the trait shape cannot serve
   tokio and wasm without contortion, find out here, before two backends depend
-  on it.
+  on it. Second kill-gate, from *The isolation rule*: the crate must compile
+  with no dependency on `agent-share*` at all. If the trait needs a
+  `MountManifest` to be useful, the seam is in the wrong place.
 - **2b — `FsStore`.** *Kill-gate:* the don't-own-the-data inversion holds
   against a real mutable filesystem — a file changing mid-outboard is detected,
   never silently mis-served.
@@ -282,13 +476,48 @@ consumers verify every range from a non-origin source. Hashes become
   ranges verify against the same root; hashing is fast enough to stay lazy.
 - **Kill-gate:** a tampered byte from a non-origin peer fails verification and
   bans that peer; a file with no hash yet still falls back to the origin.
-- **Do not touch `MountManifest::encode`** — an op an older producer does not
-  know costs one stream; a changed manifest encoding breaks every issued ticket.
+- **Do not put hashes in `MountManifest`.** The encoding is no longer frozen, so
+  the reason is not compatibility: filling that field means hashing at scan
+  time, and `manifest.rs:18-20` refuses exactly that. See *The compatibility
+  tax, and what survives it*.
+
+### Stage 3b — seeding, and seeing who seeds
+
+Independent of the byte plane, and shippable as soon as a peer has ranges worth
+announcing. Two halves that share a data source; the local half is the one
+users act on, so build it first.
+
+**3b-i — local seeding state and the sync controls.** Per-file and per-folder
+none/partial/complete from `present(root)`, the top-right whole-share sync, and
+the scoped sync on a detail view. No mesh traffic at all: this is a peer looking
+at itself.
+
+- **Depends on** `BlobStore::present()` (stage 2) and the existing mirror path
+  (`web/src/mount.ts::syncMount`, `produce.ts::scanDirectory`).
+- **Kill-gate:** press whole-share sync, reload the tab, and the indicators come
+  back complete. If they do not, the bytes were not in the store and the peer
+  would have been advertising what it cannot serve.
+
+**3b-ii — the availability grid.** Broadcast the same state, bucketed, on the
+app-frame plane; render every peer's.
+
+- **Depends on** 3b-i, and on nothing else. It does **not** need multi-source
+  reads.
+- **Kill-gate:** a peer mirroring a large file shows a grid that fills in as it
+  fetches, and a complete peer shows a full one after a single announce. Mesh
+  traffic stays flat as the mirror progresses — proving the debounce holds and
+  a per-file announce did not slip in.
+- **Watch for:** the O(N²) broadcast cost. Measure with a roster of 10 before
+  assuming the caps are enough.
 
 ### Stage 4 — multi-source reads (RFC 01 Phase 5)
 
 Whole-file paths first (`web/src/download.ts`, a new `agent-share get`), **NFS
 last**. `sources.rs` consumes `BlobStore` but still owns peer selection.
+
+The grid from stage 3b is **not** an input here. It is bucketed and up to a
+debounce stale; the scheduler uses exact `OP_HAVE` ranges from peers it has
+connected to.
 
 - **Established by Stage 0:** a second source is worth ≥1.61×, as a floor
   ([S0.4](findings/s04-multi-source-throughput.md)).
