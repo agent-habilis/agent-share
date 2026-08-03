@@ -20,8 +20,8 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use agent_habilis_mesh::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
@@ -33,8 +33,8 @@ use agent_habilis_mesh::protocol::{
     Channel, DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message, Nickname,
 };
 use agent_habilis_mesh::runtime::{
-    CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh_with,
-    setup_mesh,
+    CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams,
+    derive_topic_mesh_with, setup_mesh,
 };
 use agent_share_proto::PeerCard;
 use agent_share_proto::framing::SECRET_LEN;
@@ -63,6 +63,21 @@ impl CardParts {
             self.role,
         )
     }
+}
+
+/// The manifest fingerprint on our own card, shared with [`MeshPeer`].
+///
+/// A cell rather than a field on [`CardParts`] because the browser cannot know
+/// it at join: `join_share` runs from the client constructor, before any
+/// manifest has been fetched. Without this the card would advertise no tree for
+/// the tab's whole life. The native peer carries the same split.
+pub(crate) type SharedTree = Arc<Mutex<Option<String>>>;
+
+/// What the outside world can ask the share driver to do. See the native
+/// `ShareRequest`; the two are deliberately the same shape.
+pub(crate) enum ShareRequest {
+    /// Re-publish our meta card, picking up whatever [`SharedTree`] now holds.
+    RepublishCard,
 }
 
 /// Fallback when JS omits a card (lab / older callers). No UA sniffing.
@@ -156,17 +171,22 @@ type ClientBook = Arc<Mutex<HashMap<String, PeerCard>>>;
 /// Share-mesh driver: presence plus mesh/app metadata on the meta card.
 struct ShareMeshDriver {
     parts: CardParts,
+    tree: SharedTree,
     book: ClientBook,
 }
 
 impl ShareMeshDriver {
-    fn new(parts: CardParts, book: ClientBook) -> Self {
-        Self { parts, book }
+    fn new(parts: CardParts, tree: SharedTree, book: ClientBook) -> Self {
+        Self { parts, tree, book }
     }
 
     /// Publish mesh/app identity onto `/peers/<nick>/card` (meta channel).
     async fn publish_card(&self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-        let card = self.parts.clone().into_card(ctx.endpoint.id().to_string());
+        let card = self
+            .parts
+            .clone()
+            .into_card(ctx.endpoint.id().to_string())
+            .with_tree(self.tree.lock().ok().and_then(|tree| tree.clone()));
         let merge = serde_json::json!({
             "peers": {
                 ctx.author.as_str(): {
@@ -263,9 +283,23 @@ impl NodeApp for ShareMeshDriver {
 
 #[agent_habilis_mesh::async_trait]
 impl NodeDriver for ShareMeshDriver {
-    type Session = ();
+    type Session = ShareRequest;
     type Http = ();
     type Ipc = serde_json::Value;
+
+    async fn handle_session(
+        &mut self,
+        req: ShareRequest,
+        state: &mut EventLoopState,
+        ctx: &HandlerCtx<'_>,
+    ) -> bool {
+        match req {
+            ShareRequest::RepublishCard => {
+                self.publish_card(state, ctx).await;
+                true
+            }
+        }
+    }
 
     async fn on_startup(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         self.publish_card(state, ctx).await;
@@ -284,6 +318,8 @@ pub struct MeshPeer {
     hub: Arc<fofoca_iroh_webrtc_transport::BrowserHubTransport>,
     /// Peer cards from meta `/peers/<nick>/card`, keyed by endpoint id.
     clients: ClientBook,
+    /// The manifest fingerprint on our card. See [`SharedTree`].
+    tree: SharedTree,
     /// Behind a `RefCell` so [`MeshPeer::leave`] can take `&self` — see the
     /// note there on why a `self`-by-value method is a trap through
     /// wasm-bindgen.
@@ -423,6 +459,41 @@ impl MeshPeer {
             .lock()
             .ok()
             .and_then(|book| book.get(endpoint_id).cloned())
+    }
+
+    /// Publish the manifest fingerprint this tab is on.
+    ///
+    /// The browser cannot supply this at join — `join_share` runs from the
+    /// client constructor, before any manifest exists — so without calling this
+    /// the tab advertises no tree for its whole life and is never a candidate
+    /// source for anyone.
+    ///
+    /// Idempotent by value, and that is the debounce: a card rewrite is a CRDT
+    /// merge broadcast to the whole mesh, and callers fire far more often than
+    /// the value changes. The native peer's `set_tree` is the same function.
+    pub(crate) async fn set_tree(&self, fingerprint: String) {
+        {
+            // Scoped: never hold a std `Mutex` across the await below.
+            let Ok(mut current) = self.tree.lock() else {
+                return;
+            };
+            if current.as_deref() == Some(fingerprint.as_str()) {
+                return;
+            }
+            *current = Some(fingerprint);
+        }
+        // Cloned out rather than borrowed across the await: `node` lives behind
+        // a `RefCell`, and holding that borrow over a yield point is how a
+        // browser task panics on a re-entrant borrow.
+        let sender = self.node.borrow().as_ref().map(Node::sender);
+        let Some(sender) = sender else {
+            return;
+        };
+        if let Err(error) = sender.send(ShareRequest::RepublishCard).await {
+            web_sys::console::debug_1(&JsValue::from_str(&format!(
+                "[share] republishing the card failed: {error}"
+            )));
+        }
     }
 
     /// All meta peer cards currently known (gossip roster advertise).
@@ -572,7 +643,8 @@ async fn spawn_peer_inner(
     }
     // `handle_signals: false` — there are no process signals in a tab, and the
     // engine's signal registration is host-only anyway.
-    let driver = ShareMeshDriver::new(card, Arc::clone(&clients));
+    let tree: SharedTree = Arc::new(Mutex::new(None));
+    let driver = ShareMeshDriver::new(card, Arc::clone(&tree), Arc::clone(&clients));
     let node = Node::spawn(config, driver, None, false);
     Ok(MeshPeer {
         mesh_id,
@@ -580,6 +652,7 @@ async fn spawn_peer_inner(
         live,
         hub,
         clients,
+        tree,
         node: RefCell::new(Some(node)),
     })
 }

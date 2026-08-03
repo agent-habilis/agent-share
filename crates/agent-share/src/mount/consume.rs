@@ -84,6 +84,10 @@ pub(crate) async fn attach(
     let client = Arc::new(client);
     let manifest = client.fetch_manifest().await?;
     let file_count = manifest.files.len();
+    // Taken before `manifest` moves into the watch task below. Re-encodes
+    // rather than hashing the wire bytes, which `fetch_manifest` discards;
+    // safe because the encoding is canonical (`encoding_is_canonical`).
+    let tree_fingerprint = manifest.fingerprint();
     let mut ids = TreeIds::default();
     let nodes = build_tree(&mut ids, &manifest)?;
 
@@ -145,6 +149,7 @@ pub(crate) async fn attach(
         webrtc: &webrtc,
         webrtc_only,
         json,
+        tree: Some(tree_fingerprint),
     })
     .await;
 
@@ -169,6 +174,8 @@ pub(crate) async fn attach(
 /// booleans are adjacent and would otherwise be swappable in silence.
 struct MeshJoin<'a> {
     secret: &'a [u8; SECRET_LEN],
+    /// Fingerprint of the manifest this consumer mounted.
+    tree: Option<String>,
     lookups: &'a agent_share_proto::lookup::LookupOpts,
     endpoint: &'a Endpoint,
     webrtc: &'a WebRtcHandle,
@@ -200,6 +207,7 @@ async fn join_share_mesh(join: MeshJoin<'_>) -> Option<ShareMesh> {
         // on this endpoint and everything it accepts belongs to the mesh.
         protocols: Vec::new(),
         role: super::mesh::Role::Consumer,
+        tree: join.tree,
         // Match the endpoint: `--transport webrtc` built it with IP cleared,
         // and a mesh advertising paths its endpoint does not have is a mesh
         // whose peers dial nowhere.

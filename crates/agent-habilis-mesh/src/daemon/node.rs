@@ -110,6 +110,18 @@ impl<A: NodeDriver + 'static> Node<A> {
             .map_err(|_| anyhow::anyhow!("mesh event loop has stopped"))
     }
 
+    /// A cloneable handle to the same request channel [`Self::send`] uses.
+    ///
+    /// `send` borrows the node, which forces a caller that keeps its `Node`
+    /// behind a `RefCell` — as the browser peer must, since wasm-bindgen cannot
+    /// hand out `self` by value — to hold that borrow across the await. Any
+    /// re-entrant `borrow_mut` during it then panics. Taking a sender first
+    /// lets the borrow end before anything is awaited.
+    #[must_use]
+    pub fn sender(&self) -> mpsc::Sender<A::Session> {
+        self.req_tx.clone()
+    }
+
     /// Ask the loop to broadcast `Left` and wind down, waiting up to 3s. On
     /// timeout returns `Ok(())` and the task detaches.
     ///

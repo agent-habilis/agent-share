@@ -127,6 +127,12 @@ pub(crate) async fn serve(
         },
         protocols: protocols(),
         role: super::mesh::Role::Producer,
+        // Over the bytes `OP_MANIFEST` actually serves, not a re-encode of the
+        // struct. The producer holds them, so it can fingerprint the exact
+        // thing a consumer will hash on the other side.
+        tree: Some(agent_share_proto::manifest::manifest_fingerprint(
+            &tree.manifest_bytes(),
+        )),
         // The producer never clears IP: it is the peer everyone else dials.
         transports: agent_habilis_mesh::net::TransportOpts::default(),
     })
@@ -148,10 +154,44 @@ pub(crate) async fn serve(
         }
     };
 
-    // Nothing to accept here any more; just wait for ctrl-c so the mesh can
-    // announce a graceful `Left` instead of peers waiting out a silence
-    // timeout.
-    let _ = tokio::signal::ctrl_c().await;
+    // Nothing to accept here any more; wait for ctrl-c so the mesh can announce
+    // a graceful `Left` instead of peers waiting out a silence timeout — and,
+    // while waiting, keep the card's `tree` honest.
+    //
+    // A producer whose tree changes under the watcher would otherwise keep
+    // advertising the fingerprint it started with, which is worse than
+    // advertising none: a consumer would read agreement where there is none and
+    // treat a diverged peer as a valid source. `set_tree` dedupes by value, so
+    // the rescan timer firing with nothing changed costs nothing.
+    match &share_mesh {
+        Some(mesh) => {
+            use tokio::sync::broadcast::error::RecvError;
+            let mut updates = tree.subscribe();
+            loop {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    update = updates.recv() => match update {
+                        // A lagged watcher has missed frames but the tree is
+                        // still readable, so recompute rather than give up.
+                        Ok(_) | Err(RecvError::Lagged(_)) => {
+                            mesh.set_tree(agent_share_proto::manifest::manifest_fingerprint(
+                                &tree.manifest_bytes(),
+                            ))
+                            .await;
+                        }
+                        Err(RecvError::Closed) => {
+                            // The watcher is gone; the share still serves.
+                            let _ = tokio::signal::ctrl_c().await;
+                            break;
+                        }
+                    },
+                }
+            }
+        }
+        None => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
     if let Some(mesh) = share_mesh {
         mesh.leave().await;
     }
@@ -202,7 +242,7 @@ pub(super) async fn bind(
         addr: endpoint.addr(),
         secret,
         lookups,
-        flags: 0,
+        kind: agent_share_proto::ticket::TICKET_KIND_SHARE,
     };
     Ok((endpoint, ticket, secret, webrtc))
 }

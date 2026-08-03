@@ -394,7 +394,7 @@ mod tests {
             addr: client.producer_addr(),
             secret: [0u8; SECRET_LEN],
             lookups: LookupOpts::loopback(),
-            flags: 0,
+            kind: agent_share_proto::ticket::TICKET_KIND_SHARE,
         };
         let bad_endpoint = build_endpoint(&bad_ticket.lookups, None, None, Vec::new(), None, false)
             .await

@@ -41,7 +41,7 @@ use agent_share_proto::framing::{
 use agent_share_proto::lookup::{LookupOpts, RelayChoice};
 use agent_share_proto::manifest::{ManifestDelta, MountManifest};
 use agent_share_proto::mesh_key::share_mesh_key;
-use agent_share_proto::ticket::{MountTicket, TICKET_FLAG_BENCH_RELAY, TICKET_FLAG_BENCH_WEBRTC};
+use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 use wasm_bindgen::prelude::*;
@@ -308,9 +308,7 @@ impl ShareClient {
                 // lives across the `.await` that follows it, which is how a
                 // single-threaded runtime earns an `already borrowed` panic
                 // from code that reads as a plain short-circuit.
-                if !local_seen
-                    && let Some((ip, kind)) = hub.selected_local_candidate(&id).await
-                {
+                if !local_seen && let Some((ip, kind)) = hub.selected_local_candidate(&id).await {
                     self.ip_cache
                         .borrow_mut()
                         .insert(local_key.clone(), split_candidate(ip, kind));
@@ -411,6 +409,14 @@ impl ShareClient {
             .map_err(|error| err("read manifest", &error))?;
         let manifest =
             MountManifest::decode(&bytes).map_err(|error| err("decode manifest", &error))?;
+        // The card could not carry a tree at join — `join_share` runs from the
+        // constructor, before this — so publish it now that we know one.
+        // Fingerprinted over the bytes the producer served, not a re-encode of
+        // the struct, so both sides hash the same thing.
+        if let Some(mesh) = self.mesh.as_ref() {
+            mesh.set_tree(agent_share_proto::manifest::manifest_fingerprint(&bytes))
+                .await;
+        }
         serde_wasm(&manifest)
     }
 
@@ -494,12 +500,12 @@ impl ShareClient {
     ) -> Result<JsValue, JsValue> {
         console_error_panic_hook::set_once();
         let ticket = MountTicket::decode(&ticket).map_err(|error| err("decode ticket", &error))?;
-        let transport_label = match ticket.flags {
-            TICKET_FLAG_BENCH_RELAY => "relay",
-            TICKET_FLAG_BENCH_WEBRTC => "webrtc",
+        let transport_label = match ticket.kind {
+            TICKET_KIND_BENCH_RELAY => "relay",
+            TICKET_KIND_BENCH_WEBRTC => "webrtc",
             other => {
                 return Err(JsValue::from_str(&format!(
-                    "ticket has no bench transport (flags={other}); produce with --transport webrtc|relay"
+                    "ticket has no bench transport (kind={other}); produce with --transport webrtc|relay"
                 )));
             }
         };
@@ -509,11 +515,11 @@ impl ShareClient {
         );
 
         let connect_start = now_ms();
-        let client = match ticket.flags {
+        let client = match ticket.kind {
             // Bench relay must not fall through to direct IP (same-machine
             // benches were reporting ~localhost numbers labeled "relay").
-            TICKET_FLAG_BENCH_RELAY => connect_relay_only(ticket).await?,
-            TICKET_FLAG_BENCH_WEBRTC => {
+            TICKET_KIND_BENCH_RELAY => connect_relay_only(ticket).await?,
+            TICKET_KIND_BENCH_WEBRTC => {
                 connect_webrtc(ticket, /*allow_relay_fallback=*/ false).await?
             }
             _ => unreachable!("validated above"),
@@ -660,16 +666,13 @@ impl ShareClient {
                         ip: Option<String>,
                         ip_kind: Option<String>| {
             let card = card_for(id);
-            let client = card
-                .as_ref()
-                .map(|c| c.client.clone())
-                .unwrap_or_else(|| {
-                    if id == local {
-                        self_card.client.clone()
-                    } else {
-                        "unknown".to_owned()
-                    }
-                });
+            let client = card.as_ref().map(|c| c.client.clone()).unwrap_or_else(|| {
+                if id == local {
+                    self_card.client.clone()
+                } else {
+                    "unknown".to_owned()
+                }
+            });
             let proto = card
                 .as_ref()
                 .map(|c| c.transport.clone())
@@ -714,10 +717,7 @@ impl ShareClient {
         // whichever half it missed.
         let live: Vec<String> = self.direct_peer_ids().into_iter().collect();
         let producer_direct = live.iter().any(|id| id == producer);
-        let (ip, ip_kind) = cache
-            .get(producer)
-            .cloned()
-            .unwrap_or((None, None));
+        let (ip, ip_kind) = cache.get(producer).cloned().unwrap_or((None, None));
         let mut flags = String::from("S");
         if producer_direct {
             flags.push('D');
@@ -740,7 +740,14 @@ impl ShareClient {
                 continue;
             }
             let (ip, ip_kind) = cache.get(&id).cloned().unwrap_or((None, None));
-            rows.push(peer_row(&id, "direct", "D".to_owned(), "webrtc", ip, ip_kind));
+            rows.push(peer_row(
+                &id,
+                "direct",
+                "D".to_owned(),
+                "webrtc",
+                ip,
+                ip_kind,
+            ));
         }
 
         // Gossip-only members publish meta cards but may never open a direct
@@ -772,9 +779,7 @@ impl ShareClient {
 fn identity_fingerprint(secret: &[u8; SECRET_LEN]) -> String {
     let key = share_mesh_key(secret);
     let head = key.get(..8).unwrap_or(&key);
-    let tail = key
-        .get(key.len().saturating_sub(8)..)
-        .unwrap_or("");
+    let tail = key.get(key.len().saturating_sub(8)..).unwrap_or("");
     format!("{head}…{tail}")
 }
 
@@ -1379,7 +1384,9 @@ async fn connect_webrtc(
                 // "selection never settled" report rather than a lost race.
                 client.fallback_reason = Some(format!(
                     "the mount reported {} rather than WebRTC on a relay-free endpoint",
-                    selected.as_deref().unwrap_or("no path before the settle deadline"),
+                    selected
+                        .as_deref()
+                        .unwrap_or("no path before the settle deadline"),
                 ));
             }
             Ok(client)
@@ -1425,9 +1432,7 @@ async fn finish_relay_fallback(
 /// A `JsValue` error as one line of prose, without the `JsValue("…")` wrapper
 /// `{:?}` puts around a string.
 fn describe(error: &JsValue) -> String {
-    error
-        .as_string()
-        .unwrap_or_else(|| format!("{error:?}"))
+    error.as_string().unwrap_or_else(|| format!("{error:?}"))
 }
 
 fn ensure_reachable_addr(addr: &EndpointAddr) -> Result<(), JsValue> {

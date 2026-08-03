@@ -11,7 +11,7 @@ use agent_share_proto::framing::{
     MAX_BENCH_FILL_BYTES, decode_bench_request_prefix, decode_response_header,
     encode_bench_echo_request, encode_bench_fill_request,
 };
-use agent_share_proto::ticket::{TICKET_FLAG_BENCH_RELAY, TICKET_FLAG_BENCH_WEBRTC};
+use agent_share_proto::ticket::{TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
 use anyhow::{Context, Result, bail};
 use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr};
@@ -27,7 +27,7 @@ use super::{MOUNT_ALPN, OP_BENCH, REQUEST_HEADER_LEN, SECRET_LEN, WEBRTC_SIGNAL_
 use super::{dial_webrtc, serve_signal, wait_online};
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 
-/// Mount data path chosen by the bench producer (carried in ticket flags).
+/// Mount data path chosen by the bench producer (carried in the ticket kind).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BenchTransport {
     WebRtc,
@@ -50,19 +50,19 @@ impl BenchTransport {
         }
     }
 
-    const fn ticket_flag(self) -> u8 {
+    const fn ticket_kind(self) -> u8 {
         match self {
-            Self::WebRtc => TICKET_FLAG_BENCH_WEBRTC,
-            Self::Relay => TICKET_FLAG_BENCH_RELAY,
+            Self::WebRtc => TICKET_KIND_BENCH_WEBRTC,
+            Self::Relay => TICKET_KIND_BENCH_RELAY,
         }
     }
 
-    fn from_ticket_flags(flags: u8) -> Result<Self> {
-        match flags {
-            TICKET_FLAG_BENCH_WEBRTC => Ok(Self::WebRtc),
-            TICKET_FLAG_BENCH_RELAY => Ok(Self::Relay),
+    fn from_ticket_kind(kind: u8) -> Result<Self> {
+        match kind {
+            TICKET_KIND_BENCH_WEBRTC => Ok(Self::WebRtc),
+            TICKET_KIND_BENCH_RELAY => Ok(Self::Relay),
             other => bail!(
-                "ticket has no bench transport (flags={other}); produce with --transport webrtc|relay"
+                "ticket has no bench transport (kind={other}); produce with --transport webrtc|relay"
             ),
         }
     }
@@ -169,7 +169,7 @@ async fn bind_bench(
         addr: endpoint.addr(),
         secret,
         lookups,
-        flags: transport.ticket_flag(),
+        kind: transport.ticket_kind(),
     };
     Ok((endpoint, ticket, secret, webrtc))
 }
@@ -273,7 +273,7 @@ async fn serve_bench_stream(
 /// Consumer: connect using the transport encoded in the ticket flags.
 pub(crate) async fn run(ticket: &str, duration_secs: u64, json: bool) -> Result<()> {
     let ticket = MountTicket::decode(ticket)?;
-    let transport = BenchTransport::from_ticket_flags(ticket.flags)?;
+    let transport = BenchTransport::from_ticket_kind(ticket.kind)?;
     if !json {
         crate::util::output::status_out("Connecting", transport.as_str());
     }
@@ -617,21 +617,21 @@ mod tests {
         );
         assert!(BenchTransport::parse("dynamic").is_err());
         assert_eq!(
-            BenchTransport::from_ticket_flags(TICKET_FLAG_BENCH_WEBRTC).unwrap(),
+            BenchTransport::from_ticket_kind(TICKET_KIND_BENCH_WEBRTC).unwrap(),
             BenchTransport::WebRtc
         );
         assert_eq!(
-            BenchTransport::from_ticket_flags(TICKET_FLAG_BENCH_RELAY).unwrap(),
+            BenchTransport::from_ticket_kind(TICKET_KIND_BENCH_RELAY).unwrap(),
             BenchTransport::Relay
         );
-        assert!(BenchTransport::from_ticket_flags(0).is_err());
+        assert!(BenchTransport::from_ticket_kind(0).is_err());
     }
 
     async fn spawn_loopback_producer(transport: BenchTransport) -> (Endpoint, MountTicket) {
         let (endpoint, ticket, secret, webrtc) = bind_bench(LookupOpts::loopback(), transport)
             .await
             .expect("bind");
-        assert_eq!(ticket.flags, transport.ticket_flag());
+        assert_eq!(ticket.kind, transport.ticket_kind());
         let local_id = endpoint.id();
         let ice = IceConfig::host_only();
         let accept = endpoint.clone();
@@ -692,10 +692,10 @@ mod tests {
             ),
             secret: [0u8; SECRET_LEN],
             lookups: LookupOpts::loopback(),
-            flags: TICKET_FLAG_BENCH_RELAY,
+            kind: TICKET_KIND_BENCH_RELAY,
         };
 
-        let transport = BenchTransport::from_ticket_flags(ticket.flags).unwrap();
+        let transport = BenchTransport::from_ticket_kind(ticket.kind).unwrap();
         let err = connect_forced(&ticket, transport)
             .await
             .expect_err("loopback has no relay URL");
@@ -708,7 +708,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bench_over_webrtc() {
         let (endpoint, ticket) = spawn_loopback_producer(BenchTransport::WebRtc).await;
-        let transport = BenchTransport::from_ticket_flags(ticket.flags).unwrap();
+        let transport = BenchTransport::from_ticket_kind(ticket.kind).unwrap();
         let (_ep, conn, path) = connect_forced(&ticket, transport)
             .await
             .expect("connect webrtc");
@@ -742,7 +742,7 @@ mod tests {
         // inside the measurement window.
         let mut conns = Vec::new();
         for (_, ticket) in &producers {
-            let transport = BenchTransport::from_ticket_flags(ticket.flags).unwrap();
+            let transport = BenchTransport::from_ticket_kind(ticket.kind).unwrap();
             let (endpoint, conn, path) = connect_forced(ticket, transport).await.expect("connect");
             assert_eq!(
                 path, "webrtc",

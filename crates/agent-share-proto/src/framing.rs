@@ -267,18 +267,21 @@ mod tests {
 
     #[test]
     fn wire_constants_are_pinned() {
-        // Wire-format pins for `agent-share`'s own mount protocol: a change
-        // here breaks every already-issued ticket and every peer running an
-        // older build, so it must be a deliberate edit, never a refactor's
-        // side effect. The op codes and secret length are still bit-identical
-        // to agent-habilis/swarm's `ahsw mount`; only the ALPN was forked.
+        // Wire-format pins for `agent-share`'s own mount protocol. Changing
+        // one is allowed — nothing here promises compatibility — but it must
+        // be a deliberate edit, never a refactor's side effect: two builds of
+        // the same version still have to agree, so a constant that shifts by
+        // accident silently breaks a producer on `main` against a consumer on
+        // a branch. The op codes and secret length are still bit-identical to
+        // agent-habilis/swarm's `ahsw mount`; only the ALPN was forked.
         assert_eq!(MOUNT_ALPN, b"agent-share/mount/1");
         assert_eq!(WEBRTC_SIGNAL_ALPN, b"agent-share/webrtc-signal/1");
         assert_eq!(OP_MANIFEST, 1);
         assert_eq!(OP_READ, 2);
-        // Added after the fork. Additive: an op an older producer does not
-        // know costs that one stream, not the connection, so a new consumer
-        // degrades to snapshot semantics instead of failing outright.
+        // Added after the fork. The graceful-degradation path this once had
+        // — an unknown op costing one stream rather than the connection — is
+        // no longer required of new ops, since every peer runs the same build.
+        // It stays here because it is already written and costs nothing.
         assert_eq!(OP_WATCH, 3);
         assert_eq!(OP_BENCH, 4);
         assert_eq!(BENCH_KIND_ECHO, 0);

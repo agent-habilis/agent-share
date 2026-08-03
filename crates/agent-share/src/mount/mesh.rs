@@ -106,6 +106,23 @@ fn share_card_gate() -> SelfWriteGate {
 /// roster. The browser peer carries the same split for the same reason.
 type CardBook = Arc<Mutex<HashMap<String, PeerCard>>>;
 
+/// The manifest fingerprint on our own card, shared with [`ShareMesh`].
+///
+/// A cell rather than a field because it is not known at join and does not stay
+/// put: the browser joins inside its client constructor, before it has fetched
+/// any manifest, and a producer's tree changes under `live.rs`'s rescan.
+type SharedTree = Arc<Mutex<Option<String>>>;
+
+/// What the outside world can ask the driver to do.
+///
+/// The driver runs inside the engine's event loop, so this is the only way in.
+/// One variant today; the availability grid will add its own rather than
+/// widening this one into a general-purpose escape hatch.
+pub(crate) enum ShareRequest {
+    /// Re-publish our meta card, picking up whatever [`SharedTree`] now holds.
+    RepublishCard,
+}
+
 /// Read every `/peers/<nick>/card` out of a meta document.
 ///
 /// Free function rather than a method so the part with the interesting
@@ -176,6 +193,8 @@ struct ShareDriver {
     runtime: String,
     transport: String,
     role: Option<String>,
+    /// The manifest fingerprint published on our card. See [`SharedTree`].
+    tree: SharedTree,
     book: CardBook,
 }
 
@@ -185,6 +204,7 @@ impl ShareDriver {
         runtime: String,
         transport: String,
         role: Option<String>,
+        tree: SharedTree,
         book: CardBook,
     ) -> Self {
         Self {
@@ -192,6 +212,7 @@ impl ShareDriver {
             runtime,
             transport,
             role,
+            tree,
             book,
         }
     }
@@ -217,7 +238,8 @@ impl ShareDriver {
             &self.runtime,
             &self.transport,
             self.role.clone(),
-        );
+        )
+        .with_tree(self.tree.lock().ok().and_then(|tree| tree.clone()));
         let merge = serde_json::json!({
             "peers": {
                 ctx.author.as_str(): {
@@ -297,12 +319,29 @@ impl NodeApp for ShareDriver {
 
 #[agent_habilis_mesh::async_trait]
 impl NodeDriver for ShareDriver {
-    type Session = ();
+    type Session = ShareRequest;
     type Http = ();
     type Ipc = serde_json::Value;
 
     async fn on_startup(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         self.publish_card(state, ctx).await;
+    }
+
+    async fn handle_session(
+        &mut self,
+        req: ShareRequest,
+        state: &mut EventLoopState,
+        ctx: &HandlerCtx<'_>,
+    ) -> bool {
+        match req {
+            ShareRequest::RepublishCard => {
+                self.publish_card(state, ctx).await;
+                // `true`: this broadcast, so the loop refreshes its
+                // heartbeat-suppression clock rather than sending a redundant
+                // beat straight after.
+                true
+            }
+        }
     }
 }
 
@@ -316,6 +355,7 @@ pub(crate) struct ShareMesh {
     webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
     node: Option<Node<ShareDriver>>,
     book: CardBook,
+    tree: SharedTree,
     /// Our own endpoint id, so the roster breakdown can report *other* peers
     /// and agree with the count beside it, which already excludes self.
     local_endpoint: String,
@@ -326,6 +366,42 @@ impl ShareMesh {
     /// every holder of the link computes the same one.
     pub(crate) fn mesh_id(&self) -> &str {
         &self.mesh_id
+    }
+
+    /// Publish the manifest fingerprint we are now on.
+    ///
+    /// Idempotent by value, and that *is* the debounce. A card rewrite is a CRDT
+    /// merge broadcast to the whole mesh, and the callers here fire far more
+    /// often than the value changes — `live.rs` rescans on a 300 ms timer and
+    /// usually finds nothing different. Comparing before broadcasting turns that
+    /// into silence, which a timer alone would not: a timer still sends the same
+    /// value, just less often.
+    ///
+    /// Best-effort, like everything else on this mesh. A failed republish costs
+    /// peers an up-to-date `tree`, never the share.
+    pub(crate) async fn set_tree(&self, fingerprint: String) {
+        {
+            // Scoped so the lock is released before the await below; holding a
+            // std `Mutex` across one is how an executor deadlocks itself.
+            let Ok(mut current) = self.tree.lock() else {
+                return;
+            };
+            if current.as_deref() == Some(fingerprint.as_str()) {
+                return;
+            }
+            *current = Some(fingerprint);
+        }
+        let Some(node) = self.node.as_ref() else {
+            return;
+        };
+        // Logged on the *success* path too, deliberately: this is the one place
+        // that can flood the mesh with CRDT merges, so being able to see how
+        // often it fires is what makes a runaway republish diagnosable rather
+        // than just slow.
+        match node.send(ShareRequest::RepublishCard).await {
+            Ok(()) => tracing::debug!("republished the share card with a new tree"),
+            Err(error) => tracing::debug!(%error, "republishing the share card failed"),
+        }
     }
 
     /// Report the peer counts on a line of their own whenever they change.
@@ -414,6 +490,13 @@ pub(crate) struct JoinOpts<'a> {
     /// none and passes an empty vec.
     pub(crate) protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
     pub(crate) role: Role,
+    /// Fingerprint of the manifest this peer is on, when it knows one.
+    ///
+    /// Both roles learn theirs *before* joining — the producer has scanned the
+    /// tree, the consumer has fetched the manifest — so this is available at
+    /// join rather than needing a later republish. A peer whose tree then
+    /// changes under it goes stale; see the note on [`ShareDriver`].
+    pub(crate) tree: Option<String>,
     /// Must match the reach the injected endpoint was built with. A consumer
     /// run under `--transport webrtc` binds with IP cleared, so leaving the
     /// mesh on the default would have it advertise paths that do not exist.
@@ -432,6 +515,7 @@ pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
         shared,
         protocols,
         role,
+        tree,
         transports,
     } = opts;
     // Hash first, then derive: the engine carries the topic *string* into its
@@ -493,11 +577,13 @@ pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
     // True of both roles: a consumer reads files over the mount protocol, but
     // its *mesh* traffic rides the same unicast plane the producer's does.
     let book: CardBook = Arc::new(Mutex::new(HashMap::new()));
+    let tree: SharedTree = Arc::new(Mutex::new(tree));
     let driver = ShareDriver::new(
         env!("CARGO_PKG_VERSION").to_owned(),
         "rust".to_owned(),
         "unicast".to_owned(),
         Some(role.as_card_str().to_owned()),
+        Arc::clone(&tree),
         Arc::clone(&book),
     );
     // `handle_signals: false` is load-bearing, not a default. Registering
@@ -512,6 +598,7 @@ pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
         webrtc,
         node: Some(node),
         book,
+        tree,
         local_endpoint,
     })
 }
@@ -666,6 +753,16 @@ mod tests {
         lookups: &crate::protocol::swarm::LookupOpts,
         role: Role,
     ) -> super::ShareMesh {
+        join_as_on_tree(secret, lookups, role, None).await
+    }
+
+    /// As [`join_as`], but publishing a manifest fingerprint.
+    async fn join_as_on_tree(
+        secret: &[u8; super::SECRET_LEN],
+        lookups: &crate::protocol::swarm::LookupOpts,
+        role: Role,
+        tree: Option<String>,
+    ) -> super::ShareMesh {
         use agent_habilis_mesh::runtime::InjectedEndpoint;
         use fofoca_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
         use rand::RngCore;
@@ -690,6 +787,7 @@ mod tests {
             shared: InjectedEndpoint { endpoint, webrtc },
             protocols: Vec::new(),
             role,
+            tree,
             transports: agent_habilis_mesh::net::TransportOpts::default(),
         })
         .await
@@ -750,5 +848,190 @@ mod tests {
 
         producer.leave().await;
         consumer.leave().await;
+    }
+
+    /// **Phase 1's claim**: peers on one tree agree on its fingerprint, and a
+    /// peer on a different tree is visibly different.
+    ///
+    /// This is what guard #1 will enforce. Here it only has to be *legible* —
+    /// a reader can tell the two apart — but if the fingerprint did not survive
+    /// the card round-trip, or two peers on one tree computed different
+    /// strings, the guard would be built on sand.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn peers_publish_the_tree_they_are_on() {
+        use crate::protocol::swarm::LookupOpts;
+        use agent_share_proto::manifest::{FileEntry, MountManifest};
+        use rand::RngCore;
+        use std::time::{Duration, Instant};
+
+        fn manifest_of(paths: &[&str]) -> MountManifest {
+            MountManifest {
+                dirs: Vec::new(),
+                files: paths
+                    .iter()
+                    .map(|path| FileEntry {
+                        rel_path: (*path).to_owned(),
+                        size: 1,
+                        mode: 0o644,
+                        mtime: 0,
+                    })
+                    .collect(),
+            }
+        }
+
+        let shared = manifest_of(&["a.txt", "b.txt"]).fingerprint();
+        let diverged = manifest_of(&["a.txt", "c.txt"]).fingerprint();
+        assert_ne!(
+            shared, diverged,
+            "different trees must differ locally first"
+        );
+
+        let mut secret = [0u8; super::SECRET_LEN];
+        rand::rng().fill_bytes(&mut secret);
+        let lookups = LookupOpts::loopback();
+
+        let origin = join_as_on_tree(&secret, &lookups, Role::Producer, Some(shared.clone())).await;
+        let agreeing =
+            join_as_on_tree(&secret, &lookups, Role::Consumer, Some(shared.clone())).await;
+        let stale =
+            join_as_on_tree(&secret, &lookups, Role::Consumer, Some(diverged.clone())).await;
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let converged = loop {
+            let seen = cards_from_book(&origin.book);
+            let on_our_tree = seen
+                .iter()
+                .filter(|card| card.tree.as_ref() == Some(&shared));
+            let elsewhere = seen
+                .iter()
+                .filter(|card| card.tree.as_ref() == Some(&diverged));
+            // Two on ours counts the origin itself; one elsewhere is the stale peer.
+            if on_our_tree.count() >= 2 && elsewhere.count() >= 1 {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+
+        assert!(
+            converged,
+            "the origin must see who shares its tree and who does not; roster was {:?}",
+            cards_from_book(&origin.book)
+                .iter()
+                .map(|card| (card.role.clone(), card.tree.clone()))
+                .collect::<Vec<_>>(),
+        );
+
+        origin.leave().await;
+        agreeing.leave().await;
+        stale.leave().await;
+    }
+
+    /// **The gap phase 1 shipped with.** A peer that does not know its tree at
+    /// join must be able to publish one afterwards.
+    ///
+    /// This is not a corner case, it is the browser: `MeshPeer::join_share` runs
+    /// inside the wasm client's constructor, before any manifest has been
+    /// fetched. Without a republish path a browser peer advertises `tree: None`
+    /// for its whole life, so guard #1 can never vouch for it and it is never a
+    /// candidate source.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_peer_can_publish_its_tree_after_joining_without_one() {
+        use crate::protocol::swarm::LookupOpts;
+        use rand::RngCore;
+        use std::time::{Duration, Instant};
+
+        let mut secret = [0u8; super::SECRET_LEN];
+        rand::rng().fill_bytes(&mut secret);
+        let lookups = LookupOpts::loopback();
+        let fingerprint = "0f1e2d3c4b5a6978".to_owned();
+
+        let watcher = join_as_on_tree(&secret, &lookups, Role::Producer, None).await;
+        // Joins knowing nothing, exactly as the browser does.
+        let late = join_as_on_tree(&secret, &lookups, Role::Consumer, None).await;
+
+        // Wait until the watcher can see the late peer at all, so the assertion
+        // below is about the *tree* rather than about roster convergence.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while cards_from_book(&watcher.book)
+            .iter()
+            .all(|card| card.role.as_deref() != Some("consumer"))
+        {
+            assert!(Instant::now() < deadline, "the late peer never appeared");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(
+            cards_from_book(&watcher.book)
+                .iter()
+                .all(|card| card.tree.is_none()),
+            "nobody has published a tree yet"
+        );
+
+        late.set_tree(fingerprint.clone()).await;
+
+        let publish_deadline = Instant::now() + Duration::from_secs(30);
+        let seen = loop {
+            if cards_from_book(&watcher.book)
+                .iter()
+                .any(|card| card.tree.as_ref() == Some(&fingerprint))
+            {
+                break true;
+            }
+            if Instant::now() >= publish_deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        assert!(
+            seen,
+            "the late peer's tree must reach the roster; watcher saw {:?}",
+            cards_from_book(&watcher.book)
+                .iter()
+                .map(|card| card.tree.clone())
+                .collect::<Vec<_>>(),
+        );
+
+        watcher.leave().await;
+        late.leave().await;
+    }
+
+    /// Republishing the value already published must not broadcast.
+    ///
+    /// A card rewrite is a CRDT merge sent to the whole mesh, and `live.rs`
+    /// rescans on a 300 ms timer that usually finds nothing changed. Without
+    /// this the mesh would carry a redundant merge several times a second per
+    /// peer, forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setting_the_same_tree_twice_is_silent() {
+        use crate::protocol::swarm::LookupOpts;
+        use rand::RngCore;
+
+        let mut secret = [0u8; super::SECRET_LEN];
+        rand::rng().fill_bytes(&mut secret);
+        let mesh = join_as_on_tree(
+            &secret,
+            &LookupOpts::loopback(),
+            Role::Producer,
+            Some("aaaabbbbccccdddd".to_owned()),
+        )
+        .await;
+
+        // Same value: the cell must be left exactly as it was.
+        mesh.set_tree("aaaabbbbccccdddd".to_owned()).await;
+        assert_eq!(
+            mesh.tree.lock().expect("tree lock").as_deref(),
+            Some("aaaabbbbccccdddd")
+        );
+
+        // A different value does take.
+        mesh.set_tree("1111222233334444".to_owned()).await;
+        assert_eq!(
+            mesh.tree.lock().expect("tree lock").as_deref(),
+            Some("1111222233334444")
+        );
+
+        mesh.leave().await;
     }
 }
