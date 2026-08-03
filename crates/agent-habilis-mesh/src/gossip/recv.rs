@@ -150,11 +150,18 @@ pub(crate) async fn handle_gossip_event(
             // Terminal: the actor closed this subscription (lag
             // eviction) or died. The heal arm re-subscribes; meanwhile
             // IPC msg/poll keep serving the local buffer.
+            //
+            // `warn`, not `error`: this is recovered automatically, and the
+            // case where recovery is genuinely exhausted has an `error` of
+            // its own (`Resubscribe::Fatal`, which then shuts the daemon
+            // down). Logging both at the same level buried the one that
+            // means the node is finished under the one that means it is
+            // reconnecting.
             state.gossip_open = false;
             ctx.sink.emit(NodeEvent::Error(
                 "gossip stream ended; resubscribing".to_owned(),
             ));
-            tracing::error!(target: "agent_habilis_mesh::gossip", "gossip stream ended; heal arm will resubscribe");
+            tracing::warn!(target: "agent_habilis_mesh::gossip", "gossip stream ended; heal arm will resubscribe");
         }
     }
 }

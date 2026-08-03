@@ -178,12 +178,18 @@ pub async fn run<A: NodeDriver>(
     // advertisers sharing one directory `rendezvous_id` don't bind
     // duplicate copies. Why: `EventLoopConfig::cohost`.
     let mut rendezvous: Option<beacon::Rendezvous> = None;
+    // The outstanding probe-before-claim, if any. Owned here beside the
+    // beacon it decides, because a probe outlives the tick that started it:
+    // its verdict arrives on the loop's own arm, up to `HEAL_PROBE_SECS`
+    // later.
+    let mut rival_probe: Option<beacon::RivalProbe> = None;
     if claims_at_startup(cohost) {
         let claimed = beacon::ensure(
             &rendezvous_params,
             &endpoint,
             &mut rendezvous,
             probes_before_claim(cohost),
+            &mut rival_probe,
         )
         .await;
         if claimed {
@@ -289,6 +295,7 @@ pub async fn run<A: NodeDriver>(
         ipc_rx,
         intervals,
         rendezvous,
+        rival_probe,
         rendezvous_params,
         rung_rx,
         cohost,
@@ -441,6 +448,11 @@ struct EventLoop<A: NodeDriver> {
     ipc_rx: Option<mpsc::Receiver<IpcMessage<A::Ipc>>>,
     intervals: MaintenanceIntervals,
     rendezvous: Option<beacon::Rendezvous>,
+    /// The outstanding probe-before-claim, whose verdict the loop applies on
+    /// its own arm (`beacon::probe_verdict`). Off-loop by construction: a
+    /// free rendezvous is only provably free once the dial exhausts its
+    /// budget, and paying that inline froze the whole loop for ~5s a tick.
+    rival_probe: Option<beacon::RivalProbe>,
     rendezvous_params: beacon::RendezvousParams,
     /// Bootstrap rung chosen off-loop (startup probe + beacon
     /// self-monitor); the loop applies changes via the rung-update arm.
@@ -500,6 +512,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mut ipc_rx,
         mut intervals,
         mut rendezvous,
+        mut rival_probe,
         mut rendezvous_params,
         mut rung_rx,
         cohost,
@@ -619,7 +632,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         params: &rendezvous_params,
                         cohost,
                         started,
-                    }, &mut rendezvous).await;
+                    }, &mut rendezvous, &mut rival_probe).await;
                 } else {
                     // Stream ended: resubscribe instead of healing a dead topic
                     // (see `resubscribe_tick`); the beacon keeps the mesh joinable.
@@ -632,16 +645,27 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         &mut app,
                         GossipLink { sender: &mut sender, receiver: &mut receiver, attempts: &mut resubscribe_attempts },
                     ).await {
-                        release_rendezvous(&mut rendezvous).await;
+                        release_rendezvous(&mut rendezvous, &mut rival_probe).await;
                         return Err(error);
                     }
                     let ctx = parts.ctx(&sender);
-                    maybe_cohost(&mut state, &ctx, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous).await;
+                    maybe_cohost(&mut state, &ctx, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
                 }
             }
             // A bootstrap rung chosen off-loop (startup probe / beacon self-monitor); apply it cheaply.
             // `Ok(())` only: a closed channel (impossible while the beacon params live) disables the arm.
             Ok(()) = rung_rx.changed() => apply_rung_change(&mut rendezvous_params, &endpoint, &mut rendezvous, &rung_rx),
+            // The off-loop probe-before-claim answered. Its own arm rather
+            // than a poll at the next heal tick: the probe already cost up to
+            // `HEAL_PROBE_SECS`, and making a free rendezvous wait out another
+            // 15s interval before anyone binds it would hand back the claim
+            // latency this change was meant to leave untouched.
+            found_rival = beacon::probe_verdict(&mut rival_probe) => {
+                let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &mut rendezvous, found_rival).await;
+                if claimed {
+                    schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
+                }
+            }
             _ = intervals.reclaim.tick() => {
                 let ctx = parts.ctx(&sender);
                 let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
@@ -655,7 +679,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // (~RECLAIM_INTERVAL_MS later, after the dropped endpoint has
                 // unmapped) runs the re-probe via `maybe_reclaim`.
                 if !shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous) {
-                    maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous).await;
+                    maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
                 }
             }
             _ = intervals.antientropy.tick() => {
@@ -691,7 +715,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         app.drain_surfaced();
     }
 
-    release_rendezvous(&mut rendezvous).await;
+    release_rendezvous(&mut rendezvous, &mut rival_probe).await;
     Ok(())
 }
 
@@ -712,9 +736,18 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
 /// `exit_on_quit` path `process::exit`s from inside `shutdown` before any of
 /// this could run (that path skips every destructor by design, so there is no
 /// warning to silence there either).
-async fn release_rendezvous(rendezvous: &mut Option<beacon::Rendezvous>) {
+///
+/// An outstanding probe-before-claim goes the same way, and for the same
+/// reason: its throwaway endpoint is just as capable of reaching `Drop` open.
+async fn release_rendezvous(
+    rendezvous: &mut Option<beacon::Rendezvous>,
+    probe: &mut Option<beacon::RivalProbe>,
+) {
     if let Some(rendezvous) = rendezvous.take() {
         rendezvous.shed_and_wait().await;
+    }
+    if let Some(probe) = probe.take() {
+        probe.abort_and_close().await;
     }
 }
 
@@ -1172,6 +1205,7 @@ async fn heal_tick(
     ctx: &HandlerCtx<'_>,
     tick: HealTickParams<'_>,
     rendezvous: &mut Option<beacon::Rendezvous>,
+    probe: &mut Option<beacon::RivalProbe>,
 ) {
     run_heal(tick.gap, state, ctx, tick.params).await;
     let arm = CohostArm {
@@ -1179,7 +1213,7 @@ async fn heal_tick(
         params: tick.params,
         started: tick.started,
     };
-    maybe_cohost(state, ctx, &arm, rendezvous).await;
+    maybe_cohost(state, ctx, &arm, rendezvous, probe).await;
 }
 
 /// Per-timer gap anchors; the heal gap also drives the resume-edge hard
@@ -1425,6 +1459,7 @@ async fn maybe_cohost(
     ctx: &HandlerCtx<'_>,
     arm: &CohostArm<'_>,
     current: &mut Option<beacon::Rendezvous>,
+    probe: &mut Option<beacon::RivalProbe>,
 ) {
     if may_cohost(arm.policy, state.meshed, arm.started) {
         let claimed = beacon::ensure(
@@ -1432,6 +1467,7 @@ async fn maybe_cohost(
             ctx.endpoint,
             current,
             probes_before_claim(arm.policy),
+            probe,
         )
         .await;
         if claimed {
@@ -1452,6 +1488,7 @@ async fn maybe_reclaim(
     ctx: &HandlerCtx<'_>,
     arm: &CohostArm<'_>,
     current: &mut Option<beacon::Rendezvous>,
+    probe: &mut Option<beacon::RivalProbe>,
 ) {
     if arm.policy != CoHostPolicy::Never
         && state
@@ -1463,6 +1500,7 @@ async fn maybe_reclaim(
             ctx.endpoint,
             current,
             probes_before_claim(arm.policy),
+            probe,
         )
         .await;
         if claimed {
