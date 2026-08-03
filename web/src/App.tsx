@@ -765,7 +765,7 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
             </span>
           )}
           <Button variant="secondary" onclick={() => void downloadAll()}>
-            Download all
+            Download
           </Button>
         </Stack>
       )
