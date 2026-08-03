@@ -7,6 +7,7 @@
  */
 
 import { buildPeerCard } from './peerCard/index.ts'
+import { loadWasm } from './wasm.ts'
 
 export interface ShareProducer {
   readonly ticket: string
@@ -14,30 +15,6 @@ export interface ShareProducer {
   readonly files: number
   readonly bytes: number
   stop(): Promise<void>
-}
-
-function importWasm() {
-  return import(
-    '../../crates/agent-share-wasm-client/dist/web/agent_share_wasm_client.js'
-  )
-}
-
-type WasmModule = Awaited<ReturnType<typeof importWasm>>
-
-let wasmModule: Promise<WasmModule> | null = null
-
-function loadWasm(): Promise<WasmModule> {
-  if (!wasmModule) {
-    wasmModule = importWasm().then(async (module) => {
-      await module.default()
-      return module
-    })
-    // A failed load must not poison every later attempt.
-    wasmModule.catch(() => {
-      wasmModule = null
-    })
-  }
-  return wasmModule
 }
 
 export function canProduce(): boolean {

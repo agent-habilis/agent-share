@@ -7,31 +7,11 @@ import './compat.ts'
 
 import { buildPeerCard } from './peerCard/index.ts'
 import { parseShareInput } from './ticket/index.ts'
+import { loadWasm, type WasmModule } from './wasm.ts'
 
-function importWasm() {
-  return import(
-    '../../crates/agent-share-wasm-client/dist/web/agent_share_wasm_client.js'
-  )
-}
-
-type WasmModule = Awaited<ReturnType<typeof importWasm>>
 type BenchProducer = Awaited<ReturnType<WasmModule['BenchProducer']['start']>>
 
-let wasmModule: Promise<WasmModule> | null = null
 let producer: BenchProducer | null = null
-
-function loadWasm(): Promise<WasmModule> {
-  if (!wasmModule) {
-    wasmModule = importWasm().then(async (module) => {
-      await module.default()
-      return module
-    })
-    wasmModule.catch(() => {
-      wasmModule = null
-    })
-  }
-  return wasmModule
-}
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id)

@@ -4,14 +4,13 @@
   "type": "module",
   "workspaces": ["vendor/*"],
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
+    "dev": "bun --hot dev.ts",
+    "build": "bun build.ts",
+    "preview": "bun preview.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p vendor/visage-dom && tsc --noEmit -p vendor/visage-style && tsc --noEmit -p vendor/visage-router && tsc --noEmit -p vendor/moonspace-ui",
     "test": "bun test"
   },
   "dependencies": {
-    "@oxc-project/runtime": "^0.142.0",
     "client-zip": "^2.4.5",
     "moonspace-ui": "workspace:*",
     "visage-dom": "workspace:*",
@@ -21,7 +20,6 @@
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.11.1",
     "@types/bun": "^1.3.14",
-    "typescript": "^7.0.2",
-    "vite": "^8.1.0"
+    "typescript": "^7.0.2"
   }
 }

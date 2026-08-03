@@ -1,5 +1,11 @@
-/* Page chrome sits darker than the file browser surface. */
-body {
+/*
+ * Page chrome sits darker than the file browser surface.
+ *
+ * `html body` beats moonspace-ui's unlayered `body { background: var(--ms-bg) }`
+ * regardless of stylesheet link order — Bun's HTML bundler does not preserve
+ * the JS import order Vite did (global.css then app.css).
+ */
+html body {
   background: var(--ms-bg-sunken);
 }
 
