@@ -32,7 +32,7 @@ import {
   type SyncedState,
 } from './mount.ts'
 import { canProduce, pickShareRoot, startProducer, type ShareProducer } from './produce.ts'
-import { buildPeerCard } from './peerCard.ts'
+import { buildPeerCard } from './peerCard/index.ts'
 import {
   navigateToShare,
   onRouteChange,
@@ -40,7 +40,8 @@ import {
   parseShareInput,
   shareUrl,
   type ShareView,
-} from './ticket.ts'
+  type TransportMode,
+} from './ticket/index.ts'
 import {
   buildTree,
   filesUnder,
@@ -125,30 +126,46 @@ function loadWasm(): Promise<WasmModule> {
 }
 
 /**
- * One client per ticket, shared across session mounts.
+ * One client per ticket *and* transport, shared across session mounts.
  *
  * Same reasoning one level up: a second dial for a ticket already being
  * negotiated would open a *second* WebRTC session for the same share — two ICE
  * runs, two data channels, one of them orphaned with no one left to close it.
+ *
+ * The transport is part of the key because it changes what gets dialled. Keyed
+ * on the ticket alone, opening the same share with `?transport=webrtc` after a
+ * default dial would hand back the cached dynamic client and quietly report on
+ * the wrong session.
  */
 const clients = new Map<string, Promise<Client>>()
 
-function connect(ticket: string): Promise<Client> {
-  let client = clients.get(ticket)
+/** Cache key for `clients`. Composed once so `connect` and `release` agree. */
+function clientKey(ticket: string, transport?: TransportMode): string {
+  return `${transport ?? 'dynamic'} ${ticket}`
+}
+
+function connect(ticket: string, transport?: TransportMode): Promise<Client> {
+  const key = clientKey(ticket, transport)
+  let client = clients.get(key)
   if (!client) {
-    // Omit transport ⇒ dynamic (WebRTC preferred, iroh relay fallback).
-    // Peer card (runtime / version) is owned by this TS consumer.
+    // Omit transport ⇒ dynamic (WebRTC preferred, iroh relay fallback);
+    // `?transport=webrtc` pins the data path and makes ICE failure fatal.
+    //
+    // Peer card (runtime / version) is owned by this TS consumer, but its
+    // transport is deliberately left for wasm to fill from the *settled* data
+    // path. Publishing the requested mode instead would put "dynamic" on every
+    // peer's roster, which says nothing about what is actually carrying bytes.
     client = loadWasm().then(
       (wasm) =>
         wasm.ShareClient.connect(
           ticket,
-          undefined,
+          transport,
           buildPeerCard({ role: 'consumer' }),
         ) as unknown as Promise<Client>,
     )
     // Evict on failure so a retry (a re-entered hash, say) can dial again.
-    client.catch(() => clients.delete(ticket))
-    clients.set(ticket, client)
+    client.catch(() => clients.delete(key))
+    clients.set(key, client)
   }
   return client
 }
@@ -173,9 +190,10 @@ function connect(ticket: string): Promise<Client> {
  * cache before evicting: if a later session for the same ticket has already
  * replaced the entry, this one is releasing something it no longer owns.
  */
-function release(ticket: string, owned: Promise<Client>): void {
-  if (clients.get(ticket) !== owned) return
-  clients.delete(ticket)
+function release(ticket: string, transport: TransportMode | undefined, owned: Promise<Client>): void {
+  const key = clientKey(ticket, transport)
+  if (clients.get(key) !== owned) return
+  clients.delete(key)
   void owned.then(
     (client) => client.leave_mesh(),
     () => {},
@@ -469,7 +487,10 @@ function transferLabel(kind: Transfer['kind']): string {
   return kind === 'download' ? 'downloading' : kind === 'mounting' ? 'mounting' : 'syncing'
 }
 
-const Session = component<{ ticket: string; view: ShareView }>(function* (props, ctx: Ctx) {
+const Session = component<{ ticket: string; view: ShareView; transport?: TransportMode }>(function* (
+  props,
+  ctx: Ctx,
+) {
   const state = signal<State>({ phase: 'connecting' })
   const path = signal<string[]>([])
   const transfer = signal<Transfer | null>(null)
@@ -552,8 +573,8 @@ const Session = component<{ ticket: string; view: ShareView }>(function* (props,
   // unmounts this session; the mesh membership belongs to it, so it goes too —
   // and it has to go even when the abort lands *during* the connect, which is
   // why this holds the promise rather than a client we may not have yet.
-  const pending = connect(props.ticket)
-  ctx.aborted.addEventListener('abort', () => release(props.ticket, pending))
+  const pending = connect(props.ticket, props.transport)
+  ctx.aborted.addEventListener('abort', () => release(props.ticket, props.transport, pending))
 
   void (async () => {
     try {
@@ -836,6 +857,15 @@ export const App = component(function* (_props, ctx: Ctx) {
   yield () => {
     const current = route.value
     if (!current) return <Home />
-    return <Session key={current.ticket} ticket={current.ticket} view={current.view} />
+    // The transport is in the key as well as the props: changing it has to
+    // remount the session, because a live client cannot switch data paths.
+    return (
+      <Session
+        key={clientKey(current.ticket, current.transport)}
+        ticket={current.ticket}
+        view={current.view}
+        transport={current.transport}
+      />
+    )
   }
 })

@@ -1,15 +1,16 @@
 /**
  * Torrent-style session Info panel for the viewer.
  *
- * Renders in the app content area (not a modal) and refreshes counters every
- * second while getStats IPs refresh on a slower cadence.
+ * Renders in the app content area (not a modal). Counters and the getStats
+ * sample both refresh every second — the sample interval is the averaging
+ * window for the up/down rates, so it cannot lag the display.
  */
 
 import { Stack, Text, roleVar } from 'moonspace-ui'
 import { component, interval, listen, signal } from 'visage-dom'
 import type { Ctx } from 'visage-dom'
 
-import { formatIpWithFlag, isGeoLookupCandidate, lookupCountryCode } from './countryFlag.ts'
+import { formatIpWithFlag, isGeoLookupCandidate, lookupCountryCode } from './countryFlag/index.ts'
 import { humanBytes } from './tree.ts'
 
 export interface InfoClient {
@@ -37,6 +38,14 @@ interface PeerRow {
   ip: string | null
   ip_kind: string | null
   proto: string
+  /** Wire bytes on the selected ICE pair — includes SCTP/DTLS/STUN framing. */
+  bytes_sent: number
+  bytes_received: number
+  /** Bytes/second since the previous sample; 0 until there are two. */
+  up_bps: number
+  down_bps: number
+  /** Round-trip time in ms, or null when the pair has not been measured. */
+  rtt_ms: number | null
 }
 
 interface SessionInfo {
@@ -63,6 +72,8 @@ interface SessionInfo {
     mount_mode: string
     mount_path: string
     mount_paths: string[]
+    /** Why `dynamic` ended up on the relay. Null on a clean WebRTC connect. */
+    mount_fallback_reason: string | null
   }
 }
 
@@ -74,6 +85,22 @@ function formatDuration(ms: number): string {
   if (h > 0) return `${h}h ${m}m ${s}s`
   if (m > 0) return `${m}m ${s}s`
   return `${s}s`
+}
+
+/** `12.3 KB/s`, or `—` when there is nothing to report yet.
+ *
+ * Rounded before formatting: `humanBytes` only fixes the decimals above 1 KB,
+ * so a raw bytes-per-second below that renders every float digit it has.
+ */
+function rate(bytesPerSecond: number): string {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return '—'
+  return `${humanBytes(Math.round(bytesPerSecond))}/s`
+}
+
+/** Ping to one decimal — sub-millisecond on a loopback pair is normal. */
+function pingLabel(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return '—'
+  return `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`
 }
 
 function dash(value: string | null | undefined): string {
@@ -121,7 +148,10 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
   using _tick = interval(1000, () => {
     tick.value = tick.peek() + 1
   })
-  using _ips = interval(5000, () => {
+  // 1s: these are differenced counters, so the sampling interval *is* the
+  // averaging window. At 5s a transfer that starts and ends between samples
+  // never shows a rate at all.
+  using _ips = interval(1000, () => {
     void props.client.refresh_peer_ips()
   })
   void props.client.refresh_peer_ips()
@@ -214,6 +244,23 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
                 <Stack key={peer.id} direction="column" gap={0}>
                   <Text color="fgMuted">client {peer.clientLabel}</Text>
                   <Text color="fgMuted">ip {peer.ipLabel}</Text>
+                  {/*
+                    Only for peers we hold a data channel with — a gossip-only
+                    row has no candidate pair, so 0/0 there would read as
+                    "nothing sent" rather than "not measured".
+                  */}
+                  {peer.bytes_sent > 0 || peer.bytes_received > 0 ? (
+                    <>
+                      <Text color="fgMuted">
+                        up {rate(peer.up_bps)} · down {rate(peer.down_bps)}
+                      </Text>
+                      <Text color="fgMuted">ping {pingLabel(peer.rtt_ms)}</Text>
+                      <Text color="fgMuted">
+                        sent {humanBytes(peer.bytes_sent)} · received{' '}
+                        {humanBytes(peer.bytes_received)}
+                      </Text>
+                    </>
+                  ) : null}
                   {peer.flags ? (
                     <Text color="fgMuted">flags {peer.flags}</Text>
                   ) : null}
@@ -239,6 +286,13 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
             {props.mountError ? ` · last error: ${props.mountError}` : ''} ·{' '}
             {capabilitiesLine()}
           </Text>
+          {/*
+            The one line that answers "why is this on the relay?". Without it
+            the fallback is a console warning nobody reading the pane can see.
+          */}
+          {info?.transfer.mount_fallback_reason ? (
+            <Text color="warning">fell back: {info.transfer.mount_fallback_reason}</Text>
+          ) : null}
         </Stack>
       </div>
     )

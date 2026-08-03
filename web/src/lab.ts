@@ -5,8 +5,8 @@
 // First, before anything can build a Disposable. See the file for why.
 import './compat.ts'
 
-import { buildPeerCard } from './peerCard.ts'
-import { parseShareInput } from './ticket.ts'
+import { buildPeerCard } from './peerCard/index.ts'
+import { parseShareInput } from './ticket/index.ts'
 
 function importWasm() {
   return import(

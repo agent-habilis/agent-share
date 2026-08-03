@@ -1,13 +1,14 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
-  DEFAULT_GEOIP_URL,
+  __setCountryTableForTests,
   countryCodeToFlag,
   formatIpWithFlag,
   isGeoLookupCandidate,
+  isLocalAddress,
   lookupCountryCode,
   normalizeCountryCode,
-} from './countryFlag.ts'
+} from './index.ts'
 
 // ---------------------------------------------------------------------------
 // normalizeCountryCode
@@ -217,8 +218,19 @@ describe('formatIpWithFlag', () => {
     )
   })
 
-  test('works for mDNS names without a flag', () => {
-    expect(formatIpWithFlag('abc.local', { kind: 'mdns' })).toBe('abc.local (mdns)')
+  test('marks local addresses instead of leaving them bare', () => {
+    // An mDNS name resolves on this network and nowhere else, so it gets the
+    // local marker rather than a flag — the point is that it reads as
+    // deliberately local, not as a lookup that failed.
+    expect(formatIpWithFlag('abc.local', { kind: 'mdns' })).toBe('🏠 abc.local (mdns)')
+    expect(formatIpWithFlag('192.168.1.5', { kind: 'host' })).toBe('🏠 192.168.1.5 (host)')
+    expect(formatIpWithFlag('127.0.0.1')).toBe('🏠 127.0.0.1')
+  })
+
+  test('a country flag still wins for public addresses', () => {
+    expect(formatIpWithFlag('200.0.0.1', { countryCode: 'BR', kind: 'srflx' })).toBe(
+      '🇧🇷 200.0.0.1 (srflx)',
+    )
   })
 
   test('UK alias yields the GB flag in the prefix', () => {
@@ -227,76 +239,71 @@ describe('formatIpWithFlag', () => {
 })
 
 // ---------------------------------------------------------------------------
-// lookupCountryCode (mocked fetch)
+// lookupCountryCode (offline table)
 // ---------------------------------------------------------------------------
 
+/** A tiny stand-in table: block index -> country index, codes indexed from 1. */
+function tableWith(entries: Array<[number, number]>, codes: string[]) {
+  const blocks = new Uint8Array(1 << 20)
+  for (const [block, index] of entries) blocks[block] = index
+  return { codes, blocks }
+}
+
+/** `a.b.c.d` to its /20 block index — the same shift the lookup uses. */
+function block(ip: string): number {
+  const [a, b, c, d] = ip.split('.').map(Number) as [number, number, number, number]
+  return (((a << 24) | (b << 16) | (c << 8) | d) >>> 12) >>> 0
+}
+
 describe('lookupCountryCode', () => {
-  test('returns null without calling fetch for private / mDNS addresses', async () => {
-    let called = 0
-    const fetchImpl = (async () => {
-      called += 1
-      return new Response('{}')
-    }) as typeof fetch
-    expect(await lookupCountryCode('10.0.0.1', fetchImpl)).toBeNull()
-    expect(await lookupCountryCode('foo.local', fetchImpl)).toBeNull()
-    expect(called).toBe(0)
+  test('resolves a public address through the table', async () => {
+    __setCountryTableForTests(tableWith([[block('200.0.0.1'), 2]], ['AR', 'BR']))
+    expect(await lookupCountryCode('200.0.0.1')).toBe('BR')
   })
 
-  test('parses a successful ipwho.is-shaped body', async () => {
-    const fetchImpl = (async () =>
-      new Response(JSON.stringify({ success: true, country_code: 'br' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      })) as typeof fetch
-    expect(await lookupCountryCode('200.0.0.1', fetchImpl)).toBe('BR')
+  test('never consults the table for private / mDNS addresses', async () => {
+    __setCountryTableForTests(tableWith([[block('10.0.0.1'), 2]], ['AR', 'BR']))
+    // Even with an entry sitting at that block, a private address is refused
+    // before the lookup — the table is only meaningful for public space.
+    expect(await lookupCountryCode('10.0.0.1')).toBeNull()
+    expect(await lookupCountryCode('foo.local')).toBeNull()
+    expect(await lookupCountryCode('192.168.1.5')).toBeNull()
   })
 
-  test('returns null when success is false', async () => {
-    const fetchImpl = (async () =>
-      new Response(JSON.stringify({ success: false, country_code: 'US' }), {
-        status: 200,
-      })) as typeof fetch
-    expect(await lookupCountryCode('8.8.8.8', fetchImpl)).toBeNull()
+  test('returns null for a block with no recorded allocation', async () => {
+    __setCountryTableForTests(tableWith([], ['AR', 'BR']))
+    expect(await lookupCountryCode('8.8.8.8')).toBeNull()
   })
 
-  test('returns null on HTTP error', async () => {
-    const fetchImpl = (async () => new Response('nope', { status: 500 })) as typeof fetch
-    expect(await lookupCountryCode('8.8.8.8', fetchImpl)).toBeNull()
+  test('returns null when the table cannot be loaded', async () => {
+    __setCountryTableForTests(null)
+    expect(await lookupCountryCode('8.8.8.8')).toBeNull()
   })
 
-  test('returns null when fetch throws', async () => {
-    const fetchImpl = (async () => {
-      throw new Error('network down')
-    }) as typeof fetch
-    expect(await lookupCountryCode('8.8.8.8', fetchImpl)).toBeNull()
+  test('resolves an IPv4-mapped IPv6 address through the v4 table', async () => {
+    __setCountryTableForTests(tableWith([[block('200.0.0.1'), 2]], ['AR', 'BR']))
+    expect(await lookupCountryCode('::ffff:200.0.0.1')).toBe('BR')
   })
 
-  test('returns null when country_code is missing or invalid', async () => {
-    const missing = (async () =>
-      new Response(JSON.stringify({ success: true }), { status: 200 })) as typeof fetch
-    const bad = (async () =>
-      new Response(JSON.stringify({ success: true, country_code: 'USA' }), {
-        status: 200,
-      })) as typeof fetch
-    expect(await lookupCountryCode('8.8.8.8', missing)).toBeNull()
-    expect(await lookupCountryCode('8.8.8.8', bad)).toBeNull()
+  test('returns null for real IPv6 — the table is v4 only', async () => {
+    __setCountryTableForTests(tableWith([[0, 2]], ['AR', 'BR']))
+    expect(await lookupCountryCode('2001:4860:4860::8888')).toBeNull()
+  })
+})
+
+describe('isLocalAddress', () => {
+  test('recognises this-machine and this-network addresses', () => {
+    for (const ip of ['127.0.0.1', '10.0.0.1', '192.168.1.5', '172.16.0.1', '100.64.0.1', 'a.local']) {
+      expect(isLocalAddress(ip)).toBe(true)
+    }
   })
 
-  test('DEFAULT_GEOIP_URL encodes the IP', () => {
-    expect(DEFAULT_GEOIP_URL('8.8.8.8')).toContain('8.8.8.8')
-    expect(DEFAULT_GEOIP_URL('2001:db8::1')).toContain(encodeURIComponent('2001:db8::1'))
+  test('public addresses are not local', () => {
+    for (const ip of ['8.8.8.8', '200.0.0.1']) expect(isLocalAddress(ip)).toBe(false)
   })
 
-  test('uses the provided urlForIp builder', async () => {
-    const seen: string[] = []
-    const fetchImpl = (async (input: RequestInfo | URL) => {
-      seen.push(String(input))
-      return new Response(JSON.stringify({ success: true, country_code: 'DE' }), {
-        status: 200,
-      })
-    }) as typeof fetch
-    const code = await lookupCountryCode('9.9.9.9', fetchImpl, (ip) => `https://example.test/${ip}`)
-    expect(code).toBe('DE')
-    expect(seen).toEqual(['https://example.test/9.9.9.9'])
+  test('empty is neither', () => {
+    expect(isLocalAddress('')).toBe(false)
+    expect(isLocalAddress(null)).toBe(false)
   })
 })

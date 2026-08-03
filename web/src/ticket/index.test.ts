@@ -5,11 +5,19 @@ import {
   onRouteChange,
   parseRoute,
   parseShareInput,
+  parseTransport,
   sharePath,
   shareUrl,
-} from './ticket.ts'
+} from './index.ts'
 
 const TICKET = 'testTicketAbc123'
+
+// `parseRoute` and `navigateToShare` both default their query string to
+// `window.location.search`, so a test that navigates would otherwise leak its
+// `?transport=` into every later test's default.
+beforeEach(() => {
+  window.history.replaceState(null, '', '/')
+})
 
 describe('sharePath / shareUrl', () => {
   test('encodes the ticket as one path segment', () => {
@@ -66,6 +74,71 @@ describe('parseRoute', () => {
     expect(parseRoute('/about')).toBeNull()
     expect(parseRoute('/files')).toBeNull()
     expect(parseRoute(`/other/${encodeURIComponent(TICKET)}`)).toBeNull()
+  })
+})
+
+describe('parseTransport', () => {
+  test('accepts the three canonical modes', () => {
+    expect(parseTransport('?transport=webrtc')).toBe('webrtc')
+    expect(parseTransport('?transport=relay')).toBe('relay')
+    expect(parseTransport('?transport=dynamic')).toBe('dynamic')
+  })
+
+  test('is case- and whitespace-insensitive', () => {
+    expect(parseTransport('?transport=WebRTC')).toBe('webrtc')
+    expect(parseTransport('?transport=%20relay%20')).toBe('relay')
+  })
+
+  test('treats unknown, empty and absent values as the default', () => {
+    // A typo must degrade to the default, not fail the page.
+    expect(parseTransport('?transport=turn')).toBeUndefined()
+    // The wasm-side aliases are deliberately not part of the URL surface.
+    expect(parseTransport('?transport=webrtc_only')).toBeUndefined()
+    expect(parseTransport('?transport=')).toBeUndefined()
+    expect(parseTransport('?other=webrtc')).toBeUndefined()
+    expect(parseTransport('')).toBeUndefined()
+  })
+})
+
+describe('transport on the route', () => {
+  test('parseRoute reads ?transport=', () => {
+    expect(parseRoute(`/files/${TICKET}`, '?transport=webrtc')).toEqual({
+      view: 'files',
+      ticket: TICKET,
+      transport: 'webrtc',
+    })
+  })
+
+  test('a bare route carries no transport key', () => {
+    expect(parseRoute(`/files/${TICKET}`, '')).not.toHaveProperty('transport')
+  })
+
+  test('sharePath round-trips the mode', () => {
+    expect(sharePath(TICKET, 'info', 'webrtc')).toBe(`/info/${TICKET}?transport=webrtc`)
+    const url = new URL(sharePath(TICKET, 'info', 'relay'), 'http://localhost')
+    expect(parseRoute(url.pathname, url.search)).toEqual({
+      view: 'info',
+      ticket: TICKET,
+      transport: 'relay',
+    })
+  })
+
+  test('shareUrl stays clean — the pin is local, not part of the capability', () => {
+    window.history.replaceState(null, '', `/files/${TICKET}?transport=webrtc`)
+    expect(shareUrl(TICKET)).toBe(`http://localhost/files/${TICKET}`)
+  })
+
+  test('navigateToShare carries the current mode across views', () => {
+    window.history.replaceState(null, '', `/files/${TICKET}?transport=webrtc`)
+    navigateToShare(TICKET, 'info')
+    expect(window.location.pathname).toBe(`/info/${TICKET}`)
+    expect(parseRoute()).toEqual({ view: 'info', ticket: TICKET, transport: 'webrtc' })
+  })
+
+  test('navigateToShare adds nothing when no mode is pinned', () => {
+    window.history.replaceState(null, '', `/files/${TICKET}`)
+    navigateToShare(TICKET, 'info')
+    expect(window.location.search).toBe('')
   })
 })
 

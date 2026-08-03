@@ -6,7 +6,7 @@
  * A chained-timeout rescan keeps the share live while the producer runs.
  */
 
-import { buildPeerCard } from './peerCard.ts'
+import { buildPeerCard } from './peerCard/index.ts'
 
 export interface ShareProducer {
   readonly ticket: string

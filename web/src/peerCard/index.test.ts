@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { detectRuntime } from './peerCard.ts'
+import { detectRuntime } from './index.ts'
 
 describe('detectRuntime', () => {
   test('safari desktop is safari, not chrome', () => {

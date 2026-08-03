@@ -8,23 +8,62 @@
  *
  * The ticket is a bearer capability in one path segment. It is bare ASCII
  * Base58, so it survives a URL path verbatim — no percent-encoding.
+ *
+ * `?transport=webrtc|relay|dynamic` pins the mount data path (the wasm
+ * `TransportMode`). It is a local debugging preference rather than part of the
+ * capability, so it rides the query string — and `shareUrl`, the link a
+ * producer hands out, deliberately leaves it off.
  */
 
 export type ShareView = 'files' | 'info'
 
+/** Mount data path, spelled as the wasm `TransportMode` spells it. */
+export type TransportMode = 'webrtc' | 'relay' | 'dynamic'
+
 export interface ShareRoute {
   view: ShareView
   ticket: string
+  /** Requested data path. Absent ⇒ the wasm default, `dynamic`. */
+  transport?: TransportMode
 }
 
 const VIEW_RE = /^(files|info)$/
 
-/** Path for a share view, with the ticket percent-encoded as one segment. */
-export function sharePath(ticket: string, view: ShareView = 'files'): string {
-  return `/${view}/${encodeURIComponent(ticket)}`
+const TRANSPORT_MODES: readonly TransportMode[] = ['webrtc', 'relay', 'dynamic']
+
+/**
+ * Read `?transport=` out of a query string.
+ *
+ * Canonical names only. `TransportMode::parse` on the wasm side also takes
+ * aliases (`webrtc_only`, `iroh-relay`, …) for direct API callers, but four
+ * spellings per mode is not a URL surface anyone can eyeball. An unrecognised
+ * value reads as absent, so a typo degrades to the default rather than failing
+ * the page.
+ */
+export function parseTransport(
+  search: string = window.location.search,
+): TransportMode | undefined {
+  const raw = new URLSearchParams(search).get('transport')?.trim().toLowerCase()
+  return TRANSPORT_MODES.find((mode) => mode === raw)
 }
 
-/** Absolute share URL peers open. Defaults to the files view. */
+/** Path for a share view, with the ticket percent-encoded as one segment. */
+export function sharePath(
+  ticket: string,
+  view: ShareView = 'files',
+  transport?: TransportMode,
+): string {
+  const path = `/${view}/${encodeURIComponent(ticket)}`
+  return transport ? `${path}?transport=${transport}` : path
+}
+
+/**
+ * Absolute share URL peers open. Defaults to the files view.
+ *
+ * No transport param, on purpose: this is the link that leaves the machine, and
+ * pinning one tab's debugging transport on every peer who opens it is not the
+ * intent.
+ */
 export function shareUrl(ticket: string, view: ShareView = 'files'): string {
   return `${window.location.origin}${sharePath(ticket, view)}`
 }
@@ -33,7 +72,10 @@ export function shareUrl(ticket: string, view: ShareView = 'files'): string {
  * Parse `/files/<ticket>` or `/info/<ticket>`. Returns `null` for home or
  * anything that is not a share route.
  */
-export function parseRoute(pathname: string = window.location.pathname): ShareRoute | null {
+export function parseRoute(
+  pathname: string = window.location.pathname,
+  search: string = window.location.search,
+): ShareRoute | null {
   const parts = pathname.replace(/\/+$/, '').split('/').filter(Boolean)
   if (parts.length !== 2) return null
   const [viewRaw, ticketRaw] = parts
@@ -45,7 +87,10 @@ export function parseRoute(pathname: string = window.location.pathname): ShareRo
     return null
   }
   if (!ticket) return null
-  return { view: viewRaw as ShareView, ticket }
+  const route: ShareRoute = { view: viewRaw as ShareView, ticket }
+  const transport = parseTransport(search)
+  if (transport) route.transport = transport
+  return route
 }
 
 type RouteListener = () => void
@@ -63,13 +108,20 @@ function notifyRouteChange(): void {
   for (const listener of listeners) listener()
 }
 
-/** Push (or replace) a share route and notify subscribers. */
+/**
+ * Push (or replace) a share route and notify subscribers.
+ *
+ * Carries the current `?transport=` forward. Without that, switching `/files` ↔
+ * `/info` would drop the pin and silently redial the share in a different mode
+ * — so the Info pane you opened to inspect a WebRTC session would be reporting
+ * on a fresh dynamic one.
+ */
 export function navigateToShare(
   ticket: string,
   view: ShareView = 'files',
   options?: { replace?: boolean },
 ): void {
-  const path = sharePath(ticket, view)
+  const path = sharePath(ticket, view, parseTransport())
   if (options?.replace) {
     window.history.replaceState(null, '', path)
   } else {
@@ -89,7 +141,7 @@ export function parseShareInput(raw: string): string | null {
       const url = trimmed.includes('://')
         ? new URL(trimmed)
         : new URL(trimmed, window.location.origin)
-      const fromPath = parseRoute(url.pathname)
+      const fromPath = parseRoute(url.pathname, url.search)
       if (fromPath) return fromPath.ticket
     } catch {
       // Fall through.
