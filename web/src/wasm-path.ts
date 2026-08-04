@@ -6,4 +6,4 @@
  * binary cannot be served under a URL the browser has already cached.
  */
 
-export const WASM_PATH = '/agent_share_wasm_client_bg.b094043ca897.wasm'
+export const WASM_PATH = '/agent_share_wasm_client_bg.c2ee66755669.wasm'

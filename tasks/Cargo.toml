@@ -25,6 +25,10 @@ clap_mangen = "0.2"
 # anstyle styles; anstream strips color when the stream isn't a terminal.
 anstyle = "1"
 anstream = "0.6"
+# `bench` parses `agent-share bench --output json` and writes `docs/perf/`.
+# Both versions mirror the root workspace's, so nothing new enters Cargo.lock.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [lints]
 workspace = true

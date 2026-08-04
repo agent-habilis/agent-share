@@ -64,6 +64,23 @@ Registration is additive (`add_custom_transport`) rather than a `Preset`. A
 preset would make WebRTC the endpoint's *only* transport — right for a browser,
 wrong for a native peer that should still prefer iroh's hole-punched paths.
 
+### Sessions are negotiated only with peers that need them
+
+Upstream, `negotiate_session` runs for every peer it sees, gated only on id
+order and the direct-peer cap. Here it also requires the peer to advertise **no
+IP transport** — see `needs_webrtc_lane` in `src/transport/webrtc.rs`.
+
+A peer reachable over IP is reachable over plain iroh QUIC, and in `agent-share`
+that is measured at 6× the throughput and 1/36th the latency of the data channel
+(`docs/perf/` in the parent repo). Negotiating a channel between two native
+peers spent a JSEP round trip and a DTLS stack to end up with a worse path
+sharing the endpoint and congestion domain with file bytes. A browser has no IP
+stack under wasm and so advertises relay-only, which is exactly the condition
+this tests.
+
+This is one of the changes worth pushing back upstream: nothing about it is
+`agent-share`-specific.
+
 ## Building
 
 ```bash

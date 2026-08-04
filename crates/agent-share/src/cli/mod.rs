@@ -46,7 +46,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             ..
         }) => {
             let Some(transport) = transport else {
-                anyhow::bail!("bench producer requires --transport webrtc|relay");
+                anyhow::bail!("bench producer requires --transport webrtc|relay|quic");
             };
             return crate::mount::produce_bench(
                 &transport,
@@ -58,6 +58,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             ticket: Some(ticket),
             transport,
             duration,
+            depth,
             output: bench_output,
         }) => {
             if transport.is_some() {
@@ -68,6 +69,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             return crate::mount::run_bench(
                 &ticket,
                 duration,
+                depth,
                 matches!(bench_output, OutputFormat::Json),
             )
             .await;

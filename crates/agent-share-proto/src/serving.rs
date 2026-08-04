@@ -1,6 +1,6 @@
 //! Which slots of a share a peer can actually serve, small enough for a card.
 //!
-//! The availability a BitTorrent client paints as a grid, at the granularity
+//! The availability a `BitTorrent` client paints as a grid, at the granularity
 //! this protocol addresses bytes with: a manifest index. A peer publishes what
 //! it holds, and every other peer can see who to ask.
 //!
@@ -46,6 +46,10 @@ pub const SERVING_ALL: &str = "*";
 /// Returns `None` when there is nothing to say (`held` is empty) or when the
 /// encoding would exceed [`MAX_SERVING_CHARS`] — both mean *do not publish a
 /// field*, which reads as "cannot vouch" rather than as "holds nothing".
+///
+/// # Panics
+/// Never in practice: the `expect("peeked")` inside the run scan consumes an
+/// element `peek` has just reported, on an iterator nothing else touches.
 #[must_use]
 pub fn encode_serving(held: &[u32], total: usize) -> Option<String> {
     if held.is_empty() {

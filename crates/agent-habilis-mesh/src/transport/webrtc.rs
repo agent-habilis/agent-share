@@ -475,6 +475,21 @@ pub const MAX_DIRECT_PEERS: usize = 16;
 /// sides compute the same answer with no round trip, so simultaneous mutual
 /// offers (which collide on duplicate attach) cannot happen. This mirrors the
 /// tie-break `lifecycle` already applies to the gossip dial itself.
+/// Does this peer need the `WebRTC` lane to be reachable at all?
+///
+/// True only when it advertises no IP transport whatsoever — the shape of a
+/// browser, which has no IP stack under wasm and so publishes relay addresses
+/// only, and of a native peer deliberately run with its IP transports cleared.
+///
+/// A native peer that has not yet finished discovering its own addresses also
+/// briefly advertises none, so this can still admit one session it did not need.
+/// That is harmless rather than wrong: the path selector's tier order is
+/// `ip > webrtc > relay`, so such a session is never *selected* while an IP path
+/// exists, and the next `retry_sessions` round sees the settled address.
+pub(crate) fn needs_webrtc_lane(addr: &EndpointAddr) -> bool {
+    addr.ip_addrs().next().is_none()
+}
+
 pub(crate) fn negotiate_session(
     state: &mut crate::daemon::state::EventLoopState,
     ctx: &crate::daemon::ctx::HandlerCtx<'_>,
@@ -485,6 +500,28 @@ pub(crate) fn negotiate_session(
         // No transport registered: the beacon, or a multihop peer.
         return;
     };
+    // The browser lane, and only the browser lane.
+    //
+    // Two peers that both advertise IP are reachable over plain iroh QUIC,
+    // which is strictly better: measured on identical request shape, the data
+    // channel gives 6× less throughput at 36× the latency, with an order of
+    // magnitude more variance (`docs/perf/`). Standing one up between two
+    // native peers spends a JSEP round trip and a DTLS stack to get a worse
+    // path, on the same endpoint and congestion domain as the file bytes.
+    //
+    // **Either** end lacking IP is enough, and testing only the remote is a
+    // bug: the lower id dials, so when a browser is the lower id it is the
+    // browser that evaluates this. It would see the native peer's IP, skip,
+    // and the native — waiting to be dialled — would never offer. The pair
+    // would silently never get a channel.
+    if !needs_webrtc_lane(&addr) && !needs_webrtc_lane(&ctx.endpoint.addr()) {
+        tracing::debug!(
+            target: LOG_TARGET,
+            %peer,
+            "both ends advertise IP; leaving this pair on iroh's own transports"
+        );
+        return;
+    }
     // The higher id waits to be dialled, so exactly one offer crosses per pair.
     let local = ctx.endpoint.id();
     if local > peer {
@@ -796,6 +833,77 @@ mod tests {
     use iroh::{RelayMode, SecretKey, endpoint::presets};
 
     use super::*;
+
+    fn relay_addr() -> iroh::TransportAddr {
+        iroh::TransportAddr::Relay("https://relay.example".parse().unwrap())
+    }
+
+    /// A browser: relay only, because wasm has no IP stack.
+    fn browser_shaped(id: EndpointId) -> EndpointAddr {
+        EndpointAddr::from_parts(id, [relay_addr()])
+    }
+
+    /// A native peer: always advertises at least one IP transport.
+    fn native_shaped(id: EndpointId) -> EndpointAddr {
+        EndpointAddr::from_parts(
+            id,
+            [
+                iroh::TransportAddr::Ip("127.0.0.1:4433".parse().unwrap()),
+                relay_addr(),
+            ],
+        )
+    }
+
+    /// The lane is for peers that cannot be reached any other way.
+    ///
+    /// A regression guard, not a unit test of a one-liner: without this gate the
+    /// mesh negotiated a data channel with *every* peer, so two native peers ran
+    /// gossip over a transport measured at 6× less throughput and 36× the
+    /// latency of the QUIC path they already had.
+    #[test]
+    fn only_a_peer_without_ip_needs_the_webrtc_lane() {
+        let id = SecretKey::from_bytes(&[5u8; 32]).public();
+        assert!(needs_webrtc_lane(&browser_shaped(id)));
+        assert!(!needs_webrtc_lane(&native_shaped(id)));
+
+        // Nothing advertised at all is treated as browser-shaped: it is also
+        // what a native peer looks like with its IP transports cleared.
+        assert!(needs_webrtc_lane(&EndpointAddr::new(id)));
+    }
+
+    /// A mixed pair needs the lane **whichever end is looking**.
+    ///
+    /// This is the case the first version of the gate got wrong. The lower
+    /// `EndpointId` dials, so when a browser is the lower id it is the browser
+    /// that evaluates the gate — and it sees the *native* peer's IP. Testing
+    /// only the remote made it skip, while the native peer sat waiting to be
+    /// dialled, and the pair silently never got a channel.
+    #[test]
+    fn a_mixed_pair_needs_the_lane_from_either_side() {
+        let browser = browser_shaped(SecretKey::from_bytes(&[6u8; 32]).public());
+        let native = native_shaped(SecretKey::from_bytes(&[7u8; 32]).public());
+
+        let pair_needs_lane = |local: &EndpointAddr, remote: &EndpointAddr| {
+            needs_webrtc_lane(remote) || needs_webrtc_lane(local)
+        };
+
+        assert!(
+            pair_needs_lane(&browser, &native),
+            "browser looking at a native peer must still offer"
+        );
+        assert!(
+            pair_needs_lane(&native, &browser),
+            "native looking at a browser must still offer"
+        );
+        assert!(
+            pair_needs_lane(&browser, &browser),
+            "two browsers have no other transport"
+        );
+        assert!(
+            !pair_needs_lane(&native, &native),
+            "two native peers must stay on iroh's own transports"
+        );
+    }
 
     /// Short enough that a test finishes, long enough that a loopback dial and
     /// a QUIC handshake comfortably fit inside it.

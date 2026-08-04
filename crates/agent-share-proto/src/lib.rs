@@ -47,5 +47,6 @@ pub use framing::{
 };
 pub use manifest::{DirEntry, FileEntry, MountManifest, ReadStatus};
 pub use ticket::{
-    MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC, TICKET_KIND_SHARE,
+    MountTicket, TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC,
+    TICKET_KIND_SHARE,
 };

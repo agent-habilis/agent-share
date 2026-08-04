@@ -1,0 +1,88 @@
+{
+  "provenance": {
+    "tag": "policy-browser",
+    "git_sha": "e44acafc",
+    "git_dirty": true,
+    "machine": "Mac17,2 (10 cores)",
+    "os": "macOS 27.0",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "chrome": "149.0.7827.54",
+    "wasm_bytes": 7381312,
+    "corpus_mib": 1024,
+    "duration_s": 15,
+    "repeats": 2
+  },
+  "rows": [
+    {
+      "cell": "browser-consume-webrtc",
+      "transport": "webrtc",
+      "direction": "native->browser",
+      "mesh": "none (bench does not join a share mesh)",
+      "depth": 1,
+      "rtt_ms": 0.0,
+      "throughput_mib_s": 17.53627046452815,
+      "connect_ms": 10238.0,
+      "latency_ms": {
+        "min": 0.0,
+        "median": 0.0,
+        "p95": 1.0
+      },
+      "bytes": 552599552,
+      "duration_s": 30.052,
+      "samples_mib_s": [
+        17.423460039311056,
+        17.53627046452815
+      ],
+      "spread_pct": 0.6432977037237452,
+      "cpu": {
+        "consumer_user_s": null,
+        "consumer_sys_s": null,
+        "consumer_cpu_s": null,
+        "producer_cpu_s": 27.889999999999997,
+        "cores_busy": 0.688785927315686
+      },
+      "skipped": null,
+      "notes": [
+        "the bench window is pinned at 30 s — `lab.ts:102` passes `undefined` for duration, so `--duration` does not reach browser cells",
+        "signalling is brokered over the iroh relay before the direct data channel opens, so this row needs network reach and its `connect (ms)` includes that hop",
+        "RTT reads 0: the browser's `performance.now()` is clamped, so the wasm bench cannot resolve a sub-millisecond round trip. Treat the RTT column as unmeasured here, not as zero",
+        "`cores busy` counts the native peer only — Chrome's work is spread across its own process tree and is not attributed here"
+      ]
+    },
+    {
+      "cell": "browser-consume-relay",
+      "transport": "relay",
+      "direction": "native->browser",
+      "mesh": "none (bench does not join a share mesh)",
+      "depth": 1,
+      "rtt_ms": 27.0,
+      "throughput_mib_s": 4.53612343553407,
+      "connect_ms": 123.0,
+      "latency_ms": {
+        "min": 23.0,
+        "median": 27.0,
+        "p95": 54.0
+      },
+      "bytes": 143654912,
+      "duration_s": 30.202,
+      "samples_mib_s": [
+        4.028499134372087,
+        4.53612343553407
+      ],
+      "spread_pct": 11.190707404156363,
+      "cpu": {
+        "consumer_user_s": null,
+        "consumer_sys_s": null,
+        "consumer_cpu_s": null,
+        "producer_cpu_s": 1.0399999999999998,
+        "cores_busy": 0.03443594716025132
+      },
+      "skipped": null,
+      "notes": [
+        "the bench window is pinned at 30 s — `lab.ts:102` passes `undefined` for duration, so `--duration` does not reach browser cells",
+        "signalling is brokered over the iroh relay before the direct data channel opens, so this row needs network reach and its `connect (ms)` includes that hop",
+        "`cores busy` counts the native peer only — Chrome's work is spread across its own process tree and is not attributed here"
+      ]
+    }
+  ]
+}

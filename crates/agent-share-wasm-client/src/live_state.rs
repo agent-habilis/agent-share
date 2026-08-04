@@ -201,6 +201,9 @@ fn dirs_differ(previous: &[DirEntry], next: &[DirEntry]) -> bool {
 mod tests {
     use super::*;
 
+    // wasm32 harness — see `transport_mode.rs` for why.
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
     fn entry(path: &str, size: u64) -> FileEntry {
         FileEntry {
             rel_path: path.to_owned(),

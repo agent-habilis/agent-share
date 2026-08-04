@@ -1,7 +1,7 @@
 import { component, signal } from 'visage-dom'
 import type { Child } from 'visage-dom'
 import { Style, css, raw } from 'visage-style'
-import { oneRow } from '../../styles/mixins.ts'
+import { oneRow, oneRowChrome } from '../../styles/mixins.ts'
 import { T } from '../../tokens.ts'
 
 export interface Tab {
@@ -27,14 +27,14 @@ const LIST = css({
   gap: 0,
 } as never)
 
+/*
+ * Same chrome as Button — a trigger is a control, and having the two drift was
+ * how this one ended up with its own padding and its own focus ring. Selection
+ * stays Tabs' own language: inversion, not a Button variant.
+ */
 const TRIGGER = css({
-  ...oneRow,
-  padding: raw('0 2ch'),
-  border: 0,
-  background: 'transparent',
+  ...oneRowChrome,
   color: T.msFgMuted,
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
   '&[data-selected="true"]': {
     background: T.msFg,
     color: T.msBg,
@@ -43,8 +43,8 @@ const TRIGGER = css({
     color: T.msFg,
   },
   '&:focus-visible': {
-    outline: raw('1px solid var(--ms-accent)'),
-    outlineOffset: '-1px',
+    outlineColor: T.msAccent,
+    outlineOffset: raw('1px'),
   },
   '&:disabled': {
     color: T.msFgSubtle,

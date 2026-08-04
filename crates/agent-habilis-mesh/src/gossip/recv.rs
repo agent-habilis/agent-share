@@ -1273,8 +1273,9 @@ mod retain_own_broadcast_tests {
     fn own_unloggable_plumbing_is_not_retained() {
         let mut state = fresh_state();
         let body = crate::protocol::MessageBody::new("{}".to_owned()).expect("valid body");
-        let peer_info = Message::new_peer_info(&MeshId::from("💬test"), &Nickname::from("me"), body)
-            .signed(&state.identity);
+        let peer_info =
+            Message::new_peer_info(&MeshId::from("💬test"), &Nickname::from("me"), body)
+                .signed(&state.identity);
         retain_own_broadcast(&mut state, &peer_info);
         assert_eq!(
             state.message_log.len(),

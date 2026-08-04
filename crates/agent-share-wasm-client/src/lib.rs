@@ -133,7 +133,30 @@ pub struct ShareClient {
     /// viewers of one share peers rather than strangers. `None` when the mesh
     /// could not be joined; the share itself still works, so this is never
     /// allowed to fail a connect.
-    mesh: Option<mesh::MeshPeer>,
+    ///
+    /// Behind a `RefCell` so that [`Self::leave_mesh`] can take `&self`, which
+    /// is load-bearing rather than stylistic. wasm-bindgen holds an object
+    /// borrowed for the **entire lifetime of the future** returned by an async
+    /// `&self` method, and this type has four of them ([`Self::read`],
+    /// [`Self::manifest`], [`Self::watch`], [`Self::refresh_peer_ips`]). A
+    /// `&mut self` method called while any one of those is still pending
+    /// therefore panics with "recursive use of an object detected which would
+    /// lead to unsafe aliasing in Rust" — which is exactly what a revival did,
+    /// since it drops the old client via `leave_mesh` while reads may still be
+    /// parked on the connection that just died.
+    ///
+    /// So `ShareClient` deliberately exposes **no** `&mut self` method. That is
+    /// the invariant; this field is how it is kept, and why `store` and `held`
+    /// below are behind one too.
+    ///
+    /// `Rc` inside the cell, because a `RefCell` solves the `&mut self` problem
+    /// only to hand back a borrow one. [`Self::publish_serving`] and
+    /// [`Self::manifest`] both `await` on the peer, and holding
+    /// `self.mesh.borrow()` across a yield point is what earns the *other*
+    /// panic: `leave_mesh` takes `borrow_mut` and fires from `pagehide` or a
+    /// revival at any moment. Cloning the `Rc` out first ends the borrow before
+    /// the await, the same move [`Self::refresh_peer_ips`] makes with the hub.
+    mesh: RefCell<Option<Rc<mesh::MeshPeer>>>,
     /// Bytes this tab holds, and can therefore seed.
     ///
     /// Opened on the first sync rather than at connect: a tab that only browses
@@ -175,7 +198,7 @@ fn new_share_client(
         _session: session,
         mesh_endpoint,
         _endpoint: endpoint,
-        mesh: None,
+        mesh: RefCell::new(None),
         store: RefCell::new(None),
         held: RefCell::new(BTreeSet::new()),
     }
@@ -236,7 +259,7 @@ impl ShareClient {
             None => mesh::default_card_parts(&client.data_path, Some("consumer".to_owned())),
         };
         match mesh::MeshPeer::join_share(&secret, &lookups, shared, card).await {
-            Ok(peer) => client.mesh = Some(peer),
+            Ok(peer) => *client.mesh.borrow_mut() = Some(Rc::new(peer)),
             Err(error) => {
                 web_sys::console::warn_1(&JsValue::from_str(&format!(
                     "[share] mesh unavailable; peer counts disabled: {error:?}"
@@ -274,8 +297,16 @@ impl ShareClient {
         // milliseconds with no byte delta, which overwrites the real rate with
         // zero — the counters climb while the UI insists nothing is moving.
         let mut sampled: HashSet<String> = HashSet::new();
-        let mesh_hub = self.mesh.as_ref().map(mesh::MeshPeer::hub);
-        let hubs = [mesh_hub, self._hub.as_ref()];
+        // Cloned out, not borrowed across the loop below: `hub()` hands back a
+        // `&Arc`, and holding that reference would keep this `RefCell` borrowed
+        // across every `await` in the sweep — which is the borrow `leave_mesh`
+        // would then collide with, moving the panic rather than removing it.
+        let mesh_hub = self
+            .mesh
+            .borrow()
+            .as_ref()
+            .map(|peer| Arc::clone(peer.hub()));
+        let hubs = [mesh_hub, self._hub.clone()];
         for hub in hubs.into_iter().flatten() {
             for id in hub.live_peer_ids() {
                 let key = id.to_string();
@@ -287,7 +318,7 @@ impl ShareClient {
                         .borrow_mut()
                         .insert(key.clone(), split_candidate(ip, kind));
                 }
-                if let Some((sent, received, rtt_ms)) = link::read_ice(hub, &id).await {
+                if let Some((sent, received, rtt_ms)) = link::read_ice(&hub, &id).await {
                     let now = now_ms();
                     let mut cache = self.bytes_cache.borrow_mut();
                     let previous = cache.get(&key).copied().unwrap_or_default();
@@ -360,7 +391,7 @@ impl ShareClient {
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn peers_gossip(&self) -> u32 {
-        self.mesh.as_ref().map_or(0, mesh::MeshPeer::peers_gossip)
+        self.mesh.borrow().as_ref().map_or(0, |peer| peer.peers_gossip())
     }
 
     /// Peers we hold a direct `WebRTC` data channel with.
@@ -381,7 +412,7 @@ impl ShareClient {
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn max_direct(&self) -> u32 {
-        self.mesh.as_ref().map_or(0, mesh::MeshPeer::max_direct)
+        self.mesh.borrow().as_ref().map_or(0, |peer| peer.max_direct())
     }
 
     /// Leave the share's mesh, announcing departure so peers drop us now.
@@ -405,8 +436,12 @@ impl ShareClient {
     /// unload (a `sendBeacon`-shaped path, or a relay-side hint), not an async
     /// gossip broadcast. Note the *direct* count is unaffected by any of this —
     /// the data channel closes immediately and `peers_direct` drops at once.
-    pub fn leave_mesh(&mut self) {
-        let Some(peer) = self.mesh.take() else {
+    /// Takes `&self`, not `&mut self`, and that is a hard requirement rather
+    /// than a preference — see the note on the `mesh` field. A `&mut self`
+    /// here panicked wasm-bindgen's borrow guard whenever a revival dropped
+    /// this client while one of its async methods was still pending.
+    pub fn leave_mesh(&self) {
+        let Some(peer) = self.mesh.borrow_mut().take() else {
             return;
         };
         wasm_bindgen_futures::spawn_local(async move {
@@ -419,6 +454,42 @@ impl ShareClient {
     #[wasm_bindgen(getter)]
     pub fn transport(&self) -> String {
         self.data_path.clone()
+    }
+
+    /// Has the mount connection gone away?
+    ///
+    /// A tab that is backgrounded loses it intermittently: the browser
+    /// throttles timers — measured at 13–20 s intervals in Safari after about
+    /// ten seconds hidden — and QUIC's keep-alive cannot outrun the idle
+    /// timeout at that cadence. Nothing announces it, because [`Self::watch`]'s
+    /// follower simply returns when the connection closes.
+    ///
+    /// So the page asks before it acts, and dials again when the answer is
+    /// yes. Reconnecting is the only honest fix: a dead connection cannot be
+    /// revived, and the alternative is a tab that looks connected and fails
+    /// every action until it is reloaded.
+    #[wasm_bindgen(getter)]
+    pub fn closed(&self) -> bool {
+        self.connection.close_reason().is_some()
+    }
+
+    /// Close the mount connection on purpose, so recovery can be exercised.
+    ///
+    /// Behind `?dev=true` in the Info pane. The failure this exists to
+    /// rehearse is intermittent — a backgrounded tab loses its connection only
+    /// sometimes — so before this the only way to test the reconnect path was
+    /// to idle a tab for minutes and hope. Two such attempts produced no
+    /// evidence either way.
+    ///
+    /// **It is not a reproduction of the bug.** The real death is silent:
+    /// timers stretch past the keep-alive interval, packets stop arriving, and
+    /// QUIC notices 30 s later. This closes the connection outright. What the
+    /// two share is the state afterwards — [`Self::closed`] is true — which is
+    /// all the recovery path keys on, and recovery is exactly what needs
+    /// testing. Nothing here re-dials: that is left to the ordinary triggers,
+    /// because a button that healed itself would bypass them.
+    pub fn close_connection(&self) {
+        self.connection.close(0u32.into(), b"dev: closed from the info pane");
     }
 
     /// The whole tree, in one shot: `{ dirs: [...], files: [...] }`.
@@ -443,7 +514,7 @@ impl ShareClient {
             .connection
             .open_bi()
             .await
-            .map_err(|error| err("open manifest stream", &error))?;
+            .map_err(|error| stream_open_failed("could not fetch the listing", &error))?;
         send.write_all(&framing::encode_manifest_request(&self.secret))
             .await
             .map_err(|error| err("send manifest request", &error))?;
@@ -458,7 +529,11 @@ impl ShareClient {
             MountManifest::decode(&bytes).map_err(|error| err("decode manifest", &error))?;
         // The card could not carry a tree at join — `join_share` runs from the
         // constructor, before this — so publish it now that we know one.
-        if let Some(mesh) = self.mesh.as_ref() {
+        //
+        // Cloned out of the cell, not borrowed across the await below: see the
+        // note on the `mesh` field.
+        let mesh = self.mesh.borrow().clone();
+        if let Some(mesh) = mesh {
             mesh.set_tree(agent_share_proto::manifest::manifest_fingerprint(&bytes))
                 .await;
         }
@@ -510,7 +585,7 @@ impl ShareClient {
             .connection
             .open_bi()
             .await
-            .map_err(|error| err("open read stream", &error))?;
+            .map_err(|error| stream_open_failed("could not read the file", &error))?;
         send.write_all(&framing::encode_read_request(
             &self.secret,
             index,
@@ -685,7 +760,10 @@ impl ShareClient {
     /// manifest it indexes into, so a `serving` set published against the wrong
     /// tree would send readers to the wrong files.
     async fn publish_serving(&self, manifest_bytes: &[u8], manifest: &MountManifest) {
-        let Some(mesh) = self.mesh.as_ref() else {
+        // Cloned out of the cell, not borrowed across the two awaits below:
+        // see the note on the `mesh` field.
+        let mesh = self.mesh.borrow().clone();
+        let Some(mesh) = mesh else {
             return;
         };
         mesh.set_tree(agent_share_proto::manifest::manifest_fingerprint(
@@ -827,8 +905,8 @@ impl ShareClient {
     fn info_json(&self) -> serde_json::Value {
         let producer = self.connection.remote_id().to_string();
         let local = self._endpoint.id().to_string();
-        let mesh_up = self.mesh.is_some();
-        let nickname = self.mesh.as_ref().map(|m| m.nickname());
+        let mesh_up = self.mesh.borrow().is_some();
+        let nickname = self.mesh.borrow().as_ref().map(|m| m.nickname());
         let peers_gossip = self.peers_gossip();
         let peers_direct = self.peers_direct();
         let max_direct = self.max_direct();
@@ -908,6 +986,7 @@ impl ShareClient {
     fn direct_peer_ids(&self) -> HashSet<String> {
         let mut ids: HashSet<String> = self
             .mesh
+            .borrow()
             .as_ref()
             .map(|mesh| {
                 mesh.hub()
@@ -935,7 +1014,7 @@ impl ShareClient {
             &self.data_path,
             Some("consumer".to_owned()),
         );
-        let card_for = |id: &str| self.mesh.as_ref().and_then(|m| m.card_for(id));
+        let card_for = |id: &str| self.mesh.borrow().as_ref().and_then(|m| m.card_for(id));
         let peer_row = |id: &str,
                         role: &str,
                         flags: String,
@@ -1037,7 +1116,8 @@ impl ShareClient {
 
         // Gossip-only members publish meta cards but may never open a direct
         // hub session — still show them so the Peers list matches the roster.
-        if let Some(mesh) = self.mesh.as_ref() {
+        let mesh_ref = self.mesh.borrow();
+        if let Some(mesh) = mesh_ref.as_ref() {
             for card in mesh.known_cards() {
                 if !seen.insert(card.endpoint.clone()) {
                     continue;
@@ -1211,7 +1291,7 @@ async fn echo_once(client: &ShareClient) -> Result<f64, JsValue> {
         .connection
         .open_bi()
         .await
-        .map_err(|error| err("open echo stream", &error))?;
+        .map_err(|error| stream_open_failed("bench echo", &error))?;
     send.write_all(&request)
         .await
         .map_err(|error| err("send echo", &error))?;
@@ -1234,7 +1314,7 @@ async fn fill_once(client: &ShareClient, want: u32) -> Result<u64, JsValue> {
         .connection
         .open_bi()
         .await
-        .map_err(|error| err("open fill stream", &error))?;
+        .map_err(|error| stream_open_failed("bench fill", &error))?;
     send.write_all(&request)
         .await
         .map_err(|error| err("send fill", &error))?;
@@ -1870,6 +1950,30 @@ fn relay_mode(ticket: &MountTicket) -> RelayMode {
 
 fn err(context: &str, error: &impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{context}: {error}"))
+}
+
+/// Explain a failure to open a stream in terms of what actually broke.
+///
+/// `open_bi()` has no timeout of its own: it parks until stream credit arrives
+/// and the *only* way it returns an error is a connection-level failure. So
+/// reporting it as "open read stream: timed out" blames stream setup for the
+/// connection's death, which is how one such failure cost an afternoon.
+///
+/// `TimedOut` is the connection's idle timeout, and in a tab the way a share
+/// reaches it is being backgrounded: Safari throttles timers to 13–20 s
+/// intervals after roughly ten seconds hidden (measured), which is longer than
+/// QUIC's keep-alive interval, so the connection goes quiet and expires. The
+/// message says so, because "timed out" alone sends the reader looking at the
+/// network.
+fn stream_open_failed(what: &str, error: &iroh::endpoint::ConnectionError) -> JsValue {
+    if matches!(error, iroh::endpoint::ConnectionError::TimedOut) {
+        return JsValue::from_str(&format!(
+            "{what}: the connection to the producer expired while idle. \
+             A backgrounded tab throttles timers below the keep-alive interval, \
+             which is enough to lose it. Reload the page to reconnect."
+        ));
+    }
+    err(&format!("{what}: connection to the producer lost"), error)
 }
 
 fn serde_wasm<T: serde::Serialize>(value: &T) -> Result<JsValue, JsValue> {

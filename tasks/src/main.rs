@@ -3,10 +3,12 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use xshell::Shell;
 
+mod bench;
 mod build;
 mod ci;
 mod clean;
 mod coverage;
+mod e2e;
 mod fmt;
 mod install;
 mod lint;
@@ -67,6 +69,40 @@ enum Task {
     },
     /// Install the binary.
     Install,
+    /// Run the performance matrix and write `docs/perf/`. Needs no input and
+    /// no privileges: RTT is measured per row, not injected.
+    Bench {
+        /// Seconds per bench window (native cells only — the browser's is
+        /// pinned at 30 s by `web/src/lab.ts`).
+        #[arg(long, default_value_t = 15)]
+        duration: u64,
+        /// Runs per cell; the row reports the median and the spread.
+        #[arg(long, default_value_t = 3)]
+        repeats: usize,
+        /// Size of the generated corpus the mount cell transfers.
+        #[arg(long = "corpus-mib", default_value_t = 1024)]
+        corpus_mib: u64,
+        /// `all`, or a comma-separated subset of cell names.
+        #[arg(long, default_value = "all")]
+        cells: String,
+        /// Comma-separated fill depths to sweep on the synthetic cells, e.g.
+        /// `1,2,4,8`. Depth 1 is strictly serial and is what the committed
+        /// baseline measures.
+        #[arg(long, default_value = "1", value_delimiter = ',')]
+        depths: Vec<usize>,
+        /// Names the output file: `docs/perf/<tag>.json`.
+        #[arg(long, default_value = "baseline")]
+        tag: String,
+    },
+    /// Drive the web app in a headless browser against a real producer. Not in
+    /// the gate: it needs `agent-browse`, a built wasm and the network, and a
+    /// missing prerequisite is reported as a skip rather than a pass. See
+    /// `docs/testing.md`.
+    E2e {
+        /// `all`, or a comma-separated subset of cell names.
+        #[arg(long, default_value = "all")]
+        cells: String,
+    },
     /// Run tests with coverage.
     Coverage,
     /// Run the CI gate.
@@ -117,9 +153,28 @@ fn main() -> ExitCode {
             arch,
             release,
         } => build::run(&sh, target.as_deref(), arch.as_deref(), release),
+        Task::Bench {
+            duration,
+            repeats,
+            corpus_mib,
+            cells,
+            depths,
+            tag,
+        } => bench::run(
+            &sh,
+            &bench::Options {
+                duration,
+                repeats,
+                corpus_mib,
+                cells,
+                tag,
+                depths,
+            },
+        ),
         Task::Release { args } => release::run(&sh, &args),
         Task::Run { args } => run::run(&sh, &args),
         Task::Install => install::run(&sh),
+        Task::E2e { cells } => e2e::run(&sh, &cells),
         Task::Coverage => coverage::run(&sh),
         Task::Ci => ci::run(&sh),
         Task::Fmt => fmt::run(&sh),

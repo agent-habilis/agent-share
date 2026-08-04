@@ -22,14 +22,31 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     )
     .quiet()
     .run()?;
-    // Standalone workspace (excluded from the root); covers transport-mode
-    // parsing for ShareClient::connect.
-    cmd!(
-        sh,
-        "cargo test --manifest-path crates/agent-share-wasm-client/Cargo.toml --lib"
-    )
-    .quiet()
-    .run()?;
+
+    // The web app is half the product, and the gate had never looked at it:
+    // 404 `bun test` cases and five `tsc` projects, none of them run here.
+    //
+    // Skipped with a message rather than failed when bun is absent, the same
+    // rule the wasm blocks below follow — a gate that fails for a reason
+    // unrelated to the change is a gate people learn to skip.
+    output::status("Checking", "the web app");
+    if cmd!(sh, "bun --version")
+        .quiet()
+        .ignore_status()
+        .read()
+        .is_ok()
+    {
+        let _guard = sh.push_dir("web");
+        // Only on a cold checkout: installing every run would put the network
+        // on the critical path of a gate that otherwise needs none.
+        if !sh.path_exists("node_modules") {
+            cmd!(sh, "bun install --frozen-lockfile").quiet().run()?;
+        }
+        cmd!(sh, "bun run typecheck").quiet().run()?;
+        cmd!(sh, "bun test").quiet().run()?;
+    } else {
+        output::status("Skipping", "the web app (bun is not installed)");
+    }
 
     // The transport id and the signal envelope must have exactly one
     // definition each. They were duplicated across two crates upstream, kept
@@ -106,14 +123,28 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
             }
             None => output::status("Skipping", "wasm32 crate checks (no wasm-capable clang)"),
         }
-        // The wasm client is excluded from the workspace, so nothing above reaches it.
+        // The wasm client is excluded from the workspace, so nothing above
+        // reaches it — and its tests run *here*, on wasm32, rather than with
+        // the other `cargo test` lines above.
+        //
+        // Not a preference. Off wasm32 `agent-habilis-mesh` turns on
+        // `fofoca-iroh-webrtc-transport/host`, and with both backends enabled
+        // `WebRtcHandle` resolves to the host one while this crate hands it a
+        // `BrowserHubTransport` — so a host build cannot type-check by
+        // construction. CI ran it on the host anyway and had been red for it.
         if let Some(clang) = wasm_clang(sh) {
             let _guard = sh.push_dir("crates/agent-share-wasm-client");
-            cmd!(sh, "cargo check --target wasm32-unknown-unknown")
-                .env("CC", &clang)
-                .env("CC_wasm32_unknown_unknown", &clang)
-                .quiet()
-                .run()?;
+            for args in [
+                "check --target wasm32-unknown-unknown",
+                "test --target wasm32-unknown-unknown --lib",
+            ] {
+                let args = args.split(' ');
+                cmd!(sh, "cargo {args...}")
+                    .env("CC", &clang)
+                    .env("CC_wasm32_unknown_unknown", &clang)
+                    .quiet()
+                    .run()?;
+            }
         }
     } else {
         output::status(

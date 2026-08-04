@@ -10,9 +10,10 @@
  * Base58, so it survives a URL path verbatim — no percent-encoding.
  *
  * `?transport=webrtc|relay|dynamic` pins the mount data path (the wasm
- * `TransportMode`). It is a local debugging preference rather than part of the
- * capability, so it rides the query string — and `shareUrl`, the link a
- * producer hands out, deliberately leaves it off.
+ * `TransportMode`). `?dev=true` reveals the Info pane's dev tools. Both are
+ * local debugging preferences rather than part of the capability, so they ride
+ * the query string — and `shareUrl`, the link a producer hands out,
+ * deliberately leaves them off.
  */
 
 export type ShareView = 'files' | 'info'
@@ -25,6 +26,8 @@ export interface ShareRoute {
   ticket: string
   /** Requested data path. Absent ⇒ the wasm default, `dynamic`. */
   transport?: TransportMode
+  /** Show the Info pane's dev tools. Absent ⇒ hidden. */
+  dev?: boolean
 }
 
 const VIEW_RE = /^(files|info)$/
@@ -47,22 +50,40 @@ export function parseTransport(
   return TRANSPORT_MODES.find((mode) => mode === raw)
 }
 
+/**
+ * Read `?dev=` out of a query string.
+ *
+ * As strict as [`parseTransport`], and for the same reason: an unrecognised
+ * value reads as off, so a typo hides the dev tools rather than failing the
+ * page. `dev` alone (no value) does not count — an explicit `true`/`1` keeps
+ * the flag hard to set by accident.
+ */
+export function parseDev(search: string = window.location.search): boolean {
+  const raw = new URLSearchParams(search).get('dev')?.trim().toLowerCase()
+  return raw === 'true' || raw === '1'
+}
+
 /** Path for a share view, with the ticket percent-encoded as one segment. */
 export function sharePath(
   ticket: string,
   view: ShareView = 'files',
   transport?: TransportMode,
+  dev = false,
 ): string {
   const path = `/${view}/${encodeURIComponent(ticket)}`
-  return transport ? `${path}?transport=${transport}` : path
+  const query = new URLSearchParams()
+  if (transport) query.set('transport', transport)
+  if (dev) query.set('dev', 'true')
+  const search = query.toString()
+  return search ? `${path}?${search}` : path
 }
 
 /**
  * Absolute share URL peers open. Defaults to the files view.
  *
- * No transport param, on purpose: this is the link that leaves the machine, and
- * pinning one tab's debugging transport on every peer who opens it is not the
- * intent.
+ * No `transport` and no `dev`, on purpose: this is the link that leaves the
+ * machine, and neither pinning one tab's debugging transport nor opening a dev
+ * pane on every peer who receives it is the intent.
  */
 export function shareUrl(ticket: string, view: ShareView = 'files'): string {
   return `${window.location.origin}${sharePath(ticket, view)}`
@@ -90,6 +111,7 @@ export function parseRoute(
   const route: ShareRoute = { view: viewRaw as ShareView, ticket }
   const transport = parseTransport(search)
   if (transport) route.transport = transport
+  if (parseDev(search)) route.dev = true
   return route
 }
 
@@ -111,17 +133,19 @@ function notifyRouteChange(): void {
 /**
  * Push (or replace) a share route and notify subscribers.
  *
- * Carries the current `?transport=` forward. Without that, switching `/files` ↔
- * `/info` would drop the pin and silently redial the share in a different mode
- * — so the Info pane you opened to inspect a WebRTC session would be reporting
- * on a fresh dynamic one.
+ * Carries the current `?transport=` and `?dev=` forward. Without that,
+ * switching `/files` ↔ `/info` would drop the pin and silently redial the share
+ * in a different mode — so the Info pane you opened to inspect a WebRTC session
+ * would be reporting on a fresh dynamic one. `dev` rides along for the plainer
+ * reason that the dev tools live *in* that pane, so dropping the flag on the
+ * way to it would make them unreachable.
  */
 export function navigateToShare(
   ticket: string,
   view: ShareView = 'files',
   options?: { replace?: boolean },
 ): void {
-  const path = sharePath(ticket, view, parseTransport())
+  const path = sharePath(ticket, view, parseTransport(), parseDev())
   if (options?.replace) {
     window.history.replaceState(null, '', path)
   } else {

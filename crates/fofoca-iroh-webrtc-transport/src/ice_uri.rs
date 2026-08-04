@@ -27,7 +27,7 @@
 ///
 /// **2. No query string.** That constraint is Safari's, not the RFC's. RFC 7065
 /// permits `?transport=udp|tcp`, Chrome accepts it, and credential services
-/// emit it routinely — but WebKit throws on *any* query. Measured in Safari 26,
+/// emit it routinely — but `WebKit` throws on *any* query. Measured in Safari 26,
 /// one server per `RTCPeerConnection`:
 ///
 /// ```text

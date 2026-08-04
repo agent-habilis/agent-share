@@ -1,0 +1,52 @@
+{
+  "provenance": {
+    "tag": "canary-baseline",
+    "git_sha": "e44acafc",
+    "git_dirty": true,
+    "machine": "Mac17,2 (10 cores)",
+    "os": "macOS 27.0",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "chrome": "149.0.7827.54",
+    "wasm_bytes": 7381312,
+    "corpus_mib": 1024,
+    "duration_s": 15,
+    "repeats": 2
+  },
+  "rows": [
+    {
+      "cell": "browser-consume-webrtc",
+      "transport": "webrtc",
+      "direction": "native->browser",
+      "mesh": "none (bench does not join a share mesh)",
+      "rtt_ms": 0.0,
+      "throughput_mib_s": 21.361682274136033,
+      "connect_ms": 10237.0,
+      "latency_ms": {
+        "min": 0.0,
+        "median": 0.0,
+        "p95": 1.0
+      },
+      "bytes": 672137216,
+      "duration_s": 30.007,
+      "samples_mib_s": [
+        21.04772371532287,
+        21.361682274136033
+      ],
+      "spread_pct": 1.4697276870993081,
+      "cpu": {
+        "consumer_user_s": null,
+        "consumer_sys_s": null,
+        "consumer_cpu_s": null,
+        "producer_cpu_s": 28.72,
+        "cores_busy": 0.7087953087185634
+      },
+      "skipped": null,
+      "notes": [
+        "the bench window is pinned at 30 s — `lab.ts:102` passes `undefined` for duration, so `--duration` does not reach browser cells",
+        "signalling is brokered over the iroh relay before the direct data channel opens, so this row needs network reach and its `connect (ms)` includes that hop",
+        "RTT reads 0: the browser's `performance.now()` is clamped, so the wasm bench cannot resolve a sub-millisecond round trip. Treat the RTT column as unmeasured here, not as zero",
+        "`cores busy` counts the native peer only — Chrome's work is spread across its own process tree and is not attributed here"
+      ]
+    }
+  ]
+}

@@ -1,22 +1,138 @@
 # RFC 02: where the time actually goes
 
-Status: **draft** — research only, no work started. Every item is a hypothesis
-with a named mechanism and a named falsifier.
+Status: **phase 1 done.** A baseline now exists at [`docs/perf/`](../perf/),
+produced unattended by `cargo task bench`; sensitivity checks are recorded in
+[`docs/perf/canaries.md`](../perf/canaries.md). The Tier-1 ranking below is
+**pre-measurement** and has not been rewritten — read "What phase 1 actually
+found" first, because the data reorders it.
 
-~~Nothing here has been measured.~~ **Two items now have numbers**, gathered
-while validating [RFC 03](03-fofoca-blobs/README.md) rather than by working
-through this document's phases:
+Everything below the next section is as originally drafted, except for four
+claims corrected in place and marked **[corrected]**.
+
+## What phase 1 actually found
+
+Full matrix and provenance in [`docs/perf/README.md`](../perf/README.md).
+
+1. **The WebRTC lane costs 63–71×, and that dominates everything else on it.**
+   The same mount, same NFS client, same `rsize`, same producer code, same host,
+   one flag changed: 245.82 MiB/s over plain QUIC versus 3.47 MiB/s over WebRTC.
+   Verified as a genuine direct data channel — `consume.rs:383-386` calls
+   `ensure_webrtc_selected` and errors on any other path.
+2. **It is CPU-bound, and not on ciphers.** The WebRTC cells burn 1.9–2.2 cores
+   to move ~20 MiB/s, and the consumer's split is **7.4 s sys against 2.4 s
+   user**. Encryption is userspace math; a 3:1 kernel-to-user ratio points at
+   per-datagram syscalls and context switches. `host/sender.rs:52` explicitly
+   undoes GSO batching — "one QUIC datagram per data-channel message" — with a
+   `Bytes::copy_from_slice` per chunk, so a MiB becomes ~870 packets each way.
+   **Double encryption is not the thing to chase.** Hardware AES runs at
+   multiple GB/s here; at 20 MiB/s the ciphers are at roughly 1% duty.
+3. **The relay path is the opposite: not CPU-bound at all.** 0.03–0.10 cores
+   busy — idle, purely waiting. That is where finding #1 (depth-1 reads) pays,
+   and nowhere else measured so far.
+4. **Wasm codegen quality is off the critical path.** `opt-level = "s"` → `3`
+   moved browser throughput +1.5% for +20% binary size. The browser
+   (19.74 MiB/s) and the native WebRTC leg (19.10 MiB/s) land in the same place
+   despite the native leg running no wasm at all. The SIMD section's lever
+   ordering should be re-derived, not inherited.
+5. **Connect latency is ~10 s from the browser** versus ~1.1 s native, which is
+   time-to-first-byte a user feels directly and which no throughput column
+   shows.
+
+So the two bottlenecks live on different paths, and the RFC's own warning that
+the Tier-1 items are "mutually confounding" was right — they are, and they
+separate cleanly once the transport is the only variable.
+
+### Claims this investigation corrected
+
+- **`read_range` makes no literal `spawn_blocking` calls** [corrected]. The
+  only one in `mount/` is the tree scan at `live.rs:303`. The blocking-pool
+  hops are implicit inside `tokio::fs`, so the count is right but the mechanism
+  named in finding #3 is not.
+- **Two of the three data-channel drop sites are uncounted** [corrected].
+  `web/transport.rs:194` and `:625` both discard with a bare `let _ =`; only the
+  `bufferedAmount` gate at `:254-273` has a counter and a rate-limited warn.
+  Finding #2 reads as though all three are instrumented.
+- **`lookup/mod.rs:112-116` is a deliberate, commented decision**, not an
+  oversight [corrected] — it cites iroh's own warning against transport tuning.
+- **`/lab` already emits its report as machine-readable JSON** [corrected].
+  `lab.ts:126` logs it and `logger` (`lab.ts:22-40`) `JSON.stringify`s any
+  non-string, so the "no machine-readable channel" premise was wrong. That is
+  what the browser cells read, with no application change.
+
+### Depth sweep: finding #1 is falsified on both native paths
+
+`agent-share bench` gained `--transport quic` (a control leg with no wrapper and
+nothing forced) and `--depth N` (fill requests kept in flight). Three repeats
+per cell, `docs/perf/depth-sweep.json`:
+
+| depth | quic MiB/s | quic RTT | webrtc MiB/s | webrtc RTT |
+|---:|---:|---:|---:|---:|
+| 1 | 115.04 | 0.07 ms | 18.31 | 3.63 ms |
+| 2 | 117.81 | 0.55 ms | 8.11 | 13.48 ms |
+| 4 | 115.31 | 0.62 ms | 7.69 | 18.97 ms |
+| 8 | 69.66 | 1.06 ms | 7.74 | 18.47 ms |
+
+**Raising depth does not help, and on WebRTC it more than halves throughput** —
+reproducibly, with a gap far larger than the 16–44% spreads. This is the
+opposite of "potentially the whole ballgame".
+
+On QUIC the reason is simply that the path is not latency-bound: at 0.07 ms RTT
+a serial 1 MiB request already has a ~14 GB/s ceiling, so there is nothing for
+concurrency to recover, and depth 8 starts costing.
+
+On WebRTC the collapse is finding #2's mechanism, now with a number attached:
+more in flight overruns the 256-slot queue and the 1 MiB `bufferedAmount` cap,
+every overflow is a silently dropped datagram, and QUIC reads that as loss.
+**Fix the backpressure before touching depth anywhere.**
+
+The sweep also isolates what the wrapper costs on identical request shape:
+**6.3× throughput** (115.04 → 18.31) and **52× round-trip latency**
+(0.07 ms → 3.63 ms). The latency multiplier is the one that matters for the
+mount path, which issues 128 KiB `rsize` reads serially — small requests are
+priced in round trips, which is why `native-mount-cp-webrtc` collapses to
+3.47 MiB/s while the synthetic 1 MiB leg holds 18.
+
+Caveat: at depth > 1 the RTT column measures queueing, not path latency — the
+echo probe queues behind the in-flight fills. It is still the right number for
+"what does a request experience", just not for "how far away is the peer".
+
+### Also measured, outside phase 1
+
+Two more items have numbers, gathered while validating
+[RFC 03](03-fofoca-blobs/README.md) rather than by working through this
+document's phases:
 
 - **`blake3/wasm32_simd`** — measured at 1.80×, not the 6× cited below, and its
   "modest" rating flips if RFC 03 lands. See the SIMD section.
 - **Whether a second connection adds throughput** — yes, ≥1.61×
   ([S0.4](03-fofoca-blobs/findings/s04-multi-source-throughput.md)). That work
   also re-derived the per-connection ceiling claim this document flagged as
-  unbacked, and found the *mechanism* RFC 01 named to be wrong.
+  unbacked, and found the *mechanism* RFC 01 named to be wrong — see the
+  re-derivation note under Context.
 
-Neither displaces Phase 1. There is still no baseline for the thing users
-experience, and the caveat below about `agent-share bench` measuring the wrong
-shape applies to those numbers too.
+The caveat below about `agent-share bench` measuring a serial single-stream
+shape applies to those two numbers as well as to the phase-1 matrix.
+
+### Still not measured
+
+- **Depth at the mount's actual request size.** The sweep uses 1 MiB fills; the
+  mount uses 128 KiB. Depth pays exactly when request size is small relative to
+  bandwidth × RTT, so the one shape where it might still help is untested.
+- A browser producing **real files** — the File System Access picker needs a
+  user gesture, so `read_from_handle` has no automated cell.
+- A controlled high-RTT point. RTT is measured per row, not injected, and the
+  relay leg's own throughput swung 1.0–6.0 MiB/s across sessions — it is a
+  shared public server and is not a controlled path.
+- quinn's `stream_receive_window` still cannot bind: 1.25 MB window against a
+  1 MiB largest request. It only becomes testable if request size rises.
+
+Status of the original draft follows.
+
+---
+
+Status: **draft** — research only, no work started. Nothing here has been
+measured; every item is a hypothesis with a named mechanism and a named
+falsifier.
 
 Scope: the whole byte path, native and browser — mount I/O, the WebRTC/QUIC
 lane, the JS↔wasm boundary, the gossip runtime, and SIMD. Started as a question
@@ -51,7 +167,6 @@ be re-derived, not inherited.
 
 This document's own warning applies to that re-derivation: the numbers come from
 `agent-share bench`, which measures a serial single-stream path (see below).
-
 
 What we have instead is `agent-share bench`, and it measures less than it looks
 like it does. `fill_once` is awaited one at a time and opens its own bi-stream
@@ -117,7 +232,25 @@ acts on them.
 
 ## Tier 1 — the six that most likely dominate
 
-### 1. Reads are strictly serial, depth 1 [verified]
+### 1. Reads are strictly serial, depth 1 [verified, but falsified as a bottleneck]
+
+> **FALSIFIED, by its own named falsifier.** The shape below is real — reads
+> *are* serial — but raising depth does not recover anything, which is what the
+> item claimed it would. The depth sweep ran exactly the test named under
+> "Killed by": depth 2/4/8 on both native paths. QUIC stays flat at ~115 MiB/s
+> and *loses* ground at depth 8; WebRTC more than halves. See
+> [Depth sweep](#depth-sweep-finding-1-is-falsified-on-both-native-paths).
+>
+> The `256 KiB / RTT` arithmetic below is not wrong, it is simply not binding:
+> at the 0.07 ms RTT measured on the QUIC leg the serial ceiling is ~14 GB/s,
+> two orders of magnitude above what the path delivers. Depth pays only when
+> request size is small relative to bandwidth × RTT, and the one shape where
+> that might still hold — 128 KiB mount reads rather than 1 MiB fills — is
+> listed under "Still not measured". **Fix finding #2's backpressure before
+> touching depth anywhere**, because on WebRTC more in flight means more drops.
+>
+> Read the rest of this section as the original hypothesis, kept for its
+> mechanism and its citations rather than its ranking.
 
 `web/src/download.ts:45-64`, `web/src/mount.ts:161-170`
 

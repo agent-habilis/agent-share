@@ -23,6 +23,10 @@ pub const TICKET_KIND_BENCH_WEBRTC: u8 = 1;
 /// Bench producer chose the iroh relay / ticket address for the mount data path.
 pub const TICKET_KIND_BENCH_RELAY: u8 = 2;
 
+/// Bench producer chose plain iroh `QUIC` over UDP — no `WebRTC` wrapper, no
+/// forced relay. The control leg the other two are measured against.
+pub const TICKET_KIND_BENCH_QUIC: u8 = 3;
+
 /// A decoded mount ticket — the bearer secret, the share's discovery config,
 /// and the producer's address.
 ///
@@ -33,8 +37,10 @@ pub const TICKET_KIND_BENCH_RELAY: u8 = 2;
 /// longer does.
 ///
 /// `kind` is [`TICKET_KIND_SHARE`] for ordinary shares. Bench tickets set
-/// [`TICKET_KIND_BENCH_WEBRTC`] or [`TICKET_KIND_BENCH_RELAY`] so the consumer
-/// knows which path the producer opened.
+/// [`TICKET_KIND_BENCH_WEBRTC`], [`TICKET_KIND_BENCH_RELAY`] or
+/// [`TICKET_KIND_BENCH_QUIC`] so the consumer knows which path the producer
+/// opened. Values are dense rather than bit flags, so a peer built before a
+/// value existed rejects it outright instead of misreading it.
 ///
 /// The token envelope's `VERSION` is deliberately **not** bumped for this
 /// layout change. That byte is shared by every [`TokenType`] — swarm ids, pipe,
@@ -122,8 +128,8 @@ impl MountTicket {
 #[cfg(test)]
 mod tests {
     use super::{
-        MountTicket, SECRET_LEN, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC,
-        TICKET_KIND_SHARE,
+        MountTicket, SECRET_LEN, TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_RELAY,
+        TICKET_KIND_BENCH_WEBRTC, TICKET_KIND_SHARE,
     };
     use crate::lookup::LookupOpts;
     use crate::peer_addr::endpoint_addr_to_json;
@@ -157,7 +163,11 @@ mod tests {
 
     #[test]
     fn bench_kinds_round_trip() {
-        for kind in [TICKET_KIND_BENCH_WEBRTC, TICKET_KIND_BENCH_RELAY] {
+        for kind in [
+            TICKET_KIND_BENCH_WEBRTC,
+            TICKET_KIND_BENCH_RELAY,
+            TICKET_KIND_BENCH_QUIC,
+        ] {
             let mut ticket = sample();
             ticket.kind = kind;
             let decoded = MountTicket::decode(&ticket.encode()).expect("decode");
