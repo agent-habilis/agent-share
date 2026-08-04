@@ -33,10 +33,16 @@ export const focusRing = {
   outlineOffset: 0,
 }
 
-/** Applied to disabled controls. Edges are outlines here — see `oneRowChrome`. */
+/**
+ * Applied to disabled controls.
+ *
+ * It deliberately says nothing about the edge. `oneRowChrome` declares its
+ * outline `transparent` so the focus ring has something to recolour, which means
+ * setting `outline-color` here would not tint an existing edge — it would *draw*
+ * one, on the single control that is meant to look most inert.
+ */
 export const disabled = {
   color: T.msFgSubtle,
-  outlineColor: T.msBorder,
   cursor: 'not-allowed' as const,
   pointerEvents: 'none' as const,
 }
