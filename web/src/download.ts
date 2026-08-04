@@ -69,6 +69,16 @@ function fileStream(
  *
  * `onProgress` is called as bytes land. The caller owns progress reporting;
  * the wasm client deliberately exposes no callback of its own.
+ *
+ * The entries are yielded from a generator rather than built with `.map()`,
+ * and that is load-bearing rather than style. A `ReadableStream` with the
+ * default queuing strategy calls `pull` as soon as it is *constructed* — no
+ * reader required, because its desired size is already 1. So an array of
+ * entries opened one read per file the instant this function was called, all
+ * of them in flight before the zipper had asked for anything. Three files made
+ * three; a share with more files than the producer's concurrent-stream ceiling
+ * (100, iroh's default) would have stalled on the first tick. Lazily, each
+ * file's stream is built only when the zipper reaches it.
  */
 export function zipStream(
   reader: Reader,
@@ -79,15 +89,19 @@ export function zipStream(
   const total = files.reduce((sum, file) => sum + file.size, 0)
   const counted = countingReader(reader, total, onProgress)
 
-  return downloadZip(
-    files.map((file) => ({
-      name: file.path,
-      // A zero mtime means "unknown" on the wire; passing it through would
-      // date every such file to 1970.
-      lastModified: file.mtime > 0 ? new Date(file.mtime * 1000) : new Date(),
-      input: fileStream(counted, file, signal),
-    })),
-  ).body as ReadableStream<Uint8Array>
+  function* entries() {
+    for (const file of files) {
+      yield {
+        name: file.path,
+        // A zero mtime means "unknown" on the wire; passing it through would
+        // date every such file to 1970.
+        lastModified: file.mtime > 0 ? new Date(file.mtime * 1000) : new Date(),
+        input: fileStream(counted, file, signal),
+      }
+    }
+  }
+
+  return downloadZip(entries()).body as ReadableStream<Uint8Array>
 }
 
 /**
