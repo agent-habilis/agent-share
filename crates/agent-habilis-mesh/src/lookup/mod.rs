@@ -11,16 +11,17 @@ mod dht;
 mod mdns;
 mod relay;
 
+// Only the `host` loopback bind names a socket address; a browser has no IP
+// stack to bind one on.
+#[cfg(feature = "host")]
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use iroh::address_lookup::memory::MemoryLookup;
-use iroh::{
-    Endpoint, EndpointAddr, RelayMode, SecretKey,
-    endpoint::{PortmapperConfig, presets},
-    protocol::Router,
-};
+#[cfg(feature = "host")]
+use iroh::endpoint::PortmapperConfig;
+use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, endpoint::presets, protocol::Router};
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use iroh_gossip::proto::HyparviewConfig;
 
@@ -164,6 +165,13 @@ impl TransportOpts {
 
 /// # Errors
 /// Returns an error if the inputs are invalid or the operation fails.
+#[cfg_attr(
+    not(feature = "host"),
+    expect(
+        unused_variables,
+        reason = "`bind_port` feeds the loopback `bind_addr` below, which is `host`-only"
+    )
+)]
 pub async fn build_endpoint(
     lookups: &LookupOpts,
     secret_key: Option<SecretKey>,
@@ -434,6 +442,10 @@ pub(crate) async fn build_peer_webrtc(
 /// the transport registration), it just has no path to send over — so a
 /// multihop peer negotiates nothing. Kept rather than skipped so the wiring has
 /// one shape, and so making the two coexist later is a change in one place.
+///
+/// `host`-only with multihop itself — `iroh-multihop-transport` is not in the
+/// wasm dependency table, so a browser peer has no multihop path to detach for.
+#[cfg(feature = "host")]
 pub(crate) fn detached_webrtc_handle(
     local: iroh::EndpointId,
 ) -> fofoca_iroh_webrtc_transport::WebRtcHandle {

@@ -24,11 +24,18 @@ use crate::protocol::{MeshId, Message, Nickname};
 use crate::transport::IpcMessage;
 use crate::transport::MeshSender;
 use crate::util::clock::Instant;
+// The timer-driver clock, distinct from `clock::Instant` off wasm32 (there it is
+// `tokio::time::Instant`). Aliased rather than path-qualified, matching
+// `daemon::state` / `daemon::app`.
 use crate::util::tuning::{
     ALIVE_INTERVAL_SECS, LINKSTATE_INTERVAL_SECS, RECLAIM_INTERVAL_MS, RECLAIM_WINDOW_SECS,
     RESUBSCRIBE_MAX_ATTEMPTS, STATE_REFRESH_SECS, antientropy_interval_secs, heal_interval_secs,
-    heal_stall_threshold_secs, ppid_watch_interval_ms, sweep_interval_secs,
+    heal_stall_threshold_secs, sweep_interval_secs,
 };
+use n0_future::time::Instant as TokioInstant;
+// Gated with `spawn_orphan_watch`, its only caller.
+#[cfg(all(unix, feature = "host"))]
+use crate::util::tuning::ppid_watch_interval_ms;
 use crate::{beacon, gossip, lifecycle, lookup};
 
 use super::app::NodeDriver;
@@ -362,6 +369,7 @@ async fn antientropy_arm(
 
 /// Default per-link routing cost we advertise for our own neighbours until live
 /// telemetry (RTT / delivery) is wired into the multihop metric.
+#[cfg(feature = "host")]
 const MULTIHOP_LINK_COST: u32 = 10;
 
 /// The multihop link-state tick: re-broadcast our own links (one per direct
@@ -577,7 +585,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 finalize_ping_round(&mut state, sink.as_ref()),
             () = sleep_until_opt(app.earliest_poll_deadline()) => app.poll_deadline_elapsed(),
             () = sleep_until_opt(app.earliest_deadline()) =>
-                app.expire_deadlines(n0_future::time::Instant::now()),
+                app.expire_deadlines(TokioInstant::now()),
             ipc_msg = recv_opt(&mut ipc_rx) => match ipc_msg {
                 None => ipc_rx = None,
                 Some((cmd, resp_tx)) => {
@@ -1002,7 +1010,7 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
 /// is active. Lets the event loop's `select!` carry a ping-finalize arm
 /// that only fires while a round is in flight, without borrowing
 /// `state` across the await (the deadline is copied out beforehand).
-async fn sleep_until_opt(deadline: Option<n0_future::time::Instant>) {
+async fn sleep_until_opt(deadline: Option<TokioInstant>) {
     match deadline {
         Some(at) => n0_future::time::sleep_until(at).await,
         None => std::future::pending::<()>().await,

@@ -21,11 +21,15 @@
 //! `MAX_BLOB_BYTES` check, which cannot run before the length is known.
 
 use std::path::PathBuf;
+#[cfg(feature = "host")]
 use std::time::Duration;
 
+#[cfg(feature = "host")]
 use anyhow::Result;
+#[cfg(feature = "host")]
 use iroh::Endpoint;
 
+#[cfg(feature = "host")]
 use crate::protocol::mesh::LookupOpts;
 
 mod consume;
@@ -117,16 +121,23 @@ pub const SECRET_LEN: usize = 32;
 pub const HASH_LEN: usize = 32;
 
 /// Fetch stream close code: the presented bearer secret matched no blob's secret.
+///
+/// Producer-side, so `host`-only: the close codes are written by the serving
+/// half, and a browser only ever consumes.
+#[cfg(feature = "host")]
 pub(crate) const BAD_SECRET: u32 = 1;
 
 /// Fetch stream close code: the requested content hash is not in the store.
+#[cfg(feature = "host")]
 pub(crate) const UNKNOWN_BLOB: u32 = 2;
 
 /// Fetch stream close code: an orderly done from the producer.
+#[cfg(feature = "host")]
 pub(crate) const DONE: u32 = 0;
 
 /// Best-effort wait (≤5s) for the endpoint to publish reachable addresses, so a
 /// freshly-minted ticket resolves immediately. Never blocks forever.
+#[cfg(feature = "host")]
 async fn wait_online(endpoint: &Endpoint) {
     let _ = n0_future::time::timeout(Duration::from_secs(5), endpoint.online()).await;
 }

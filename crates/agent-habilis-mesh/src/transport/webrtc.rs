@@ -53,6 +53,13 @@ pub(crate) const MESH_WEBRTC_SIGNAL_ALPN: &[u8] = b"habilis-mesh/webrtc-signal/1
 /// Only the native backend passes it *into* str0m — the browser backend takes
 /// no deadline parameter at all, so for a tab [`SignalDeadlines::round`] is the
 /// only bound that exists.
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(
+        dead_code,
+        reason = "the browser backend takes no deadline; kept on both targets per the note above"
+    )
+)]
 const JSEP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// One leg of the envelope exchange: dial, open, write, then wait for the
@@ -125,6 +132,13 @@ impl SignalDeadlines {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct IceProfile {
     /// Gather host candidates only: no STUN, no TURN, no packets off the box.
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(
+            dead_code,
+            reason = "the browser backend ignores it; kept on both targets per the note above"
+        )
+    )]
     pub(crate) host_only: bool,
 }
 

@@ -236,6 +236,10 @@ pub struct EventLoopState {
     pub(crate) webrtc_ice: crate::transport::IceProfile,
     /// Monotonic sequence for *our own* emitted link-state vectors, so peers keep
     /// the freshest and drop reorders.
+    ///
+    /// `host`-only with the multihop transport that consumes the vectors: a
+    /// browser peer emits none, so it has no sequence to keep.
+    #[cfg(feature = "host")]
     pub(crate) link_state_seq: u64,
     /// When `Some(deadline)` and not yet elapsed, the event loop runs
     /// a fast `beacon::ensure` burst (event-driven failover). Armed
@@ -477,6 +481,7 @@ impl EventLoopState {
                 crate::transport::MAX_DIRECT_PEERS,
             ),
             webrtc_ice: crate::transport::IceProfile::default(),
+            #[cfg(feature = "host")]
             link_state_seq: 0,
             reclaim_until: None,
             next_rival_recheck: None,

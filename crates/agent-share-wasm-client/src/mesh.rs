@@ -274,7 +274,7 @@ impl NodeApp for ShareMeshDriver {
         &mut self,
         _frame: InboundApp<'_>,
         _state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        _ctx: &HandlerCtx<'_>,
     ) -> bool {
         false
     }

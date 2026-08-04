@@ -152,6 +152,10 @@ pub fn ping_window_secs() -> u64 {
 /// Default [`crate::util::consts::PPID_WATCH_INTERVAL_MS`]; hidden flag
 /// `--ppid-watch-interval-ms` so the subprocess test sees the self-exit in
 /// milliseconds instead of the production seconds.
+///
+/// Gated with its only caller (`daemon::event_loop::spawn_orphan_watch`): the
+/// orphan watch is `libc::getppid`, which arrives with `host`.
+#[cfg(all(unix, feature = "host"))]
 pub(crate) fn ppid_watch_interval_ms() -> u64 {
     current().ppid_watch_interval_ms.max(1)
 }
@@ -257,7 +261,11 @@ pub(crate) const RESUBSCRIBE_MAX_ATTEMPTS: u32 = 8;
 /// handshake), so the listener retries forever instead of dying — the
 /// backoff (doubling MIN→MAX, reset on any successful accept) just
 /// keeps a persistently failing listener from spinning hot.
+///
+/// `host`-only with the listener itself — a browser binds no socket.
+#[cfg(feature = "host")]
 pub(crate) const IPC_ACCEPT_BACKOFF_MIN_MS: u64 = 100;
+#[cfg(feature = "host")]
 pub(crate) const IPC_ACCEPT_BACKOFF_MAX_SECS: u64 = 5;
 
 /// Per-connection IPC I/O deadline: how long the daemon waits for a
@@ -265,6 +273,7 @@ pub(crate) const IPC_ACCEPT_BACKOFF_MAX_SECS: u64 = 5;
 /// write to complete. A client that connects and goes silent would
 /// otherwise pin a task + fd for the daemon's lifetime; well above any
 /// real `msg`/`poll` round-trip, so only a hung client ever hits it.
+#[cfg(feature = "host")]
 pub(crate) const IPC_IO_TIMEOUT_SECS: u64 = 10;
 
 /// Readiness gate: how long to wait for the daemon's `--state-file` to

@@ -637,6 +637,10 @@ impl Message {
 
     /// A multihop link-state advertisement; `vector_json` is a serialized
     /// [`iroh_multihop_transport::LinkVector`].
+    ///
+    /// `host`-only with the transport that mints the vectors. The *kind* stays
+    /// portable — a browser still receives and ignores a peer's advertisement.
+    #[cfg(feature = "host")]
     pub(crate) fn new_link_state(
         mesh: &MeshId,
         author: &Nickname,

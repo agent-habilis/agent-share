@@ -342,6 +342,13 @@ struct SetupBuild<'a> {
     lookups: &'a LookupOpts,
     unicast_acceptor: &'a crate::transport::UnicastAcceptor,
     /// Register the multi-hop transport on the peer endpoint.
+    #[cfg_attr(
+        not(feature = "host"),
+        expect(
+            dead_code,
+            reason = "accepted and ignored off a host — see `build_member_endpoint`"
+        )
+    )]
     multihop: bool,
     transports: crate::lookup::TransportOpts,
     injected: Option<InjectedEndpoint>,
@@ -562,6 +569,13 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     let mut seed = [0u8; 32];
     rand::rng().fill_bytes(&mut seed);
 
+    #[cfg_attr(
+        not(feature = "host"),
+        expect(
+            unused_variables,
+            reason = "no multihop handle off a host — see `build_member_endpoint`"
+        )
+    )]
     let (endpoint, multihop, webrtc) = build_member_endpoint(build).await?;
 
     let mut mesh = Mesh::new(seed, name.clone(), config);
@@ -699,6 +713,13 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         MeshId::new(id_str.clone()).expect("Mesh::to_string always produces a valid MeshId");
     let topic_id = mesh.topic_id();
 
+    #[cfg_attr(
+        not(feature = "host"),
+        expect(
+            unused_variables,
+            reason = "no multihop handle off a host — see `build_member_endpoint`"
+        )
+    )]
     let (endpoint, multihop, webrtc) = build_member_endpoint(build).await?;
 
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());

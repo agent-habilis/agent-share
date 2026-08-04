@@ -20,7 +20,10 @@ use crate::protocol::identity;
 use crate::protocol::message::MessageBody;
 use crate::protocol::{Channel, Message, MessageKind, Nickname};
 use crate::util::clock::Instant;
+// The timer-driver clock the ping round's deadlines are kept in — distinct from
+// `clock::Instant` off wasm32. See `daemon::state`.
 use crate::util::tuning::RECLAIM_WINDOW_SECS;
+use n0_future::time::Instant as TokioInstant;
 
 use super::app::{AppClass, InboundApp, NodeApp};
 use super::broadcast::{announce_arrival, broadcast_peer_info};
@@ -389,7 +392,7 @@ pub(crate) async fn ingest(
             {
                 round
                     .pongs
-                    .insert(message.author.clone(), n0_future::time::Instant::now());
+                    .insert(message.author.clone(), TokioInstant::now());
             }
             return;
         }

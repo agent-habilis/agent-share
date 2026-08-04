@@ -11,6 +11,9 @@ pub mod logging {
 
 pub(crate) mod bounded_fifo_set;
 pub(crate) mod bounded_queue;
+// `host`-only with its only caller, the IPC listener (`transport::ipc`): line
+// framing over a unix socket / named pipe, which a browser has no equivalent of.
+#[cfg(feature = "host")]
 pub(crate) mod bounded_read;
 pub mod clock;
 pub mod consts;
