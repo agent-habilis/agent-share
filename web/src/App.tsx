@@ -1159,7 +1159,7 @@ const Session = component<{
             </span>
           )}
           <Button
-            variant="secondary"
+            variant="primary"
             onclick={() => void downloadAll()}
             disabled={redialling}
           >

@@ -95,7 +95,7 @@ function fitColumnWidth(dir: DirNode, padX: number): number {
 }
 
 function fitDetailWidth(node: Node, padX: number): number {
-  // "Download" label plus the button's 1ch of padding on each side. Exact: the
+  // "download" label plus the button's 1ch of padding on each side. Exact: the
   // button's edge is an outline, so it adds nothing to the width.
   const downloadLabel = 10
   if (node.kind !== 'file') {
@@ -469,7 +469,7 @@ function Detail({
           <div style={{ alignSelf: 'start' }}>
             <Stack direction="row" gap={1}>
               <Button
-                variant="primary"
+                variant="secondary"
                 onclick={() => onDownload()}
                 disabled={downloadDisabled}
               >

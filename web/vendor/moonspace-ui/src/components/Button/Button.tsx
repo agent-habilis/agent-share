@@ -28,6 +28,13 @@ export interface ButtonProps {
  */
 const BUTTON = css({
   ...oneRowChrome,
+  /*
+   * Casing is the component's, not the caller's — the same call Badge, Note and
+   * Table make. Doing it here rather than in the labels covers the one dynamic
+   * label the app has, and leaves the accessible name capitalised, since
+   * `text-transform` is presentation and screen readers read the DOM text.
+   */
+  textTransform: 'lowercase',
   '&[data-variant="primary"]': {
     background: T.msAccent,
     color: T.msFgOnAccent,
@@ -64,19 +71,17 @@ const BUTTON = css({
   },
   /*
    * Focus recolours the edge rather than drawing a second ring, the way Input
-   * does on `:focus-within` — there is only one outline to go around. It also
-   * steps out a pixel, which is what keeps focus legible on the filled variants:
-   * an accent ring flush against an accent fill just reads as a bigger button.
-   * Inversion used to be the signal, back when there was no box to outline.
+   * does on `:focus-within` — there is only one outline to go around. The offset
+   * stays inset with it; stepping the ring outside would put focus back in the
+   * clipped band the edge was just moved out of. Inversion used to be the
+   * signal, back when there was no box to outline.
    */
   '&:focus-visible': {
     outlineColor: T.msAccent,
-    outlineOffset: raw('1px'),
   },
   /*
    * A ring has to contrast with what it surrounds, and `primary` is filled with
-   * the ring's own colour — accent on accent left nothing but the 1px gap to
-   * see, which reads as a thin dark border rather than focus. `danger` needs no
+   * the ring's own colour — accent on accent is invisible. `danger` needs no
    * exception; a blue ring on red is already its own signal.
    */
   '&[data-variant="primary"]:focus-visible': {

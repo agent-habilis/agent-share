@@ -565,15 +565,22 @@ fn page_text() -> String {
         .unwrap_or_else(|error| format!("<could not read the page: {error}>"))
 }
 
-/// Click a button by its exact label, waiting for it to exist and be enabled.
+/// Click a button by its label, waiting for it to exist and be enabled.
+///
+/// The match ignores case. Label casing is presentation here — the Button
+/// component lowercases in CSS, and `innerText` reports what is *rendered*, so
+/// an exact comparison would tie every cell to the current stylesheet and fail
+/// on the next restyle. It would fail slowly, too: a miss is indistinguishable
+/// from a button that has not appeared yet, so it costs the full minute below.
 ///
 /// Enabled matters as much as present: the app holds back the actions that need
 /// the peer while a revival runs, so "the button came back" is itself part of
 /// what several cells assert.
 fn click(label: &str) -> Res<()> {
     let expression = format!(
-        "(()=>{{const button=[...document.querySelectorAll('button')]\
-         .find((b)=>(b.innerText||'').trim()==={});\
+        "(()=>{{const want={}.toLowerCase();\
+         const button=[...document.querySelectorAll('button')]\
+         .find((b)=>(b.innerText||'').trim().toLowerCase()===want);\
          if(!button||button.disabled)return false;button.click();return true}})()",
         js_string(label)
     );
