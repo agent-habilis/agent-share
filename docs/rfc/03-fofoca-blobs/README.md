@@ -498,6 +498,34 @@ at itself.
   back complete. If they do not, the bytes were not in the store and the peer
   would have been advertising what it cannot serve.
 
+> **BLOCKED, and by the thing this document already predicted.** `OpfsStore`
+> needs a `DedicatedWorkerGlobalScope` — sync access handles do not exist
+> anywhere else — and **the wasm client runs on the main thread**. There is no
+> `Worker` in `web/src` at all, and the client reaches for `web_sys::window()`
+> in three places: `lib.rs:1245`, `produce.rs:891`, and
+> `fofoca-iroh-webrtc-transport/src/web/jsep.rs:604`, each a `setTimeout`.
+>
+> *The Worker convergence* above says to design the browser backend around one
+> Worker "from the start rather than retrofitting it". This is the retrofit
+> arriving, and it is a prerequisite rather than a detail:
+>
+> - **Move the whole client into a Worker.** Correct end-state — hashing leaves
+>   the main thread too, which is the other half of the convergence. Costs
+>   moving `WebRTC` and the mesh in with it, and the three `setTimeout` sites
+>   become `WorkerGlobalScope::set_timeout_*`.
+> - **A store-only Worker**, with the client staying put and talking to it by
+>   `postMessage`. Smaller, but hashing stays on the main thread — so a
+>   multi-gigabyte sync janks the UI, which the convergence argument says is
+>   the thing to avoid.
+> - **Give up random access on the main thread**, using the async
+>   `createWritable` API instead. No Worker, but no writing at an offset
+>   either, so a mirror could not fill a file from several peers — which is
+>   most of the point.
+>
+> The first is the one the design wants. None of them is a small change, and
+> the native side is unblocked either way: `FsStore` needs no Worker, so a CLI
+> `agent-share mirror` can seed today.
+
 **3b-ii — the availability grid.** Broadcast the same state, bucketed, on the
 app-frame plane; render every peer's.
 
@@ -640,3 +668,26 @@ persistence.
 re-run per backend, is the verification. Add a wasm build assertion that no
 `import "env"` survives, the same check iroh-blobs' own wasm CI makes and the
 one [S0.1](findings/s01-baotree-wasm.md) already performs.
+
+**The isolation rule, as a command.** Nothing blob-shaped may appear in fofoca
+core:
+
+```
+rg 'bao_tree|blake3|BlobStore|ChunkRanges' crates/agent-share crates/agent-share-proto
+```
+
+Empty until `fofoca-blobs` exists, and afterwards only ever matching through
+that crate. **Match those symbols, never the bare word `blob`** — three
+unrelated things in this repo answer to it, and only the third is ours:
+
+| Where | What it is | Ours? |
+|---|---|---|
+| `agent-habilis-mesh/src/blob/` | The vendored engine's *blob channel*: point-to-point transfer of gossip payloads too large for a frame, SHA-256 addressed, its own ALPN and ticket. Declared `pub(crate)`, so it is unreachable from `agent-share` and cannot collide in code. | no |
+| `web_sys::Blob` | The browser's file object — `blob.array_buffer()` in `agent-share-wasm-client/src/produce.rs`. This is the one that will genuinely share a file with `OpfsStore`. | no |
+| `fofoca_blobs::BlobStore` | This crate. | yes |
+
+The name was kept deliberately after checking: the mesh module is private and
+the browser type is a different Rust type, so neither collides structurally.
+Renaming the vendored module was rejected — its name is upstream's, and this
+fork re-syncs by diffing against `8914557`, so churning it would make every
+future re-sync noisier for a purely local preference.

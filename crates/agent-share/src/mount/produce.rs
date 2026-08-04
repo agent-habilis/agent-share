@@ -18,8 +18,8 @@ use super::ReadStatus;
 use super::WEBRTC_SIGNAL_ALPN;
 use super::live::LiveTree;
 use super::{
-    MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN,
-    wait_online,
+    MAX_READ_LEN, MOUNT_ALPN, OP_HASH, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN,
+    SECRET_LEN, wait_online,
 };
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 
@@ -70,6 +70,9 @@ pub(crate) async fn serve(
 
     let lookups = resolve_transfer_lookups(swarm, flags)?;
     let (endpoint, ticket, secret, webrtc) = bind(lookups).await?;
+
+    let hashes = open_hash_cache(&secret);
+
     // Shell-quoted: the hint is printed for copy-paste (and captured verbatim
     // by scripts in json mode), so a dir name with a space must stay one word.
     // Target parent for the consumer — it creates `agent-share-…/` under this.
@@ -88,25 +91,7 @@ pub(crate) async fn serve(
     // accept loop had to go. The share's two ALPNs are registered on a Router
     // instead, normally the mesh's.
     let ice = IceConfig::default();
-    let protocols = || -> Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> {
-        vec![
-            (
-                MOUNT_ALPN.to_vec(),
-                Box::new(super::handlers::MountHandler::new(
-                    secret,
-                    Arc::clone(&tree),
-                )),
-            ),
-            (
-                WEBRTC_SIGNAL_ALPN.to_vec(),
-                Box::new(super::handlers::SignalHandler::new(
-                    endpoint.id(),
-                    webrtc.clone(),
-                    ice.clone(),
-                )),
-            ),
-        ]
-    };
+    let protocols = || share_protocols(secret, &tree, hashes.clone(), &endpoint, &webrtc, &ice);
 
     // The mesh normally owns the accept loop, but it must never be the reason a
     // share fails to serve. Sharing an endpoint made the mesh load-bearing for
@@ -200,6 +185,56 @@ pub(crate) async fn serve(
     Ok(())
 }
 
+/// The share's two ALPNs, ready for the mesh's Router.
+fn share_protocols(
+    secret: [u8; SECRET_LEN],
+    tree: &Arc<LiveTree>,
+    hashes: Option<Arc<super::hash::HashCache>>,
+    endpoint: &Endpoint,
+    webrtc: &WebRtcHandle,
+    ice: &IceConfig,
+) -> Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> {
+    vec![
+        (
+            MOUNT_ALPN.to_vec(),
+            Box::new(super::handlers::MountHandler::new(
+                secret,
+                Arc::clone(tree),
+                hashes,
+            )),
+        ),
+        (
+            WEBRTC_SIGNAL_ALPN.to_vec(),
+            Box::new(super::handlers::SignalHandler::new(
+                endpoint.id(),
+                webrtc.clone(),
+                ice.clone(),
+            )),
+        ),
+    ]
+}
+
+/// Open this share's hash cache, or `None` if it cannot be opened.
+///
+/// Keyed by the share's mesh id, which is already a one-way hash of the secret —
+/// see `mesh_key` for why the secret itself must never reach a path.
+///
+/// Never fatal. Without a cache a consumer cannot verify bytes from a third
+/// party and falls back to reading from this origin, which is exactly today's
+/// behaviour.
+fn open_hash_cache(secret: &[u8; SECRET_LEN]) -> Option<Arc<super::hash::HashCache>> {
+    let cache_dir = std::env::temp_dir()
+        .join("agent-share-hashes")
+        .join(&agent_share_proto::mesh_key::share_mesh_key(secret)[..16]);
+    match super::hash::HashCache::open(&cache_dir) {
+        Ok(cache) => Some(Arc::new(cache)),
+        Err(error) => {
+            tracing::warn!(%error, "hash cache unavailable; serving without verifiable hashes");
+            None
+        }
+    }
+}
+
 /// Bind the producer endpoint and mint its ticket + secret — no I/O, no print.
 ///
 /// The endpoint answers on two ALPNs: the mount protocol, and the `WebRTC`
@@ -257,14 +292,18 @@ pub async fn serve_established(
     conn: Connection,
     secret: [u8; SECRET_LEN],
     tree: Arc<LiveTree>,
+    hashes: Option<Arc<super::hash::HashCache>>,
 ) -> Result<()> {
     // `accept_bi` errors once the connection is gone (peer closed, or a bad
     // secret closed it from within a stream task) — that ends the loop.
     while let Ok((send, recv)) = conn.accept_bi().await {
         let conn = conn.clone();
         let tree = Arc::clone(&tree);
+        let hashes = hashes.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve_stream(&conn, send, recv, &secret, &tree).await {
+            if let Err(error) =
+                serve_stream(&conn, send, recv, &secret, &tree, hashes.as_deref()).await
+            {
                 tracing::debug!(%error, "mount stream ended");
             }
         });
@@ -281,6 +320,7 @@ async fn serve_stream(
     mut recv: RecvStream,
     secret: &[u8; SECRET_LEN],
     tree: &LiveTree,
+    hashes: Option<&super::hash::HashCache>,
 ) -> Result<()> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
     if recv.read_exact(&mut header).await.is_err() {
@@ -317,6 +357,31 @@ async fn serve_stream(
             let data_len = u32::try_from(data.len()).expect("bounded by MAX_READ_LEN");
             send.write_all(&data_len.to_le_bytes()).await?;
             send.write_all(&data).await?;
+        }
+        OP_HASH => {
+            let mut request = [0u8; 4];
+            if recv.read_exact(&mut request).await.is_err() {
+                return Ok(());
+            }
+            let index = u32::from_le_bytes(request);
+            // `None` covers two cases that look identical from the far side and
+            // should: this producer keeps no hash cache, or it cannot vouch for
+            // that index. Either way the consumer must fall back to reading
+            // from the origin, which is exactly what `BadIndex` tells it.
+            let answer = match hashes {
+                Some(cache) => cache.root_of_index(tree, index).await,
+                None => None,
+            };
+            let Some((root, outboard)) = answer else {
+                send.write_all(&[ReadStatus::BadIndex.to_byte()]).await?;
+                let _ = send.finish();
+                return Ok(());
+            };
+            send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
+            send.write_all(&root).await?;
+            let len = u32::try_from(outboard.len()).context("outboard too large")?;
+            send.write_all(&len.to_le_bytes()).await?;
+            send.write_all(&outboard).await?;
         }
         other => {
             // Unknown op: drop just this stream, keep the connection.

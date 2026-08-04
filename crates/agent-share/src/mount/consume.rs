@@ -18,9 +18,15 @@ use super::MountTicket;
 use super::mesh::ShareMesh;
 use super::nfs;
 use super::nfs::{ByteSource, RemoteFs, TreeIds, build_tree};
-use super::{MAX_MANIFEST_BYTES, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH, SECRET_LEN};
+use super::{
+    MAX_MANIFEST_BYTES, MAX_OUTBOARD_BYTES, MOUNT_ALPN, OP_HASH, OP_MANIFEST, OP_READ, OP_WATCH,
+    SECRET_LEN,
+};
+// The root type comes from the store, not from this crate: `agent-share` names
+// what `fofoca-blobs` verifies against rather than defining a second one.
 use super::{MountManifest, ReadStatus};
 use super::{WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
+use fofoca_blobs::Root;
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
 
 /// How long to keep retrying the dial while the producer's address propagates
@@ -456,6 +462,61 @@ impl RemoteClient {
             }
         }
         unreachable!("the loop returns on success and on the second failure")
+    }
+
+    /// Ask the origin for a file's BLAKE3 root and bao outboard.
+    ///
+    /// `Ok(None)` means *this producer cannot vouch for that index* — no hash
+    /// cache, an index out of range, or a file that changed under it. All three
+    /// are ordinary and all three mean the same thing to a caller: read those
+    /// bytes from the origin, which is what happens today anyway. Only a
+    /// protocol failure is an error.
+    ///
+    /// The root is learned from the **origin**, over a channel already
+    /// authenticated to the ticket's endpoint id. That is what makes it safe to
+    /// take the bytes from anybody afterwards.
+    // Exercised end-to-end by
+    // `mount::tests::a_consumer_learns_a_root_and_the_bytes_verify_against_it`,
+    // which is stage 3's deliverable: the wire op works and the bytes verify.
+    // The production caller is stage 4's source selection, so outside a test
+    // build there is not one yet.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "production caller arrives with stage 4 source selection"
+        )
+    )]
+    pub(super) async fn fetch_hash(&self, index: u32) -> Result<Option<(Root, Vec<u8>)>> {
+        let (mut send, mut recv) = self.request(OP_HASH).await?;
+        send.write_all(&index.to_le_bytes()).await?;
+        let _ = send.finish();
+
+        let mut status = [0u8; 1];
+        recv.read_exact(&mut status)
+            .await
+            .context("reading the hash status failed")?;
+        match ReadStatus::from_byte(status[0])? {
+            ReadStatus::Ok => {}
+            // Not an error: see the note above. Named rather than wildcarded so
+            // a future status has to be considered here rather than silently
+            // folded into "cannot vouch".
+            ReadStatus::BadIndex | ReadStatus::Io | ReadStatus::LenOverCap => return Ok(None),
+        }
+
+        let mut root = [0u8; 32];
+        recv.read_exact(&mut root)
+            .await
+            .context("reading the root failed")?;
+        let len = read_u32(&mut recv).await?;
+        if len > MAX_OUTBOARD_BYTES {
+            bail!("outboard too large: {len} bytes");
+        }
+        let mut outboard = vec![0u8; usize::try_from(len).expect("u32 fits usize")];
+        recv.read_exact(&mut outboard)
+            .await
+            .context("reading the outboard failed")?;
+        Ok(Some((root, outboard)))
     }
 
     pub(super) async fn fetch_manifest(&self) -> Result<MountManifest> {

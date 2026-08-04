@@ -74,7 +74,8 @@ fn spawn_mount_server(
             tokio::spawn(async move {
                 let Ok(conn) = incoming.await else { return };
                 if conn.alpn() == MOUNT_ALPN {
-                    let _ = agent_share::test_support::serve_mount(conn, secret, shared_tree).await;
+                    let _ = agent_share::test_support::serve_mount(conn, secret, shared_tree, None)
+                        .await;
                 }
             });
         }
@@ -115,7 +116,8 @@ fn spawn_signal_and_mount_server(
                         .expect("complete answer");
                     webrtc.attach(conn.remote_id(), session).expect("attach");
                 } else if conn.alpn() == MOUNT_ALPN {
-                    let _ = agent_share::test_support::serve_mount(conn, secret, shared_tree).await;
+                    let _ = agent_share::test_support::serve_mount(conn, secret, shared_tree, None)
+                        .await;
                 }
             });
         }

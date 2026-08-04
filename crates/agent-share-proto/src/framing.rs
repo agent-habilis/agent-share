@@ -52,6 +52,32 @@ pub const OP_WATCH: u8 = 3;
 /// producer drops the stream and keeps the connection.
 pub const OP_BENCH: u8 = 4;
 
+/// Request the BLAKE3 root and bao outboard for one file, by manifest index.
+///
+/// The op that makes a third-party read safe. A consumer learns a file's hash
+/// from the origin, over a channel already authenticated to the ticket's
+/// endpoint id, and can then accept the *bytes* from any peer and check them
+/// against it. A hostile peer can refuse or fail verification; it cannot
+/// substitute content.
+///
+/// **The origin hashes on demand, never at scan time.** Hashing a tree up-front
+/// is exactly what `manifest::MountManifest` refuses to do — it would turn
+/// serving a 500 GB share from a `stat` walk into a full read of it, and that
+/// laziness is the property distinguishing this design from `iroh-blobs`. So a
+/// file gets a root the first time somebody asks for one, and not before.
+///
+/// Request body: `index(u32)`. Response: the status byte, then
+/// `root(32) ‖ outboard_len(u32) ‖ outboard`.
+pub const OP_HASH: u8 = 5;
+
+/// Ceiling on one [`OP_HASH`] outboard.
+///
+/// An outboard is ~0.097 % of the file at the 64 `KiB` chunk groups this uses
+/// (measured — RFC 03, S0.3), so this admits files into the terabytes while
+/// still refusing an answer that could only come from a peer trying to exhaust
+/// memory.
+pub const MAX_OUTBOARD_BYTES: u32 = 64 * 1024 * 1024;
+
 /// [`OP_BENCH`] kind: consumer sends `n` bytes; producer echoes them back.
 pub const BENCH_KIND_ECHO: u8 = 0;
 
@@ -112,6 +138,28 @@ pub fn encode_manifest_request(secret: &[u8; SECRET_LEN]) -> Vec<u8> {
     out.extend_from_slice(secret);
     out.push(OP_MANIFEST);
     out
+}
+
+/// Build a complete [`OP_HASH`] request: header followed by `index(u32)`.
+#[must_use]
+pub fn encode_hash_request(secret: &[u8; SECRET_LEN], index: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(REQUEST_HEADER_LEN + 4);
+    out.extend_from_slice(secret);
+    out.push(OP_HASH);
+    out.extend_from_slice(&index.to_le_bytes());
+    out
+}
+
+/// Decode an [`OP_HASH`] request body — the producer's side of
+/// [`encode_hash_request`].
+///
+/// # Errors
+/// The body is not exactly four bytes.
+pub fn decode_hash_request(body: &[u8]) -> Result<u32> {
+    let bytes: [u8; 4] = body
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("hash request body must be 4 bytes, got {}", body.len()))?;
+    Ok(u32::from_le_bytes(bytes))
 }
 
 /// Build the header for an [`OP_WATCH`] request. Like the manifest op it has
@@ -258,12 +306,32 @@ mod tests {
     use super::{
         BENCH_ECHO_INTERVAL_SECS, BENCH_KIND_ECHO, BENCH_KIND_FILL, DEFAULT_BENCH_DURATION_SECS,
         MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES, MAX_DELTA_BYTES, MAX_MANIFEST_BYTES,
-        MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_MANIFEST, OP_READ, OP_WATCH, SECRET_LEN,
-        WEBRTC_SIGNAL_ALPN, decode_bench_request_prefix, decode_read_request,
-        decode_response_header, encode_bench_echo_request, encode_bench_fill_request,
+        MAX_OUTBOARD_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_HASH, OP_MANIFEST, OP_READ,
+        OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, WEBRTC_SIGNAL_ALPN, decode_bench_request_prefix,
+        decode_hash_request, decode_read_request, decode_response_header,
+        encode_bench_echo_request, encode_bench_fill_request, encode_hash_request,
         encode_manifest_request, encode_read_request,
     };
     use crate::manifest::ReadStatus;
+
+    #[test]
+    fn a_hash_request_round_trips() {
+        let secret = [3u8; SECRET_LEN];
+        let request = encode_hash_request(&secret, 42);
+        assert_eq!(&request[..SECRET_LEN], &secret);
+        assert_eq!(request[SECRET_LEN], OP_HASH);
+        assert_eq!(
+            decode_hash_request(&request[REQUEST_HEADER_LEN..]).expect("decode"),
+            42
+        );
+    }
+
+    #[test]
+    fn a_malformed_hash_request_is_rejected() {
+        assert!(decode_hash_request(&[]).is_err());
+        assert!(decode_hash_request(&[0, 0, 0]).is_err(), "too short");
+        assert!(decode_hash_request(&[0, 0, 0, 0, 0]).is_err(), "too long");
+    }
 
     #[test]
     fn wire_constants_are_pinned() {
@@ -284,6 +352,12 @@ mod tests {
         // It stays here because it is already written and costs nothing.
         assert_eq!(OP_WATCH, 3);
         assert_eq!(OP_BENCH, 4);
+        // Added for RFC 03. The op number is the *only* thing about hashing
+        // that belongs in this crate — the outboard format, the store and the
+        // verification all live in `fofoca-blobs`, which knows nothing about
+        // shares. Reserving a number is not learning about blobs.
+        assert_eq!(OP_HASH, 5);
+        assert_eq!(MAX_OUTBOARD_BYTES, 64 * 1024 * 1024);
         assert_eq!(BENCH_KIND_ECHO, 0);
         assert_eq!(BENCH_KIND_FILL, 1);
         assert_eq!(MAX_BENCH_ECHO_BYTES, 64 * 1024);

@@ -1,8 +1,10 @@
 mod bench;
 mod consume;
 mod handlers;
+mod hash;
 mod live;
 mod mesh;
+mod mirror;
 mod nfs;
 mod produce;
 mod scan;
@@ -52,6 +54,7 @@ pub mod test_support {
 
 pub(crate) use bench::{produce as produce_bench, run as run_bench};
 pub(crate) use consume::attach;
+pub(crate) use mirror::mirror;
 pub(crate) use produce::serve;
 
 // The mount protocol's identity, op codes, caps, manifest types and ticket
@@ -60,8 +63,9 @@ pub(crate) use produce::serve;
 // under their long-standing names; the golden pin that guards them moved with
 // them (`agent_share_proto::framing` — `wire_constants_are_pinned`).
 pub(crate) use agent_share_proto::framing::{
-    MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_MANIFEST, OP_READ,
-    OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST,
+    MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_OUTBOARD_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH,
+    OP_HASH, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_DELTA,
+    WATCH_FRAME_MANIFEST,
 };
 pub(crate) use agent_share_proto::manifest::{MountManifest, ReadStatus};
 pub(crate) use agent_share_proto::ticket::MountTicket;
@@ -153,7 +157,43 @@ mod tests {
                 let tree = Arc::clone(&tree);
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
-                    let _ = produce::serve_established(conn, secret, tree).await;
+                    let _ = produce::serve_established(conn, secret, tree, None).await;
+                });
+            }
+        });
+
+        let consumer_endpoint =
+            build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
+                .await
+                .expect("consumer endpoint");
+        add_peer_addr(&consumer_endpoint, ticket.addr.clone()).expect("add peer addr");
+        let client = RemoteClient::new(consumer_endpoint, ticket);
+        (endpoint, client, producer)
+    }
+
+    /// As [`producer_and_client`], but with an explicit hash cache — `None`
+    /// standing for a producer that cannot vouch for anything.
+    async fn producer_with_hashes(
+        root: &std::path::Path,
+        hashes: Option<Arc<super::hash::HashCache>>,
+    ) -> (iroh::Endpoint, RemoteClient, tokio::task::JoinHandle<()>) {
+        let (manifest, paths) = super::scan::scan(root).expect("scan");
+        let tree = Arc::new(super::live::LiveTree::new(
+            root.to_path_buf(),
+            manifest,
+            paths,
+        ));
+        let (endpoint, ticket, secret, _webrtc) = produce::bind(LookupOpts::loopback())
+            .await
+            .expect("bind producer");
+        let accept_endpoint = endpoint.clone();
+        let producer = tokio::spawn(async move {
+            while let Some(incoming) = accept_endpoint.accept().await {
+                let tree = Arc::clone(&tree);
+                let hashes = hashes.clone();
+                tokio::spawn(async move {
+                    let Ok(conn) = incoming.await else { return };
+                    let _ = produce::serve_established(conn, secret, tree, hashes).await;
                 });
             }
         });
@@ -195,7 +235,7 @@ mod tests {
                 let tree = Arc::clone(&tree);
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
-                    let _ = produce::serve_established(conn, secret, tree).await;
+                    let _ = produce::serve_established(conn, secret, tree, None).await;
                 });
             }
         });
@@ -209,6 +249,84 @@ mod tests {
             .expect("client endpoint");
         add_peer_addr(&endpoint, ticket.addr.clone()).expect("add peer addr");
         RemoteClient::new(endpoint, ticket)
+    }
+
+    /// **Stage 3, end to end.** A consumer asks the origin for a file's root
+    /// over `OP_HASH`, then checks the file's actual bytes against it.
+    ///
+    /// This is the whole trust chain in one test: the root comes from the
+    /// origin over a channel authenticated to the ticket's endpoint id, and
+    /// afterwards the *bytes* can come from anyone, because they either verify
+    /// against that root or they do not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_consumer_learns_a_root_and_the_bytes_verify_against_it() {
+        let tree = fixture_tree();
+        let contents = vec![9u8; 200_000];
+        std::fs::write(tree.path.join("big.bin"), &contents).expect("write");
+
+        let cache_dir = TempDir::new();
+        let cache = Arc::new(super::hash::HashCache::open(&cache_dir.path).expect("cache"));
+        let (endpoint, client, producer) =
+            producer_with_hashes(&tree.path, Some(Arc::clone(&cache))).await;
+
+        let manifest = client.fetch_manifest().await.expect("manifest");
+        let index = manifest
+            .files
+            .iter()
+            .position(|file| file.rel_path == "big.bin")
+            .expect("big.bin listed");
+        let index = u32::try_from(index).expect("index");
+
+        let (root, outboard) = client
+            .fetch_hash(index)
+            .await
+            .expect("hash request")
+            .expect("the origin can vouch for this file");
+        assert!(!outboard.is_empty(), "200 KB needs a tree");
+
+        // The bytes verify against the root the origin gave us.
+        let all = fofoca_blobs::ChunkRanges::all();
+        let encoded = fofoca_blobs::encode_ranges(&contents, &all).expect("encode");
+        let mut target = Vec::new();
+        fofoca_blobs::decode_into(root, contents.len() as u64, &encoded, &all, &mut target)
+            .expect("the file's own bytes must verify against its root");
+        assert_eq!(target, contents);
+
+        // And content that is *not* this file does not, which is the half that
+        // makes the first half worth anything.
+        let impostor = vec![8u8; 200_000];
+        let forged = fofoca_blobs::encode_ranges(&impostor, &all).expect("encode");
+        let mut wrong = Vec::new();
+        assert!(
+            fofoca_blobs::decode_into(root, impostor.len() as u64, &forged, &all, &mut wrong)
+                .is_err(),
+            "substituted content must not verify against the origin's root"
+        );
+
+        endpoint.close().await;
+        producer.abort();
+    }
+
+    /// A producer with no hash cache answers `BadIndex`, and the consumer reads
+    /// that as "cannot vouch" rather than as a failure.
+    ///
+    /// The fallback RFC 01 phase 4 requires: a file with no hash is read from
+    /// the origin exactly as it is today.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_producer_without_a_cache_says_it_cannot_vouch() {
+        let tree = fixture_tree();
+        let (endpoint, client, producer) = producer_with_hashes(&tree.path, None).await;
+
+        assert_eq!(
+            client.fetch_hash(0).await.expect("hash request"),
+            None,
+            "no cache must read as 'cannot vouch', not as an error"
+        );
+        // And the ordinary read path is untouched.
+        assert_eq!(client.read_range(0, 0, 5).await.expect("read").len(), 5);
+
+        endpoint.close().await;
+        producer.abort();
     }
 
     /// **S0.2 — the symmetry claim RFC 01 rests on.**
