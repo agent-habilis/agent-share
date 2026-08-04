@@ -79,6 +79,15 @@ export const oneRow = {
  * grid, and would need a transparent one on filled variants just to keep them
  * the same size as outlined ones.
  *
+ * The offset is negative so the ring paints just *inside* the border box. An
+ * outline drawn outside it is at the mercy of any ancestor that clips, and that
+ * is not hypothetical: the file-detail pane's scroller sets only `overflow-y`,
+ * which per spec computes `overflow-x` from `visible` to `auto`, so it clips
+ * horizontally too — and the download button sits flush against its left edge.
+ * The result was a button with three sides. Inset, the ring's outer edge lands
+ * on the border box rather than a pixel proud of it, so a control's painted
+ * extent is also its layout extent: whole cells by whole rows.
+ *
  * Declared transparent up front so variants only ever set `outlineColor`.
  *
  * `border: 0` is not redundant with that: a bare `<button>` gets `2px outset`
@@ -93,7 +102,7 @@ export const oneRowChrome = {
   padding: raw('0 1ch'),
   border: 0,
   outline: raw('var(--ms-border-width) solid transparent'),
-  outlineOffset: 0,
+  outlineOffset: raw('-1px'),
   background: 'transparent',
   cursor: 'pointer' as const,
   whiteSpace: 'nowrap' as const,

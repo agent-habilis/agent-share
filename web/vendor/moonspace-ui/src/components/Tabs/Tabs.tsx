@@ -34,6 +34,7 @@ const LIST = css({
  */
 const TRIGGER = css({
   ...oneRowChrome,
+  textTransform: 'lowercase',
   color: T.msFgMuted,
   '&[data-selected="true"]': {
     background: T.msFg,
@@ -44,7 +45,6 @@ const TRIGGER = css({
   },
   '&:focus-visible': {
     outlineColor: T.msAccent,
-    outlineOffset: raw('1px'),
   },
   '&:disabled': {
     color: T.msFgSubtle,
