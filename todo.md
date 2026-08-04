@@ -3,21 +3,6 @@
 Things found but not yet fixed. Each entry says what breaks and how it was
 found, so the next person does not have to rediscover it.
 
-## `cargo task ci` is red at HEAD, in two independent places
-
-Both confirmed pre-existing by stashing all local work and re-running, so
-neither is a regression — but both mean the CI gate currently cannot pass, and
-anyone adding a third failure will not notice.
-
-1. **10 clippy errors** in `crates/agent-share-proto/src/client.rs` (from
-   commit `5730f722`): `doc_markdown` on "TypeScript", and `min_ident_chars` on
-   a run of `|v|` / `|s|` closure parameters.
-2. **6 compile errors** in `cargo test --manifest-path
-   crates/agent-share-wasm-client/Cargo.toml --lib`, which `ci.rs:27-32` runs.
-   `src/mesh.rs:581` and `src/produce.rs:92,390` disagree about
-   `Arc<BrowserHubTransport>` vs `Arc<WebRtcTransport>`. The crate is
-   wasm-only; this is its *host*-target build, which nothing else exercises.
-
 ## Nothing observably breaks when the zip entries are built eagerly
 
 `web/src/download.ts` builds its ZIP entries from a generator, and the comment
@@ -46,6 +31,17 @@ regardless of timer drift.
 ---
 
 ## Fixed since this file was written
+
+- **`cargo task ci` being red at HEAD**, in two independent places, both
+  pre-existing rather than regressions. The clippy errors in
+  `agent-share-proto` were `doc_markdown` on "TypeScript" and `min_ident_chars`
+  on a run of `|v|`/`|s|` closure parameters; two more of the same kind turned
+  up elsewhere once the first crate compiled far enough to reveal them. The
+  wasm client's *host*-target lib tests could never have compiled: off wasm32
+  `agent-habilis-mesh` enables `fofoca-iroh-webrtc-transport/host`, and with
+  both backends on `WebRtcHandle` takes an `Arc<WebRtcTransport>` while the
+  client hands it an `Arc<BrowserHubTransport>`. Those 15 tests now run on
+  wasm32, where the crate actually builds.
 
 - **The dev server serving a stale `.wasm`.** `dev.ts` opened `Bun.file` once at
   module load, so a `cargo task web-wasm` after startup was never picked up —

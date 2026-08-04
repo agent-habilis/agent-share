@@ -365,8 +365,29 @@ async fn the_mount_selects_webrtc_over_a_warm_relay_path() {
         .expect("dial the mount ALPN");
 
     // 3. The assertion: the *selected* path settles on WebRTC.
+    let (selected_is_webrtc, observed) = wait_for_selected_webrtc(&mount).await;
+    assert!(
+        selected_is_webrtc,
+        "the mount must select the WebRTC path, not the warm relay \
+         (paths={observed:?}); a WebRTC path merely *existing* is what the old \
+         check tested, and it passed while every byte went over the relay"
+    );
+
+    mount.close(0u32.into(), b"done");
+    server.abort();
+    consumer.close().await;
+    producer.close().await;
+}
+
+/// Poll `mount`'s paths until `WebRTC` is the **selected** one, or time out.
+///
+/// Returns whether it settled there and the labels observed on the last look,
+/// so a failure can name what it saw — `*` marks the selected path. Polling
+/// rather than a single read: selection settles a moment after the connection
+/// opens, and reading once raced it.
+async fn wait_for_selected_webrtc(mount: &iroh::endpoint::Connection) -> (bool, Vec<String>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let (selected_is_webrtc, observed) = loop {
+    loop {
         let observed = mount
             .paths()
             .iter()
@@ -389,24 +410,13 @@ async fn the_mount_selects_webrtc_over_a_warm_relay_path() {
             })
             .collect::<Vec<_>>();
         if observed.iter().any(|label| label == "*webrtc") {
-            break (true, observed);
+            return (true, observed);
         }
         if tokio::time::Instant::now() >= deadline {
-            break (false, observed);
+            return (false, observed);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    assert!(
-        selected_is_webrtc,
-        "the mount must select the WebRTC path, not the warm relay \
-         (paths={observed:?}); a WebRTC path merely *existing* is what the old \
-         check tested, and it passed while every byte went over the relay"
-    );
-
-    mount.close(0u32.into(), b"done");
-    server.abort();
-    consumer.close().await;
-    producer.close().await;
+    }
 }
 
 async fn fetch_manifest(

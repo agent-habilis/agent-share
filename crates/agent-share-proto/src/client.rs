@@ -5,7 +5,7 @@
 //! UI state (mount progress, ICE observations, wall-clock connected-for) stays
 //! out of the card.
 //!
-//! Browser consumers build the structured fields in TypeScript and pass them
+//! Browser consumers build the structured fields in `TypeScript` and pass them
 //! into wasm; the CLI fills them itself. Display label:
 //! `agent-share v1.2.3 (chrome, webrtc)`.
 
@@ -113,29 +113,29 @@ impl PeerCard {
         let endpoint = value.get(CARD_ENDPOINT)?.as_str()?.to_owned();
         let app = value
             .get(CARD_APP)
-            .and_then(|v| v.as_str())
+            .and_then(serde_json::Value::as_str)
             .unwrap_or(PRODUCT)
             .to_owned();
         let version = value
             .get(CARD_VERSION)
-            .and_then(|v| v.as_str())
+            .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_owned();
         let runtime = value
             .get(CARD_RUNTIME)
-            .and_then(|v| v.as_str())
+            .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_owned();
         let transport = value
             .get(CARD_TRANSPORT)
-            .and_then(|v| v.as_str())
+            .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_owned();
         let client = value
             .get(CARD_CLIENT)
-            .and_then(|v| v.as_str())
+            .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
-            .filter(|s| !s.is_empty())
+            .filter(|client| !client.is_empty())
             .unwrap_or_else(|| {
                 if version.is_empty() || runtime.is_empty() || transport.is_empty() {
                     "unknown".to_owned()
@@ -145,7 +145,7 @@ impl PeerCard {
             });
         let role = value
             .get(CARD_ROLE)
-            .and_then(|v| v.as_str())
+            .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         Some(Self {
             endpoint,

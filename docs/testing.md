@@ -51,6 +51,15 @@ below the transport.
 | the `WebRTC` lane | `crates/agent-share/tests/webrtc_mount.rs` (4), `fofoca-iroh-webrtc-transport/tests/loopback.rs` (3) | JSEP, session registry, path selection, echo over the channel |
 | multihop | `iroh-multihop-transport/tests/e2e.rs` (2) | selected path is the custom transport |
 | wasm primitives | `agent-habilis-mesh/tests/wasm_runtime.rs` (5) | clock, timers, `spawn`, `getrandom` — the things that compile and then panic |
+| the browser client | `agent-share-wasm-client --lib` (15), run **on wasm32** | transport-mode parsing and the live-tree state machine |
+| the web app | `bun test` (404) + `tsc --noEmit` across five projects | the app's own helpers, and that the TypeScript still type-checks |
+
+The browser client's tests run on wasm32 rather than the host, and that is
+forced rather than chosen: off wasm32 `agent-habilis-mesh` enables
+`fofoca-iroh-webrtc-transport/host`, and with both backends on `WebRtcHandle`
+resolves to the host one while the client hands it a `BrowserHubTransport`. A
+host build of that crate cannot type-check by construction. The gate used to
+run it on the host anyway, and had been red for it.
 
 **Known gate weaknesses**, recorded rather than fixed here:
 
@@ -58,10 +67,11 @@ below the transport.
   not `#[ignore]`d, so an offline run is a red build for a reason unrelated to
   the change.
 - Without a wasm-capable clang the whole wasm leg **skips green**, including
-  `wasm_runtime`.
-- The gate runs neither `bun test` nor any typecheck.
-- `cargo task ci` is currently red at HEAD for two pre-existing reasons — see
-  `todo.md`.
+  `wasm_runtime` and the browser client's 15 tests.
+- Without `bun`, the whole web leg skips green.
+- Of the 404 `bun test` cases, ~84% belong to the *vendored* UI framework. Only
+  about 62 are app code, and all of those are pure helpers — nothing renders
+  `App.tsx` or drives a session. That gap is what lane B exists for.
 
 ---
 
