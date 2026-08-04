@@ -28,6 +28,7 @@ a permanent place:
 | `bench_wasm.mjs` | S0.3 | Portable vs `+simd128`, hash-only and outboard-only. |
 | `opfs/` | S0.5 | Browser half: OPFS random-access range writes from a Worker, and persistence across reload. Plain JS. |
 | `opfs-rust-bindings/` | S0.5 | Rust half: does `web-sys` expose `FileSystemSyncAccessHandle` with read/write at an offset? Compile-check only. |
+| `idb/` | S0.6 | `IdbStore` conformance against a real `IndexedDB`, on the main thread. Rust, via `wasm-bindgen`. The only spike that exercises a shipped backend rather than a question. |
 | `s04-delayed-link.sh` | S0.4 | Runs the multi-source measurement under an emulated delayed link. **Needs root.** |
 
 ## Running them
@@ -88,3 +89,25 @@ rules rather than clobbering them (`FORCE=1` overrides). It runs cargo as
 > traffic and the throughput numbers are just the unshaped baseline. macOS
 > dummynet may not apply to `lo0`; if so the honest next step is two physical
 > machines, not more tuning.
+
+**S0.6** — from `idb/`, needs a secure context, and `localhost` counts:
+
+```
+cargo build --target wasm32-unknown-unknown --release
+wasm-bindgen --target web --out-dir pkg \
+  target/wasm32-unknown-unknown/release/s06_idb.wasm
+python3 -m http.server 8778
+```
+
+Open `http://localhost:8778/`, click Run, then **reload and click Run again**.
+The second run must report `PASS persistence across reload`; the first reports
+`note persistence: first run`.
+
+Start from a clean database when the storage layout changes — stale records fail
+as missing blocks, which reads like a bug in the store rather than in the
+fixture. The page holds an open connection, so navigate away before deleting:
+
+```js
+// on about:blank, then come back
+indexedDB.deleteDatabase('s06-idb-harness')
+```

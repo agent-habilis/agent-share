@@ -10,6 +10,8 @@ import { Stack, Text, roleVar } from 'moonspace-ui'
 import { component, interval, listen, signal } from 'visage-dom'
 import type { Ctx } from 'visage-dom'
 
+import { missingSlots, peerAvailability } from './availability.ts'
+import type { PeerAvailability } from './availability.ts'
 import { formatIpWithFlag, isGeoLookupCandidate, lookupCountryCode } from './countryFlag/index.ts'
 import { humanBytes } from './tree.ts'
 
@@ -46,6 +48,75 @@ interface PeerRow {
   down_bps: number
   /** Round-trip time in ms, or null when the pair has not been measured. */
   rtt_ms: number | null
+  /**
+   * Which manifest slots this peer says it can serve — `*`, run-length ranges,
+   * or absent when it has not said. See `availability.ts`.
+   */
+  serving: string | null
+  /**
+   * Manifest fingerprint those slot numbers index into. Squares from peers on
+   * different trees do not line up and must not be drawn as though they do.
+   */
+  tree: string | null
+}
+
+/**
+ * One peer's availability as a row of squares, the way a BitTorrent client
+ * paints pieces.
+ *
+ * A square is one manifest slot — one file — because that is what this protocol
+ * addresses bytes with and therefore what a peer can honestly answer for.
+ *
+ * Three states rather than two, and the third is the point: **filled** for a
+ * slot the peer holds, **empty** for one it does not, and a single muted bar
+ * for a peer that has published nothing. Drawing an all-empty row for the last
+ * case would claim the peer has nothing, when what we actually know is that it
+ * has not said.
+ */
+function AvailabilityRow(props: {
+  peer: PeerAvailability
+  total: number
+  ourTree: string | null
+}) {
+  if (props.peer.unknown) {
+    return <Text color="fgSubtle">chunks not published</Text>
+  }
+  // A slot index is meaningless across trees, so say so rather than paint
+  // squares that appear to line up with everyone else's.
+  if (props.ourTree && props.peer.tree && props.peer.tree !== props.ourTree) {
+    return <Text color="fgSubtle">chunks on a different tree</Text>
+  }
+  const held = new Set(props.peer.held)
+  const squares = Array.from({ length: props.total }, (_, slot) => held.has(slot))
+  const filled = squares.filter(Boolean).length
+  return (
+    <Stack direction="column" gap={0}>
+      <div
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '1px',
+          maxWidth: '40ch',
+        }}
+      >
+        {squares.map((has, slot) => (
+          <span
+            key={slot}
+            title={`slot ${slot}: ${has ? 'available' : 'missing'}`}
+            style={{
+              width: '0.8ch',
+              height: '0.8ch',
+              background: has ? roleVar.accent : roleVar.bgSunken,
+              outline: has ? 'none' : `1px solid ${roleVar.border}`,
+            }}
+          />
+        ))}
+      </div>
+      <Text color="fgSubtle">
+        {filled}/{props.total} slots{props.peer.complete ? ' · complete' : ''}
+      </Text>
+    </Stack>
+  )
 }
 
 interface SessionInfo {
@@ -179,10 +250,21 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
           .join(' · ')
       : '—'
 
+    // The manifest's file count, which the host already knows — a slot is a
+    // file, so the grid has a width even before any peer publishes anything.
+    const totalSlots = props.fileCount
+    const ourTree =
+      (info?.swarm.peers ?? []).find((peer) => peer.role === 'self')?.tree ?? null
+    const availabilities = (info?.swarm.peers ?? []).map((peer) =>
+      peerAvailability(peer.id, peer.serving, peer.tree, totalSlots),
+    )
+    const gaps = totalSlots > 0 ? missingSlots(availabilities, totalSlots) : []
+
     const peerRows = (info?.swarm.peers ?? []).map((peer) => {
       if (peer.ip) requestCountry(peer.ip)
       return {
         ...peer,
+        availability: peerAvailability(peer.id, peer.serving, peer.tree, totalSlots),
         ipLabel: formatIpWithFlag(peer.ip, {
           countryCode: peer.ip ? (countryMap[peer.ip] ?? null) : null,
           kind: peer.ip_kind,
@@ -236,6 +318,18 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
             direct {info?.swarm.peers_direct ?? 0}/{info?.swarm.max_direct ?? 0} · gossip{' '}
             {info?.swarm.peers_gossip ?? 0}
           </Text>
+          {/*
+            The one thing this view can tell you that a peer list cannot: which
+            parts of the share nobody visible still holds. Once the origin is
+            gone those slots are lost until somebody who has them reappears.
+          */}
+          {totalSlots > 0 ? (
+            <Text color={gaps.length === 0 ? 'fgMuted' : 'fgSubtle'}>
+              {gaps.length === 0
+                ? `every slot is held by someone (${totalSlots})`
+                : `${gaps.length} of ${totalSlots} slots held by nobody visible`}
+            </Text>
+          ) : null}
           {peerRows.length === 0 ? (
             <Text color="fgSubtle">no peers</Text>
           ) : (
@@ -265,6 +359,13 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
                     <Text color="fgMuted">flags {peer.flags}</Text>
                   ) : null}
                   <Text color="fgMuted">proto {peer.proto}</Text>
+                  {totalSlots > 0 ? (
+                    <AvailabilityRow
+                      peer={peer.availability}
+                      total={totalSlots}
+                      ourTree={ourTree}
+                    />
+                  ) : null}
                   <Text color="fgSubtle">
                     {peer.role} · {shortId(peer.id)}
                   </Text>

@@ -19,6 +19,7 @@ import { component, computed, signal } from 'visage-dom'
 import type { Child, Ctx } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
+import { seedState, shareSeedSummary } from './seeding.ts'
 import { TechInfo } from './TechInfo.tsx'
 import { saveStream, singleFileStream, zipStream, type Progress } from './download.ts'
 import {
@@ -69,6 +70,24 @@ interface Client {
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
   /** Subscribe to tree changes. Each call delivers the whole manifest. */
   watch(onManifest: (manifest: Manifest) => void): Promise<void>
+  /**
+   * Pull bytes into local storage so this tab can seed them.
+   *
+   * `only` names paths to take — a file, or a folder and everything under it.
+   * Omit it for the whole share.
+   */
+  sync(only?: string[]): Promise<{
+    files: number
+    bytes: number
+    verified: number
+    unverified: number
+    skipped: number
+    held: number
+  }>
+  /** Manifest indices held in full, and therefore seedable. */
+  readonly held: Uint32Array
+  /** Recompute what is held from storage — what survived a reload. */
+  refresh_held(): Promise<void>
 }
 
 type State =
@@ -461,6 +480,17 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
   const mountError = signal<string | null>(null)
   /** Non-null while a host directory is mounted for this session. */
   const mountSession = signal<MountSession | null>(null)
+  /**
+   * Manifest indices this tab holds in full, and so can seed.
+   *
+   * Mirrored out of the wasm client rather than tracked here: the store is the
+   * only thing that knows what actually survived, and a set maintained in JS
+   * would drift from it on every reload.
+   */
+  const held = signal<ReadonlySet<number>>(new Set())
+  /** In-flight sync, so the button can say what it is doing. */
+  const seeding = signal<{ label: string } | null>(null)
+  const seedError = signal<string | null>(null)
 
   let synced: SyncedState = emptySyncedState()
   let syncing = false
@@ -548,6 +578,11 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
       if (ctx.aborted.aborted) return
       path.value = prunePath(path.peek(), manifest)
       state.value = { phase: 'ready', client, manifest }
+      // What survived a previous visit. Reads storage without creating any, so
+      // a tab that only browses leaves nothing behind.
+      void client.refresh_held().then(() => {
+        if (!ctx.aborted.aborted) refreshHeld(client)
+      })
       // Announce departure while the page still exists. Without this the tab
       // lingers on every peer's roster until the silence sweeper evicts it —
       // which showed up immediately in testing as a share reporting more
@@ -618,6 +653,46 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
     } finally {
       if (transfer.peek()?.kind === 'download') transfer.value = null
     }
+  }
+
+  /** Take the client's held set into the signal, and repaint. */
+  function refreshHeld(client: Client): void {
+    held.value = new Set(Array.from(client.held))
+  }
+
+  /**
+   * Fetch bytes so this tab can seed them.
+   *
+   * `only` is a path filter — a file or a folder — or nothing for the whole
+   * share. Already-held files are skipped by the client, so pressing this
+   * twice is cheap rather than a re-download.
+   */
+  async function syncSeed(only: string[] | undefined, label: string): Promise<void> {
+    const current = state.peek()
+    if (current.phase !== 'ready' || seeding.peek()) return
+    seeding.value = { label }
+    seedError.value = null
+    try {
+      await current.client.sync(only)
+      refreshHeld(current.client)
+    } catch (error) {
+      // Storage can be refused outright — private mode, or a full quota — and
+      // that must cost seeding rather than the share. Surfaced rather than
+      // logged: a Sync button that silently does nothing is worse than one
+      // that says why.
+      seedError.value = String(error)
+      console.warn('[share] sync failed', error)
+    } finally {
+      seeding.value = null
+    }
+  }
+
+  async function syncSelected(): Promise<void> {
+    const built = tree.peek()
+    if (!built) return
+    const selected = nodeAtPath(built.root, path.peek())
+    if (!selected) return
+    await syncSeed([selected.path], selected.name || 'share')
   }
 
   async function downloadSelected(): Promise<void> {
@@ -714,6 +789,28 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
         Info
       </Button>
     )
+    /*
+      Whole-share sync. The label carries the state rather than a separate
+      line, because this row is exactly `oneRow` tall and anything taller
+      would move every pixel of content under it.
+    */
+    const summary = shareSeedSummary(built.root, held.value)
+    const syncing = seeding.value
+    const syncButton = (
+      <Button
+        variant="secondary"
+        onclick={() => void syncSeed(undefined, 'share')}
+        disabled={syncing !== null || summary.state === 'full'}
+      >
+        {syncing
+          ? `Syncing ${syncing.label}…`
+          : summary.state === 'full'
+            ? `Seeding ${summary.total}`
+            : summary.state === 'partial'
+              ? `Sync ${summary.total - summary.held} more`
+              : 'Sync'}
+      </Button>
+    )
 
     /*
       One row, always. A transfer takes the middle of the row rather than
@@ -746,6 +843,7 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
     } else {
       trailing = (
         <Stack direction="row" gap={1}>
+          {syncButton}
           {infoButton}
           {mountable ? (
             mountButton()
@@ -804,6 +902,9 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
             }}
             onDownload={() => void downloadSelected()}
             downloadDisabled={active !== null}
+            held={held.value}
+            onSync={() => void syncSelected()}
+            syncDisabled={seeding.value !== null}
           />
         )}
       </SessionChrome>

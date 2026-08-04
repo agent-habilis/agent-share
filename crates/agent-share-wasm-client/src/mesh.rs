@@ -73,6 +73,10 @@ impl CardParts {
 /// the tab's whole life. The native peer carries the same split.
 pub(crate) type SharedTree = Arc<Mutex<Option<String>>>;
 
+/// Which manifest slots this tab can serve, as `agent_share_proto::serving`
+/// encodes them. Shared for the same reason as [`SharedTree`].
+pub(crate) type SharedServing = Arc<Mutex<Option<String>>>;
+
 /// What the outside world can ask the share driver to do. See the native
 /// `ShareRequest`; the two are deliberately the same shape.
 pub(crate) enum ShareRequest {
@@ -172,12 +176,18 @@ type ClientBook = Arc<Mutex<HashMap<String, PeerCard>>>;
 struct ShareMeshDriver {
     parts: CardParts,
     tree: SharedTree,
+    serving: SharedServing,
     book: ClientBook,
 }
 
 impl ShareMeshDriver {
-    fn new(parts: CardParts, tree: SharedTree, book: ClientBook) -> Self {
-        Self { parts, tree, book }
+    fn new(parts: CardParts, tree: SharedTree, serving: SharedServing, book: ClientBook) -> Self {
+        Self {
+            parts,
+            tree,
+            serving,
+            book,
+        }
     }
 
     /// Publish mesh/app identity onto `/peers/<nick>/card` (meta channel).
@@ -186,7 +196,13 @@ impl ShareMeshDriver {
             .parts
             .clone()
             .into_card(ctx.endpoint.id().to_string())
-            .with_tree(self.tree.lock().ok().and_then(|tree| tree.clone()));
+            .with_tree(self.tree.lock().ok().and_then(|tree| tree.clone()))
+            .with_serving(
+                self.serving
+                    .lock()
+                    .ok()
+                    .and_then(|serving| serving.clone()),
+            );
         let merge = serde_json::json!({
             "peers": {
                 ctx.author.as_str(): {
@@ -217,6 +233,11 @@ impl ShareMeshDriver {
     }
 
     /// Rebuild the endpoint → card map from the live meta document.
+    ///
+    /// Includes peers that have left: nothing deletes a departed peer's CRDT
+    /// entry, and a tab being closed cannot — see `ShareClient::leave_mesh`.
+    /// Known defect, shared with the native peer; see `cards_from_meta` there
+    /// for why the obvious roster filter was reverted.
     fn refresh_book(&self, state: &EventLoopState) {
         let doc = state.doc(Channel::Meta).to_json();
         let mut next = HashMap::new();
@@ -253,7 +274,7 @@ impl NodeApp for ShareMeshDriver {
         &mut self,
         _frame: InboundApp<'_>,
         _state: &mut EventLoopState,
-        _ctx: &HandlerCtx<'_>,
+        ctx: &HandlerCtx<'_>,
     ) -> bool {
         false
     }
@@ -266,6 +287,8 @@ impl NodeApp for ShareMeshDriver {
     ) {
         self.refresh_book(state);
     }
+
+
 
     async fn on_meshed(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         self.publish_card(state, ctx).await;
@@ -304,6 +327,7 @@ impl NodeDriver for ShareMeshDriver {
     async fn on_startup(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         self.publish_card(state, ctx).await;
     }
+
 }
 
 /// A live mesh membership held by this tab.
@@ -320,6 +344,8 @@ pub struct MeshPeer {
     clients: ClientBook,
     /// The manifest fingerprint on our card. See [`SharedTree`].
     tree: SharedTree,
+    /// Which slots this tab advertises. See [`SharedServing`].
+    serving: SharedServing,
     /// Behind a `RefCell` so [`MeshPeer::leave`] can take `&self` — see the
     /// note there on why a `self`-by-value method is a trap through
     /// wasm-bindgen.
@@ -496,6 +522,36 @@ impl MeshPeer {
         }
     }
 
+    /// Publish which manifest slots this tab can serve.
+    ///
+    /// The same debounce-by-value as [`Self::set_tree`], and for the same
+    /// reason: this rides a CRDT merge broadcast to the whole mesh, and a sync
+    /// that fetched nothing new must not cost everyone a gossip round.
+    ///
+    /// `None` clears the field, which reads as *cannot vouch* rather than
+    /// *holds nothing* — the distinction `serving` is built on.
+    pub(crate) async fn set_serving(&self, encoded: Option<String>) {
+        {
+            // Scoped: never hold a std `Mutex` across the await below.
+            let Ok(mut current) = self.serving.lock() else {
+                return;
+            };
+            if *current == encoded {
+                return;
+            }
+            *current = encoded;
+        }
+        let sender = self.node.borrow().as_ref().map(Node::sender);
+        let Some(sender) = sender else {
+            return;
+        };
+        if let Err(error) = sender.send(ShareRequest::RepublishCard).await {
+            web_sys::console::debug_1(&JsValue::from_str(&format!(
+                "[share] republishing the card failed: {error}"
+            )));
+        }
+    }
+
     /// All meta peer cards currently known (gossip roster advertise).
     pub(crate) fn known_cards(&self) -> Vec<PeerCard> {
         self.clients
@@ -644,7 +700,13 @@ async fn spawn_peer_inner(
     // `handle_signals: false` — there are no process signals in a tab, and the
     // engine's signal registration is host-only anyway.
     let tree: SharedTree = Arc::new(Mutex::new(None));
-    let driver = ShareMeshDriver::new(card, Arc::clone(&tree), Arc::clone(&clients));
+    let serving: SharedServing = Arc::new(Mutex::new(None));
+    let driver = ShareMeshDriver::new(
+        card,
+        Arc::clone(&tree),
+        Arc::clone(&serving),
+        Arc::clone(&clients),
+    );
     let node = Node::spawn(config, driver, None, false);
     Ok(MeshPeer {
         mesh_id,
@@ -653,6 +715,7 @@ async fn spawn_peer_inner(
         hub,
         clients,
         tree,
+        serving,
         node: RefCell::new(Some(node)),
     })
 }

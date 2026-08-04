@@ -28,11 +28,13 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Some(MountAction::Mirror {
             ticket,
             dest,
+            only,
             output: mirror_output,
         }) => {
             return crate::mount::mirror(
                 &ticket,
                 &dest,
+                &only,
                 matches!(mirror_output, OutputFormat::Json),
             )
             .await;

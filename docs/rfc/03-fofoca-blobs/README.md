@@ -352,6 +352,114 @@ N=50 it is ~4.8 MB/s, which is not. Three caps, all required:
 - **Scale the debounce floor with roster size**, so a large mesh degrades to
   coarse refreshes rather than saturating.
 
+### The browser store, and the Worker that is not coming yet
+
+Settled by S0.6, and the shape of the answer was not the one the design
+expected.
+
+`OpfsStore` needs a Worker, because `FileSystemSyncAccessHandle` exists nowhere
+else. That was accepted as a tax until the seeding UI needed building, at which
+point the tax turned out to have a second half: **`RTCPeerConnection` does not
+exist in a Worker either.** Measured, not assumed — `undefined` in a
+`DedicatedWorkerGlobalScope`, no prefixed alternative.
+
+Two constraints pointing opposite ways. The data plane is pinned to the main
+thread; usable OPFS is pinned to a Worker. So the lib cannot move wholesale in
+either direction, and the only question is where to cut.
+
+Cutting at the packet level — WebRTC on the main thread, everything else in a
+Worker — puts every datagram through `postMessage`, on the latency-critical path
+QUIC does loss recovery over. Cutting at the **storage** level puts only bulk
+64 `KiB` ranges across, which was already async disk I/O. That is the cut, and
+the crate was already built for it: `fofoca-blobs` is separate, `BlobStore` is
+`?Send` precisely so a browser could implement it, and the blob layer weighs
+347 KB against the client's 7.4 MB.
+
+But the split is **deferred**, because a third option removes the need for it
+today. `IndexedDB` addresses records rather than offsets, is reachable from any
+scope, and measured linear both ways: 64 `MiB`/s write, 362 `MiB`/s read. That
+is 24× slower than a Worker's sync handles and 5–50× faster than a realistic
+WebRTC data channel, so on the seeding path it is not the bottleneck. Where the
+Worker would win is local work — hashing a whole file, exporting one.
+
+So [`IdbStore`](../../../crates/fofoca-blobs/src/idb.rs) is the browser backend,
+`OpfsStore` stays unused until the Worker lands, and the trait makes that a swap.
+
+**What was nearly built instead, and why not.** Main-thread OPFS looks viable
+until measured: `createWritable` is copy-on-write, so a 64 `KiB` patch costs a
+whole-file copy, and filling a file in pieces is O(n²) — about nine hours for a
+gigabyte. Worth stating precisely, because the quadratic is *one operation*.
+Sequential writes in a single session are linear at 566 `MiB`/s and random reads
+are flat at 2.45 ms regardless of file size. Only random-access writing is
+ruinous.
+
+That distinction is what produced [`sparse`](../../../crates/fofoca-blobs/src/sparse.rs):
+`decode_ranges` writes through `WriteAt` and `encode_ranges` reads through
+`ReadAt`, so a store that keeps pieces rather than files pays the file once
+rather than once per piece. It was built for `IndexedDB` and is not specific to
+it — it is what *any* store that cannot patch in place needs.
+
+### A copy must re-serve under the origin's secret, not its own
+
+Discovered late, and the whole difference between a swarm and a chain of
+unrelated shares.
+
+`agent-share serve` mints a fresh secret, and the mesh id is derived from it. So
+a mirror re-served the obvious way builds a **second** share: its own mesh, its
+own ticket, and no route from the original link to it. Every requirement about
+surviving the origin quietly fails — the bytes are there, on a peer nobody
+holding the link can find.
+
+So a mirror writes the secret it fetched under into its sidecar
+(`origin.secret`, mode 0600), and `serve` adopts it when it finds one. The copy
+lands on the same mesh, answers the same ticket, and shows up in the grid beside
+the origin. Nothing in the protocol had to move for this: `produce.rs`
+authenticates a read by comparing the secret and nothing else, which is the
+symmetry claim S0.2 tested.
+
+Two boundaries worth stating, because they are easy to blur:
+
+- **The endpoint key stays fresh.** The secret is the *share* capability; the
+  key is *this peer's identity*. Two peers sharing the latter would be a
+  different and much worse bug.
+- **The secret at rest is the read capability at rest.** Whoever ran the mirror
+  already had it — it came in the link they pasted — so this stores nothing new
+  to them. It does mean a mirror directory is exactly as sensitive as the link
+  that made it, and `origin.secret` is why.
+
+A truncated file is refused rather than padded. Adopting half a secret would put
+the peer on a mesh nobody else is on, which presents as a share that simply has
+no other peers: the worst kind of failure, because it looks like the network.
+
+### Known defect: the grid counts peers that have left
+
+Found while verifying the browser seeding UI, and left unfixed rather than
+half-fixed.
+
+The meta channel is a CRDT, and nothing deletes a peer's entry when it goes. A
+browser tab *cannot* — `ShareClient::leave_mesh` documents that the page is torn
+down before the departure broadcast runs. So the document accumulates every peer
+that has ever joined.
+
+That was harmless while a card was a display label. It stopped being harmless
+once cards carry `serving`, because the grid aggregates across peers to answer
+**"which slots would be lost if these peers went away"** — and a departed peer's
+slots make it answer *none*. Reloading one tab three times reproduced it: five
+availability rows against `2 on mesh`.
+
+**The obvious fix was tried and reverted.** Filtering the card book against
+`roster_snapshot()` made a *live* producer's card vanish — book and roster are
+fed by different events, so whichever lands second leaves the other stale, and a
+card that arrives before its roster entry is filtered out as a stranger with no
+later meta change to bring it back. Rebuilding on `on_tick` did not rescue it,
+and the reason the roster looked empty was not established.
+
+Showing a peer that is gone is a wrong answer; hiding a peer that is there is a
+worse one. So the ghost stays until the ordering is understood, pinned by
+`mount::mesh::tests::a_peer_that_left_is_still_listed` so it reads as a known
+defect rather than as intended behaviour. The real fix is probably to delete the
+departed peer's CRDT entry on `on_peer_left` rather than to filter on read.
+
 ### Two things this must not be mistaken for
 
 **The grid is advisory, not authoritative.** A painted cell means "that peer

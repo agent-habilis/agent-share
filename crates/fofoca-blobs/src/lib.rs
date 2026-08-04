@@ -52,19 +52,28 @@ use bao_tree::BlockSize;
 /// wasm-clean either way.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fs;
+/// The browser backend that needs no Worker. See the module docs.
+#[cfg(target_arch = "wasm32")]
+pub mod idb;
 pub mod mem;
 /// The browser backend. Worker-only; see the module docs.
 #[cfg(target_arch = "wasm32")]
 pub mod opfs;
 mod sidecar;
+pub mod sparse;
 mod verify;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs::FsStore;
+#[cfg(target_arch = "wasm32")]
+pub use idb::IdbStore;
 pub use mem::MemStore;
 #[cfg(target_arch = "wasm32")]
 pub use opfs::OpfsStore;
-pub use verify::{Outboard, Root, build_outboard, decode_into, encode_ranges};
+pub use sparse::SparseBlocks;
+pub use verify::{
+    Outboard, Root, build_outboard, decode_into, decode_sparse, encode_from_outboard, encode_ranges,
+};
 
 /// Re-exported so a caller can name a range set without depending on
 /// `bao-tree` directly.

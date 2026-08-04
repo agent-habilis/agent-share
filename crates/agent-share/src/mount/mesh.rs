@@ -113,6 +113,12 @@ type CardBook = Arc<Mutex<HashMap<String, PeerCard>>>;
 /// any manifest, and a producer's tree changes under `live.rs`'s rescan.
 type SharedTree = Arc<Mutex<Option<String>>>;
 
+/// Which slots we can serve, as [`agent_share_proto::serving`] encodes them.
+///
+/// Shared like [`SharedTree`] and for the same reason: a mirror's coverage
+/// changes as it fetches, so this cannot be fixed at join.
+type SharedServing = Arc<Mutex<Option<String>>>;
+
 /// What the outside world can ask the driver to do.
 ///
 /// The driver runs inside the engine's event loop, so this is the only way in.
@@ -133,6 +139,22 @@ pub(crate) enum ShareRequest {
 /// a new one; the endpoint id is the identity that a mount session can actually
 /// be addressed by. A peer occupying two nicknames therefore collapses to one
 /// entry, which is the desired reading: it is one peer.
+/// Cards from the meta document.
+///
+/// # Known defect: departed peers are not removed
+///
+/// The meta channel is a CRDT and nothing deletes a peer's entry when it goes
+/// — a browser tab *cannot*, because the page is torn down before a broadcast
+/// runs (see `ShareClient::leave_mesh`). So this returns every peer that has
+/// ever joined, and the availability grid counts a departed peer's slots as
+/// held. That makes "which slots would be lost" answer *none* when it should
+/// not. Reloading one tab three times reproduces it.
+///
+/// Filtering against `roster_snapshot()` was tried and reverted: the book and
+/// the roster are fed by different events, and with the filter in place a live
+/// producer's card disappeared entirely. Hiding a peer that is *there* is worse
+/// than showing one that is not, so the ghost stays until this is understood.
+/// See `a_peer_that_left_is_still_listed`.
 fn cards_from_meta(doc: &serde_json::Value) -> HashMap<String, PeerCard> {
     let mut cards = HashMap::new();
     let Some(peers) = doc.get("peers").and_then(serde_json::Value::as_object) else {
@@ -195,6 +217,8 @@ struct ShareDriver {
     role: Option<String>,
     /// The manifest fingerprint published on our card. See [`SharedTree`].
     tree: SharedTree,
+    /// Which slots we advertise. See [`SharedServing`].
+    serving: SharedServing,
     book: CardBook,
 }
 
@@ -205,6 +229,7 @@ impl ShareDriver {
         transport: String,
         role: Option<String>,
         tree: SharedTree,
+        serving: SharedServing,
         book: CardBook,
     ) -> Self {
         Self {
@@ -213,6 +238,7 @@ impl ShareDriver {
             transport,
             role,
             tree,
+            serving,
             book,
         }
     }
@@ -239,7 +265,8 @@ impl ShareDriver {
             &self.transport,
             self.role.clone(),
         )
-        .with_tree(self.tree.lock().ok().and_then(|tree| tree.clone()));
+        .with_tree(self.tree.lock().ok().and_then(|tree| tree.clone()))
+        .with_serving(self.serving.lock().ok().and_then(|serving| serving.clone()));
         let merge = serde_json::json!({
             "peers": {
                 ctx.author.as_str(): {
@@ -356,6 +383,7 @@ pub(crate) struct ShareMesh {
     node: Option<Node<ShareDriver>>,
     book: CardBook,
     tree: SharedTree,
+    serving: SharedServing,
     /// Our own endpoint id, so the roster breakdown can report *other* peers
     /// and agree with the count beside it, which already excludes self.
     local_endpoint: String,
@@ -400,6 +428,30 @@ impl ShareMesh {
         // than just slow.
         match node.send(ShareRequest::RepublishCard).await {
             Ok(()) => tracing::debug!("republished the share card with a new tree"),
+            Err(error) => tracing::debug!(%error, "republishing the share card failed"),
+        }
+    }
+
+    /// Publish which manifest slots this peer can serve.
+    ///
+    /// Idempotent by value like [`Self::set_tree`], and for the same reason: a
+    /// mirror recomputes this far more often than it changes, and a card
+    /// rewrite is a CRDT merge sent to every peer.
+    pub(crate) async fn set_serving(&self, encoded: Option<String>) {
+        {
+            let Ok(mut current) = self.serving.lock() else {
+                return;
+            };
+            if *current == encoded {
+                return;
+            }
+            *current = encoded;
+        }
+        let Some(node) = self.node.as_ref() else {
+            return;
+        };
+        match node.send(ShareRequest::RepublishCard).await {
+            Ok(()) => tracing::debug!("republished the share card with new availability"),
             Err(error) => tracing::debug!(%error, "republishing the share card failed"),
         }
     }
@@ -497,6 +549,9 @@ pub(crate) struct JoinOpts<'a> {
     /// join rather than needing a later republish. A peer whose tree then
     /// changes under it goes stale; see the note on [`ShareDriver`].
     pub(crate) tree: Option<String>,
+    /// Which slots this peer can serve at join, when it already knows. A
+    /// producer knows immediately; a mirror recomputes as it fetches.
+    pub(crate) serving: Option<String>,
     /// Must match the reach the injected endpoint was built with. A consumer
     /// run under `--transport webrtc` binds with IP cleared, so leaving the
     /// mesh on the default would have it advertise paths that do not exist.
@@ -516,6 +571,7 @@ pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
         protocols,
         role,
         tree,
+        serving,
         transports,
     } = opts;
     // Hash first, then derive: the engine carries the topic *string* into its
@@ -578,12 +634,14 @@ pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
     // its *mesh* traffic rides the same unicast plane the producer's does.
     let book: CardBook = Arc::new(Mutex::new(HashMap::new()));
     let tree: SharedTree = Arc::new(Mutex::new(tree));
+    let serving: SharedServing = Arc::new(Mutex::new(serving));
     let driver = ShareDriver::new(
         env!("CARGO_PKG_VERSION").to_owned(),
         "rust".to_owned(),
         "unicast".to_owned(),
         Some(role.as_card_str().to_owned()),
         Arc::clone(&tree),
+        Arc::clone(&serving),
         Arc::clone(&book),
     );
     // `handle_signals: false` is load-bearing, not a default. Registering
@@ -599,6 +657,7 @@ pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
         node: Some(node),
         book,
         tree,
+        serving,
         local_endpoint,
     })
 }
@@ -666,6 +725,35 @@ mod tests {
         let roster = cards_from_meta(&doc);
         assert_eq!(roster.len(), 1);
         assert!(roster.contains_key("endpoint-a"));
+    }
+
+    /// **Known defect, pinned so it is not mistaken for correct.**
+    ///
+    /// A departed peer stays in the roster this builds, because nothing deletes
+    /// its CRDT entry — a browser tab cannot even try, since the page is gone
+    /// before a broadcast can run. The availability grid then counts its slots
+    /// as held, so "which slots would be lost" answers *none* when it should
+    /// not. Three reloads of one tab reproduce it.
+    ///
+    /// Filtering against `roster_snapshot()` was tried and reverted: book and
+    /// roster are fed by different events, and the filter made a *live*
+    /// producer's card vanish. Hiding a peer that is there is worse than
+    /// showing one that is not.
+    ///
+    /// This test asserts today's behaviour so the defect is visible in the
+    /// suite. Invert it when the fix lands.
+    #[test]
+    fn a_peer_that_left_is_still_listed() {
+        let doc = meta_with(&[
+            ("alice", card("endpoint-a", Role::Producer)),
+            ("ghost", card("endpoint-gone", Role::Consumer)),
+        ]);
+        let roster = cards_from_meta(&doc);
+        assert_eq!(roster.len(), 2);
+        assert!(
+            roster.contains_key("endpoint-gone"),
+            "documenting the defect: a card left behind in the CRDT still reads as a peer"
+        );
     }
 
     /// The one that matters: a peer we cannot parse must cost us that peer, not
@@ -788,6 +876,7 @@ mod tests {
             protocols: Vec::new(),
             role,
             tree,
+            serving: None,
             transports: agent_habilis_mesh::net::TransportOpts::default(),
         })
         .await

@@ -4,9 +4,20 @@
  * Bun's HTML bundler inlines the wasm-bindgen JS glue but leaves the binary
  * as `new URL("…_bg.wasm", import.meta.url)` — copy it next to the chunks so
  * a static host serving `dist/` can resolve it.
+ *
+ * The binary is written under a content-addressed name so a CDN or browser
+ * cannot serve yesterday's build under today's URL. See
+ * `scripts/wasm-asset.ts`.
  */
 
+import { wasmAsset, writeWasmPath } from './scripts/wasm-asset.ts'
+
 await Bun.$`rm -rf dist`
+
+// Before the bundle: `src/wasm.ts` imports the generated path, so it has to be
+// correct on disk by the time Bun reads the entrypoints.
+const asset = await wasmAsset()
+await writeWasmPath(asset)
 
 const result = await Bun.build({
   entrypoints: ['./index.html', './lab/index.html'],
@@ -20,18 +31,9 @@ if (!result.success) {
   process.exit(1)
 }
 
-const wasmSrc = Bun.file(
-  '../crates/agent-share-wasm-client/dist/web/agent_share_wasm_client_bg.wasm',
-)
-if (!(await wasmSrc.exists())) {
-  console.error(
-    'wasm missing — run `cargo task web-wasm` before `bun run build`',
-  )
-  process.exit(1)
-}
-await Bun.write('./dist/agent_share_wasm_client_bg.wasm', wasmSrc)
+await Bun.write(`./dist/${asset.name}`, asset.bytes)
 
 for (const output of result.outputs) {
   console.log(`  ${output.path}`)
 }
-console.log('  dist/agent_share_wasm_client_bg.wasm')
+console.log(`  dist/${asset.name}`)

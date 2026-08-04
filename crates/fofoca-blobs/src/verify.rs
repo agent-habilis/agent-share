@@ -7,10 +7,13 @@
 
 use anyhow::{Context, Result};
 use bao_tree::io::outboard::PreOrderMemOutboard;
-use bao_tree::io::sync::{decode_ranges, encode_ranges_validated, valid_ranges};
+use bao_tree::io::sync::{
+    ReadAt, Size, WriteAt, decode_ranges, encode_ranges_validated, valid_ranges,
+};
 use bao_tree::{BaoTree, ChunkRanges};
 
 use crate::BLOCK_SIZE;
+use crate::sparse::SparseBlocks;
 
 /// A BLAKE3 root: the name of some content, and what every range verifies
 /// against.
@@ -42,6 +45,102 @@ pub fn encode_ranges(data: &[u8], ranges: &ChunkRanges) -> Result<Vec<u8>> {
     encode_ranges_validated(data, &outboard, ranges, &mut encoded)
         .context("encoding verified ranges")?;
     Ok(encoded)
+}
+
+/// Rebuild an outboard structure around stored outboard `bytes`.
+///
+/// The tree geometry is derived from `size` and [`BLOCK_SIZE`] rather than
+/// stored, so a mismatched block size shows up as a verification failure
+/// instead of silently reading the wrong node.
+fn outboard_for(root: Root, size: u64, bytes: Vec<u8>) -> PreOrderMemOutboard {
+    PreOrderMemOutboard {
+        root: blake3::Hash::from(root),
+        tree: BaoTree::new(size, BLOCK_SIZE),
+        data: bytes,
+    }
+}
+
+/// Encode `ranges` using an outboard already stored, reading only those ranges.
+///
+/// The difference from [`encode_ranges`] is asymptotic, not stylistic.
+/// `encode_ranges` rebuilds the outboard, so it must read every byte of the
+/// file to serve any part of it — turning "seed one 64 `KiB` range" into a
+/// whole-file read, and a peer that walks a file range by range into O(n²).
+/// This reads through [`ReadAt`], so a store backed by blocks touches only the
+/// blocks asked for.
+///
+/// The trade is that this **trusts local storage**. `encode_ranges` re-hashes
+/// as it goes and would catch bytes that rotted underneath us; this does not,
+/// so corruption here surfaces as a proof the *receiver* rejects. That is the
+/// right place for the check to live anyway — the receiver verifies against the
+/// root regardless of what any peer claims — and it is the only version that
+/// does not read the whole file to answer for a piece of it.
+///
+/// # Errors
+/// The data source cannot answer for `ranges`, or the outboard does not match.
+pub fn encode_from_outboard<D: ReadAt + Size>(
+    root: Root,
+    size: u64,
+    outboard: Vec<u8>,
+    data: D,
+    ranges: &ChunkRanges,
+) -> Result<Vec<u8>> {
+    let outboard = outboard_for(root, size, outboard);
+    let mut encoded = Vec::new();
+    bao_tree::io::sync::encode_ranges(data, &outboard, ranges, &mut encoded)
+        .context("encoding verified ranges from a stored outboard")?;
+    Ok(encoded)
+}
+
+/// Verify `encoded` against `root` into sparse blocks, without materializing
+/// the file.
+///
+/// The counterpart to [`encode_from_outboard`] on the write side, and the
+/// reason [`crate::sparse`] exists: [`decode_into`] sizes its target to the
+/// whole file on every call, so accepting a file in *n* pieces costs O(n²).
+/// `decode_ranges` writes through [`WriteAt`], so the pieces can go straight
+/// into the blocks they belong to.
+///
+/// Returns the ranges that verified, taken from what was actually written
+/// rather than from what was requested — a peer that sends less than it was
+/// asked for must not leave the store advertising the difference.
+///
+/// `outboard` is grown and filled in place. **It must be carried across calls
+/// and persisted**, because a verified stream is the only place its nodes come
+/// from: the stream proves its own hash path, and a store that throws those
+/// nodes away can never serve the range back. Backends that rebuild the
+/// outboard from the whole file on every read do not need this — a store that
+/// reads only the blocks it was asked for has nothing to rebuild from.
+///
+/// # Errors
+/// The stream does not verify against `root`, or is malformed. On failure
+/// `target` may hold partial blocks; callers discard it rather than commit it.
+pub fn decode_sparse(
+    root: Root,
+    size: u64,
+    encoded: &[u8],
+    ranges: &ChunkRanges,
+    target: &mut SparseBlocks,
+    outboard: &mut Outboard,
+) -> Result<ChunkRanges> {
+    let want = usize::try_from(BaoTree::new(size, BLOCK_SIZE).outboard_size())
+        .context("outboard too large")?;
+    if outboard.len() < want {
+        outboard.resize(want, 0);
+    }
+    let mut outboard_mem = outboard_for(root, size, std::mem::take(outboard));
+    let outcome = decode_ranges(
+        std::io::Cursor::new(encoded),
+        ranges,
+        &mut *target,
+        &mut outboard_mem,
+    );
+    // Hand the buffer back either way, so a caller that retries does not start
+    // from an empty outboard and lose the nodes an earlier call proved.
+    *outboard = outboard_mem.data;
+    outcome.context("verifying ranges against the root")?;
+    target.flush().context("closing out the written blocks")?;
+    Ok(target.written().clone())
 }
 
 /// Verify `encoded` against `root` and write what it proves into `target`.
@@ -100,7 +199,9 @@ pub fn decode_into(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_outboard, decode_into, encode_ranges};
+    use super::{build_outboard, decode_into, decode_sparse, encode_from_outboard, encode_ranges};
+    use crate::CHUNK_GROUP_BYTES;
+    use crate::sparse::SparseBlocks;
     use bao_tree::{ChunkNum, ChunkRanges};
 
     fn data(len: usize) -> Vec<u8> {
@@ -147,6 +248,125 @@ mod tests {
         assert_eq!(
             &target[64 * 1024..128 * 1024],
             &bytes[64 * 1024..128 * 1024]
+        );
+    }
+
+    /// **The claim that makes a block store viable: serving a piece reads a
+    /// piece.**
+    ///
+    /// Only the blocks covering the request are present — every other block is
+    /// a hole, and `SparseBlocks` errors on a hole rather than reading zeroes.
+    /// So this passing means the encoder genuinely never touched them. With
+    /// `encode_ranges` instead, which rebuilds the outboard from the whole
+    /// file, it could not.
+    #[test]
+    fn a_range_is_served_from_only_the_blocks_that_cover_it() {
+        let bytes = data(1 << 20);
+        let size = bytes.len() as u64;
+        let (root, outboard) = build_outboard(&bytes);
+        let window = ChunkRanges::from(ChunkNum(64)..ChunkNum(128));
+
+        let covering = SparseBlocks::blocks_covering(&window, size, CHUNK_GROUP_BYTES);
+        assert_eq!(covering.len(), 1, "one 64 KiB block of a 1 MiB file");
+        let held = SparseBlocks::from_blocks(
+            size,
+            CHUNK_GROUP_BYTES,
+            covering.iter().map(|index| {
+                let start = usize::try_from(index * CHUNK_GROUP_BYTES).expect("fits");
+                let end =
+                    (start + usize::try_from(CHUNK_GROUP_BYTES).expect("fits")).min(bytes.len());
+                (*index, bytes[start..end].to_vec())
+            }),
+        );
+
+        let encoded = encode_from_outboard(root, size, outboard, held, &window).expect("encode");
+
+        // And it verifies against the same root as the whole file.
+        let mut target = Vec::new();
+        decode_into(root, size, &encoded, &window, &mut target).expect("decode");
+        assert_eq!(&target[65_536..131_072], &bytes[65_536..131_072]);
+    }
+
+    /// **The quadratic, closed.** A file arriving in pieces must cost its own
+    /// size in total, not its size *per piece*.
+    ///
+    /// `decode_into` would size a buffer to the whole file on each of these
+    /// calls. This asserts the sparse path allocates only what it was handed:
+    /// after k pieces the store holds exactly k blocks, whatever the file's
+    /// size.
+    #[test]
+    fn a_file_arriving_in_pieces_allocates_only_the_pieces() {
+        let bytes = data(1 << 20);
+        let size = bytes.len() as u64;
+        let (root, _) = build_outboard(&bytes);
+
+        let mut sparse = SparseBlocks::empty(size, CHUNK_GROUP_BYTES);
+        let mut outboard = Vec::new();
+        let mut all = ChunkRanges::empty();
+        // 1 MiB in 64 KiB pieces, deliberately out of order: pieces come back
+        // from several peers at once, and nothing may depend on their order.
+        for step in [0u64, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15] {
+            let window = ChunkRanges::from(ChunkNum(step * 64)..ChunkNum(step * 64 + 64));
+            let encoded = encode_ranges(&bytes, &window).expect("encode");
+            let held = decode_sparse(root, size, &encoded, &window, &mut sparse, &mut outboard)
+                .expect("decode");
+            all |= window;
+            assert_eq!(held, all, "held must track exactly what has landed");
+        }
+        assert_eq!(sparse.blocks().len(), 16, "one block per piece, no more");
+
+        // And the reassembled file is the original, byte for byte.
+        let mut rebuilt = Vec::new();
+        for index in 0..16u64 {
+            rebuilt.extend_from_slice(&sparse.blocks()[&index]);
+        }
+        assert_eq!(rebuilt, bytes);
+    }
+
+    /// A peer that sends less than it was asked for must leave the store
+    /// advertising what arrived, not what was requested. Believing the request
+    /// is how a store comes to claim bytes it does not hold.
+    #[test]
+    fn a_short_answer_records_only_what_arrived() {
+        let bytes = data(1 << 20);
+        let size = bytes.len() as u64;
+        let (root, _) = build_outboard(&bytes);
+
+        let asked = ChunkRanges::from(ChunkNum(0)..ChunkNum(128));
+        let sent = ChunkRanges::from(ChunkNum(0)..ChunkNum(64));
+        let encoded = encode_ranges(&bytes, &sent).expect("encode");
+
+        let mut sparse = SparseBlocks::empty(size, CHUNK_GROUP_BYTES);
+        let mut outboard = Vec::new();
+        let held =
+            decode_sparse(root, size, &encoded, &sent, &mut sparse, &mut outboard).expect("decode");
+        assert_eq!(held, sent);
+        assert!(
+            !asked.is_subset(&held),
+            "the store must not claim the half it never received"
+        );
+    }
+
+    /// The trust boundary, restated for the sparse path: `encode_from_outboard`
+    /// does not re-hash, so a corrupted local block produces a proof the
+    /// *receiver* rejects. The bytes must never be accepted as good.
+    #[test]
+    fn a_corrupted_local_block_fails_on_the_receiver() {
+        let bytes = data(1 << 20);
+        let size = bytes.len() as u64;
+        let (root, outboard) = build_outboard(&bytes);
+        let window = ChunkRanges::from(ChunkNum(0)..ChunkNum(64));
+
+        let mut block = bytes[..65_536].to_vec();
+        block[17] ^= 0xff;
+        let rotted = SparseBlocks::from_blocks(size, CHUNK_GROUP_BYTES, [(0u64, block)]);
+
+        let encoded =
+            encode_from_outboard(root, size, outboard, rotted, &window).expect("encodes happily");
+        let mut target = Vec::new();
+        assert!(
+            decode_into(root, size, &encoded, &window, &mut target).is_err(),
+            "the receiver must reject bytes that do not match the root"
         );
     }
 

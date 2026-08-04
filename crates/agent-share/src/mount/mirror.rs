@@ -50,6 +50,45 @@ struct Tally {
     /// hash cache says this about everything, and the copy is still correct —
     /// it just cannot be *proved* correct from here.
     unverified: usize,
+    /// Files a `--only` filter left behind.
+    skipped: usize,
+}
+
+/// Filename holding the origin's manifest bytes inside the sidecar.
+pub(super) const ORIGIN_MANIFEST: &str = "origin.manifest";
+
+/// Filename holding the share secret this copy belongs to.
+///
+/// **Why a mirror keeps the secret.** Serving a copy under a *fresh* secret
+/// would make a second, unrelated share: a different mesh, a different ticket,
+/// and nobody holding the original link would ever find it. Re-serving under the
+/// origin's secret is what makes a mirror an additional *source for the same
+/// share* — the thing a swarm is.
+///
+/// The protocol already allows this and needs no new code for it: a producer
+/// authenticates a read by comparing the secret and nothing else, with no
+/// binding to who is serving. That is asserted by
+/// `mount::tests::a_non_origin_peer_serves_the_origins_ticket_secret`.
+///
+/// It is the read capability at rest, so it is written with owner-only
+/// permissions. Whoever ran the mirror already holds it — it came in the ticket
+/// they pasted — so this stores nothing they did not have. It does mean a
+/// mirror directory is as sensitive as the link that made it.
+pub(super) const ORIGIN_SECRET: &str = "origin.secret";
+
+/// Whether `rel_path` was asked for.
+///
+/// An empty filter means everything, so the ordinary whole-share mirror needs
+/// no special case. A filter entry matches the file itself or any file beneath
+/// it, so naming a directory takes the directory.
+fn wanted(only: &[String], rel_path: &str) -> bool {
+    if only.is_empty() {
+        return true;
+    }
+    only.iter().any(|want| {
+        let want = want.trim_matches('/');
+        rel_path == want || rel_path.starts_with(&format!("{want}/"))
+    })
 }
 
 /// Copy every file in the share behind `ticket` into `dest`.
@@ -57,13 +96,37 @@ struct Tally {
 /// # Errors
 /// The ticket does not decode, the share is unreachable, `dest` cannot be
 /// written, or a file fails to verify against the root the origin published.
-pub(crate) async fn mirror(ticket: &str, dest: &Path, json: bool) -> Result<()> {
+pub(crate) async fn mirror(ticket: &str, dest: &Path, only: &[String], json: bool) -> Result<()> {
     let ticket = MountTicket::decode(ticket)?;
+    // Kept so the copy can be re-served as a source for *this* share rather
+    // than as a new one. See `ORIGIN_SECRET`.
+    let secret = ticket.secret;
     let endpoint = build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false).await?;
     add_peer_addr(&endpoint, ticket.addr.clone())?;
     let client = RemoteClient::new(endpoint.clone(), ticket);
 
-    let manifest = client.fetch_manifest().await?;
+    // Whatever happens below, close the endpoint. Dropping it instead aborts
+    // ungracefully and prints an iroh error over the top of ours, which buries
+    // the reason a mirror actually failed.
+    let outcome = copy_all(&client, dest, only, secret, json).await;
+    endpoint.close().await;
+    let tally = outcome?;
+    report(&tally, dest, json);
+    Ok(())
+}
+
+/// The body of a mirror, so its caller can close the endpoint either way.
+async fn copy_all(
+    client: &RemoteClient,
+    dest: &Path,
+    only: &[String],
+    secret: [u8; agent_share_proto::framing::SECRET_LEN],
+    json: bool,
+) -> Result<Tally> {
+    // The *bytes*, not just the decoded struct. A mirror re-serves these
+    // verbatim so its indices stay the origin's — see `LiveTree::mirrored`.
+    let manifest_bytes = client.fetch_manifest_bytes().await?;
+    let manifest = agent_share_proto::manifest::MountManifest::decode(&manifest_bytes)?;
     std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
 
     // Directories first, and *all* of them: the manifest lists every directory
@@ -76,7 +139,15 @@ pub(crate) async fn mirror(ticket: &str, dest: &Path, json: bool) -> Result<()> 
 
     // The store lives *beside* the copy, not inside it, so `agent-share serve`
     // on the destination shares the user's files and not our bookkeeping.
-    let store = FsStore::open(sidecar_dir(dest)).context("opening the mirror's hash store")?;
+    let sidecar = sidecar_dir(dest);
+    let store = FsStore::open(&sidecar).context("opening the mirror's hash store")?;
+    // Kept so `serve` can re-serve the origin's manifest rather than deriving
+    // one from this directory. Written before any byte is fetched, so even an
+    // interrupted mirror is re-servable for what it did get.
+    std::fs::create_dir_all(&sidecar).with_context(|| format!("creating {}", sidecar.display()))?;
+    std::fs::write(sidecar.join(ORIGIN_MANIFEST), &manifest_bytes)
+        .context("recording the origin manifest")?;
+    write_secret(&sidecar.join(ORIGIN_SECRET), &secret).context("recording the share secret")?;
 
     let mut tally = Tally::default();
     for (index, file) in manifest.files.iter().enumerate() {
@@ -85,14 +156,30 @@ pub(crate) async fn mirror(ticket: &str, dest: &Path, json: bool) -> Result<()> 
         if file.is_tombstone() {
             continue;
         }
+        // On-demand: fetch only what was asked for. A peer that wants one file
+        // out of a thousand takes one file, and can then seed that one — the
+        // manifest it re-serves still describes the whole tree, with the rest
+        // answered as "not here".
+        if !wanted(only, &file.rel_path) {
+            tally.skipped += 1;
+            continue;
+        }
         let index = u32::try_from(index).context("manifest index fits u32")?;
         let path = safe_join(dest, &file.rel_path)?;
         if !json {
             crate::util::output::status("Fetching", &file.rel_path);
         }
-        let bytes = fetch_whole(&client, index, file.size).await?;
+        let bytes = fetch_whole(client, index, file.size)
+            .await
+            .with_context(|| {
+                format!(
+                    "{} is listed in the manifest but this peer would not serve it \
+                 (a partial mirror holds only some of a share)",
+                    file.rel_path
+                )
+            })?;
         write_file(&path, &bytes)?;
-        let verified = record(&store, &client, index, &path, &bytes).await?;
+        let verified = record(&store, client, index, &path, &bytes).await?;
 
         tally.files += 1;
         tally.bytes += bytes.len() as u64;
@@ -103,9 +190,7 @@ pub(crate) async fn mirror(ticket: &str, dest: &Path, json: bool) -> Result<()> 
         }
     }
 
-    endpoint.close().await;
-    report(&tally, dest, json);
-    Ok(())
+    Ok(tally)
 }
 
 /// Where a mirror keeps what it knows about the copy.
@@ -121,6 +206,42 @@ fn sidecar_dir(dest: &Path) -> PathBuf {
     dest.parent()
         .unwrap_or(Path::new("."))
         .join(format!(".{name}.agent-share"))
+}
+
+/// Write a secret with owner-only permissions.
+fn write_secret(path: &Path, secret: &[u8]) -> Result<()> {
+    std::fs::write(path, secret).with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // 0600. The read capability should not be world-readable just because
+        // it happens to live in a cache directory.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// The share secret a mirror left beside `root`, if this directory is one.
+///
+/// Serving with this rather than a fresh secret is what puts the copy on the
+/// *same* mesh as the origin, answering the *same* ticket — so every holder of
+/// the original link gains a source without being told anything.
+pub(super) fn origin_secret_for(
+    root: &Path,
+) -> Option<[u8; agent_share_proto::framing::SECRET_LEN]> {
+    let bytes = std::fs::read(sidecar_dir(root).join(ORIGIN_SECRET)).ok()?;
+    bytes.try_into().ok()
+}
+
+/// The origin's manifest bytes a mirror left beside `root`, if this directory
+/// is one.
+///
+/// Presence of this file is what distinguishes a mirror from an ordinary
+/// directory, and it is why `serve` does not need a flag: a copy knows what it
+/// is a copy of.
+pub(super) fn origin_manifest_for(root: &Path) -> Option<Vec<u8>> {
+    std::fs::read(sidecar_dir(root).join(ORIGIN_MANIFEST)).ok()
 }
 
 /// Read a whole file over `OP_READ`, one capped chunk at a time.
@@ -218,10 +339,15 @@ fn report(tally: &Tally, dest: &Path, json: bool) {
         println!("agent-share serve {}", dest.display());
         return;
     }
+    let skipped = if tally.skipped == 0 {
+        String::new()
+    } else {
+        format!(", {} not requested", tally.skipped)
+    };
     crate::util::output::status_out(
         "Mirrored",
         &format!(
-            "{} files, {} — {} verified against the origin, {} unverified",
+            "{} files, {} — {} verified against the origin, {} unverified{skipped}",
             tally.files,
             human_bytes(tally.bytes),
             tally.verified,
@@ -239,8 +365,86 @@ fn report(tally: &Tally, dest: &Path, json: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_join, sidecar_dir};
+    use super::{ORIGIN_SECRET, origin_secret_for, safe_join, sidecar_dir, write_secret};
     use std::path::Path;
+
+    use super::wanted;
+
+    /// **The property that makes a copy a source rather than a rival share.**
+    ///
+    /// Serving under a freshly minted secret would build a second mesh with a
+    /// second ticket, and nobody holding the original link would ever find it.
+    /// `produce::serve` reads this back and adopts it, which is why a mirror
+    /// re-seeds the share it came from.
+    #[test]
+    fn a_mirror_hands_its_secret_back_to_serve() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-share-secret-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let sidecar = sidecar_dir(&root);
+        std::fs::create_dir_all(&sidecar).expect("sidecar");
+
+        assert_eq!(
+            origin_secret_for(&root),
+            None,
+            "a directory nobody mirrored has no secret to adopt"
+        );
+
+        let secret = [7u8; agent_share_proto::framing::SECRET_LEN];
+        write_secret(&sidecar.join(ORIGIN_SECRET), &secret).expect("write");
+        assert_eq!(origin_secret_for(&root), Some(secret));
+
+        // It is the read capability at rest. A cache directory is no reason for
+        // it to be world-readable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(sidecar.join(ORIGIN_SECRET))
+                .expect("stat")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "the secret must not be group/world readable"
+            );
+        }
+
+        // A truncated file is not half a secret, it is not a secret. Adopting
+        // one would put this peer on a mesh nobody else is on, which looks like
+        // a share that simply has no other peers.
+        std::fs::write(sidecar.join(ORIGIN_SECRET), b"short").expect("truncate");
+        assert_eq!(origin_secret_for(&root), None);
+
+        let _ = std::fs::remove_dir_all(&sidecar);
+    }
+
+    #[test]
+    fn an_empty_filter_takes_everything() {
+        assert!(wanted(&[], "a.txt"));
+        assert!(wanted(&[], "docs/deep/guide.md"));
+    }
+
+    #[test]
+    fn a_filter_takes_the_named_file_and_nothing_else() {
+        let only = vec!["docs/big.bin".to_owned()];
+        assert!(wanted(&only, "docs/big.bin"));
+        assert!(!wanted(&only, "a.txt"));
+        // A prefix that is not a path boundary must not match, or `--only docs`
+        // would quietly take `docsbackup/` too.
+        assert!(!wanted(&only, "docs/big.bin.bak"));
+    }
+
+    #[test]
+    fn naming_a_directory_takes_what_is_under_it() {
+        let only = vec!["docs".to_owned()];
+        assert!(wanted(&only, "docs/guide.md"));
+        assert!(wanted(&only, "docs/deep/nested.md"));
+        assert!(!wanted(&only, "docsbackup/guide.md"));
+        assert!(!wanted(&only, "a.txt"));
+    }
 
     #[test]
     fn an_ordinary_path_joins_under_the_destination() {

@@ -6,6 +6,8 @@
  * (share routes like `/files/<ticket>`) fall back to the SPA `index.html`.
  */
 
+import { wasmAsset } from './scripts/wasm-asset.ts'
+
 const ROOT = new URL('./dist/', import.meta.url)
 
 function distFile(pathname: string) {
@@ -15,6 +17,17 @@ function distFile(pathname: string) {
 const distIndex = distFile('/index.html')
 if (!(await distIndex.exists())) {
   console.error('dist/ missing — run `bun run build` first')
+  process.exit(1)
+}
+
+// The binary in `dist/` must be the one the current crate build produced.
+// Serving a `dist/` built against an older wasm is exactly the failure the
+// content-addressed name exists to prevent, so say so rather than serve it.
+const asset = await wasmAsset()
+if (!(await distFile(asset.path).exists())) {
+  console.error(
+    `dist/ has no ${asset.name} — the wasm changed since \`bun run build\`; rebuild`,
+  )
   process.exit(1)
 }
 

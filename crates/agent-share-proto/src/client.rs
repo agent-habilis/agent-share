@@ -35,6 +35,12 @@ pub const CARD_ROLE: &str = "role";
 /// disagree are not interchangeable as sources, because a `READ` addresses a
 /// file by its position in the manifest and those positions have diverged.
 pub const CARD_TREE: &str = "tree";
+/// Meta-card field: which manifest slots this peer can serve, when known.
+///
+/// See [`crate::serving`]. `"*"` for every live slot, else sorted run-length
+/// ranges. Absent means *cannot vouch* — a peer that has not worked it out, or
+/// one whose availability was too scattered to fit the frame.
+pub const CARD_SERVING: &str = "serving";
 
 /// Structured identity written to `/peers/<nick>/card`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +63,12 @@ pub struct PeerCard {
     /// tree*, so it is not a candidate source — but it is not an error either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree: Option<String>,
+    /// Which manifest slots this peer can serve, when it knows.
+    ///
+    /// Only meaningful alongside a matching [`Self::tree`]: an index means
+    /// nothing without agreeing which manifest it indexes into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving: Option<String>,
 }
 
 impl PeerCard {
@@ -82,6 +94,7 @@ impl PeerCard {
             client,
             role,
             tree: None,
+            serving: None,
         }
     }
 
@@ -93,6 +106,13 @@ impl PeerCard {
     #[must_use]
     pub fn with_tree(mut self, tree: Option<String>) -> Self {
         self.tree = tree;
+        self
+    }
+
+    /// Set which slots this peer can serve. See [`crate::serving`].
+    #[must_use]
+    pub fn with_serving(mut self, serving: Option<String>) -> Self {
+        self.serving = serving;
         self
     }
 
@@ -138,6 +158,12 @@ impl PeerCard {
             map.insert(
                 CARD_TREE.to_owned(),
                 serde_json::Value::String(tree.clone()),
+            );
+        }
+        if let Some(serving) = &self.serving {
+            map.insert(
+                CARD_SERVING.to_owned(),
+                serde_json::Value::String(serving.clone()),
             );
         }
         serde_json::Value::Object(map)
@@ -188,6 +214,10 @@ impl PeerCard {
             .get(CARD_TREE)
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
+        let serving = value
+            .get(CARD_SERVING)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         Some(Self {
             endpoint,
             app,
@@ -197,6 +227,7 @@ impl PeerCard {
             client,
             role,
             tree,
+            serving,
         })
     }
 }

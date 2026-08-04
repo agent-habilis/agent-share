@@ -46,30 +46,55 @@ pub(crate) async fn serve(
     if !root.is_dir() {
         bail!("mount serves a directory, not a single file");
     }
-    let (manifest, paths) = super::scan::scan(&root)?;
-    let file_count = manifest.files.len();
-    let total_bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
-    let encoded_len = manifest.encode().len();
-    // Enforce the consumer-side cap here too: past it, every redeem would
-    // abort with "manifest too large" — fail at serve time with a reason
-    // instead of minting a ticket nobody can use.
-    if encoded_len > usize::try_from(super::MAX_MANIFEST_BYTES).expect("u32 fits usize") {
-        bail!(
-            "tree too large to serve: the manifest is {} for {file_count} files (cap {})",
-            human_bytes(u64::try_from(encoded_len).expect("usize fits u64")),
-            human_bytes(u64::from(super::MAX_MANIFEST_BYTES))
+    // A directory a mirror produced carries the origin's manifest beside it.
+    // Re-serving those bytes rather than scanning is what keeps every index
+    // meaning what the origin says it means — and what lets a *partial* mirror
+    // serve at all, since a scan of a half-copy would renumber every slot after
+    // the first missing file.
+    // Adopted below so the copy joins the share it came from instead of
+    // starting a rival one. See `bind`.
+    let inherited_secret = super::mirror::origin_secret_for(&root);
+    let (tree, description) = if let Some(origin_bytes) = super::mirror::origin_manifest_for(&root)
+    {
+        let tree = Arc::new(LiveTree::mirrored(root.clone(), origin_bytes)?);
+        let (held, total) = tree.coverage();
+        let description = format!(
+            "{} (re-seeding another share: {held} of {total} files held, read-only)",
+            root.display()
         );
-    }
-    let tree = Arc::new(LiveTree::new(root.clone(), manifest, paths));
-    // A watcher that cannot start is not fatal: the share still serves, it
-    // just serves the startup snapshot. Losing the whole share over it would
-    // be a worse trade than losing liveness.
-    if let Err(error) = super::live::spawn_watcher(Arc::clone(&tree)) {
-        tracing::warn!(%error, "watching the tree failed; serving a fixed snapshot");
-    }
+        (tree, description)
+    } else {
+        let (manifest, paths) = super::scan::scan(&root)?;
+        let file_count = manifest.files.len();
+        let total_bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
+        let encoded_len = manifest.encode().len();
+        // Enforce the consumer-side cap here too: past it, every redeem
+        // would abort with "manifest too large" — fail at serve time with a
+        // reason instead of minting a ticket nobody can use.
+        if encoded_len > usize::try_from(super::MAX_MANIFEST_BYTES).expect("u32 fits usize") {
+            bail!(
+                "tree too large to serve: the manifest is {} for {file_count} files (cap {})",
+                human_bytes(u64::try_from(encoded_len).expect("usize fits u64")),
+                human_bytes(u64::from(super::MAX_MANIFEST_BYTES))
+            );
+        }
+        let tree = Arc::new(LiveTree::new(root.clone(), manifest, paths));
+        // A watcher that cannot start is not fatal: the share still serves,
+        // it just serves the startup snapshot. Losing the whole share over
+        // it would be a worse trade than losing liveness.
+        if let Err(error) = super::live::spawn_watcher(Arc::clone(&tree)) {
+            tracing::warn!(%error, "watching the tree failed; serving a fixed snapshot");
+        }
+        let description = format!(
+            "{} ({file_count} files, {}, read-only)",
+            root.display(),
+            human_bytes(total_bytes)
+        );
+        (tree, description)
+    };
 
     let lookups = resolve_transfer_lookups(swarm, flags)?;
-    let (endpoint, ticket, secret, webrtc) = bind(lookups).await?;
+    let (endpoint, ticket, secret, webrtc) = bind(lookups, inherited_secret).await?;
 
     let hashes = open_hash_cache(&secret);
 
@@ -79,11 +104,7 @@ pub(crate) async fn serve(
     let mount_hint = super::shell_word(".");
     super::announce(
         json,
-        &format!(
-            "{} ({file_count} files, {}, read-only)",
-            root.display(),
-            human_bytes(total_bytes)
-        ),
+        &description,
         &format!("agent-share {} {mount_hint}", ticket.encode()),
     );
 
@@ -118,6 +139,10 @@ pub(crate) async fn serve(
         tree: Some(agent_share_proto::manifest::manifest_fingerprint(
             &tree.manifest_bytes(),
         )),
+        // What this peer can actually hand over. An origin holds everything; a
+        // mirror serving a partial copy holds a subset, and says so rather than
+        // letting readers discover the gaps by asking.
+        serving: tree.serving(),
         // The producer never clears IP: it is the peer everyone else dials.
         transports: agent_habilis_mesh::net::TransportOpts::default(),
     })
@@ -163,6 +188,14 @@ pub(crate) async fn serve(
                                 &tree.manifest_bytes(),
                             ))
                             .await;
+                            // Availability moves for the same reasons the tree
+                            // does — a file appearing or vanishing under the
+                            // watcher, and a partial mirror filling in. A stale
+                            // grid is the same failure as a stale fingerprint:
+                            // it sends readers to a peer that cannot answer.
+                            // Both dedupe by value, so a rescan that changed
+                            // nothing costs no gossip.
+                            mesh.set_serving(tree.serving()).await;
                         }
                         Err(RecvError::Closed) => {
                             // The watcher is gone; the share still serves.
@@ -241,8 +274,18 @@ fn open_hash_cache(secret: &[u8; SECRET_LEN]) -> Option<Arc<super::hash::HashCac
 /// signal exchange that lets a peer with no IP path to us negotiate a data
 /// channel first. The `WebRtcHandle` comes back so the accept loop can attach
 /// negotiated sessions to it.
+/// `inherited` is `Some` when serving a directory a mirror produced. Minting a
+/// fresh secret there would build a *second* share: its own mesh id, its own
+/// ticket, and no way for anyone holding the original link to discover it.
+/// Adopting the origin's secret is what makes a copy an extra source for the
+/// share it came from — the peers already looking for it find it, and the link
+/// they were given keeps working after the origin is gone.
+///
+/// The endpoint key is still fresh. The secret is the *share* capability, not
+/// this peer's identity, and two peers must never share the latter.
 pub(super) async fn bind(
     lookups: LookupOpts,
+    inherited: Option<[u8; SECRET_LEN]>,
 ) -> Result<(Endpoint, MountTicket, [u8; SECRET_LEN], WebRtcHandle)> {
     // Chicken and egg: the transport advertises `custom_addr(local_id)` as the
     // address peers dial it on, so it has to know the endpoint's identity —
@@ -271,8 +314,11 @@ pub(super) async fn bind(
     if !lookups.is_loopback() {
         wait_online(&endpoint).await;
     }
-    let mut secret = [0u8; SECRET_LEN];
-    rand::rng().fill_bytes(&mut secret);
+    let secret = inherited.unwrap_or_else(|| {
+        let mut minted = [0u8; SECRET_LEN];
+        rand::rng().fill_bytes(&mut minted);
+        minted
+    });
     let ticket = MountTicket {
         addr: endpoint.addr(),
         secret,

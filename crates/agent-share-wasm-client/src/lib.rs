@@ -30,13 +30,16 @@
 //! mount bytes; under `webrtc` it fails loudly.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+
+use fofoca_blobs::{BlobStore, FileId, IdbStore, extent_of};
 use std::sync::Arc;
 
 use agent_share_proto::framing::{
     self, BENCH_ECHO_INTERVAL_SECS, DEFAULT_BENCH_DURATION_SECS, MAX_BENCH_ECHO_BYTES,
-    MAX_BENCH_FILL_BYTES, MAX_MANIFEST_BYTES, MOUNT_ALPN, SECRET_LEN, WEBRTC_SIGNAL_ALPN,
+    MAX_BENCH_FILL_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, SECRET_LEN,
+    WEBRTC_SIGNAL_ALPN,
 };
 use agent_share_proto::lookup::{LookupOpts, RelayChoice};
 use agent_share_proto::manifest::{ManifestDelta, MountManifest};
@@ -157,6 +160,20 @@ pub struct ShareClient {
     /// could not be joined; the share itself still works, so this is never
     /// allowed to fail a connect.
     mesh: Option<mesh::MeshPeer>,
+    /// Bytes this tab holds, and can therefore seed.
+    ///
+    /// Opened on the first sync rather than at connect: a tab that only browses
+    /// should not create a database, and `IndexedDB` can be refused outright in
+    /// private mode — which must cost seeding, never the share.
+    store: RefCell<Option<Rc<IdbStore>>>,
+    /// Manifest indices fully held, so the UI can mark what is seedable and the
+    /// card can advertise it.
+    ///
+    /// Indices rather than paths because that is what a `READ` addresses and
+    /// what the availability grid paints. Recomputed from the store rather than
+    /// accumulated, so a reload shows what actually survived instead of what
+    /// this session happened to fetch.
+    held: RefCell<BTreeSet<u32>>,
 }
 
 fn new_share_client(
@@ -184,6 +201,8 @@ fn new_share_client(
         mesh_endpoint,
         _endpoint: endpoint,
         mesh: None,
+        store: RefCell::new(None),
+        held: RefCell::new(BTreeSet::new()),
     }
 }
 
@@ -392,6 +411,16 @@ impl ShareClient {
     /// # Errors
     /// The producer refuses the request or the manifest does not decode.
     pub async fn manifest(&self) -> Result<JsValue, JsValue> {
+        let (_, manifest) = self.fetch_manifest().await?;
+        serde_wasm(&manifest)
+    }
+
+    /// The manifest, and the exact bytes it was decoded from.
+    ///
+    /// The bytes matter separately from the struct: the tree fingerprint is
+    /// taken over what the producer actually served, so both sides hash the
+    /// same thing rather than trusting a re-encode to be canonical.
+    async fn fetch_manifest(&self) -> Result<(Vec<u8>, MountManifest), JsValue> {
         let (mut send, mut recv) = self
             .connection
             .open_bi()
@@ -411,13 +440,11 @@ impl ShareClient {
             MountManifest::decode(&bytes).map_err(|error| err("decode manifest", &error))?;
         // The card could not carry a tree at join — `join_share` runs from the
         // constructor, before this — so publish it now that we know one.
-        // Fingerprinted over the bytes the producer served, not a re-encode of
-        // the struct, so both sides hash the same thing.
         if let Some(mesh) = self.mesh.as_ref() {
             mesh.set_tree(agent_share_proto::manifest::manifest_fingerprint(&bytes))
                 .await;
         }
-        serde_wasm(&manifest)
+        Ok((bytes, manifest))
     }
 
     /// Follow the share as it changes, calling `on_manifest` with the whole
@@ -482,6 +509,227 @@ impl ShareClient {
             .await
             .map_err(|error| err("read body", &error))?;
         Ok(data)
+    }
+
+
+    /// Fetch bytes into local storage so this tab can seed them.
+    ///
+    /// `only` names paths to take — a file, or a directory and everything under
+    /// it. Omit it for the whole share. Everything already held is skipped, so
+    /// calling this twice costs one manifest fetch.
+    ///
+    /// Returns `{ files, bytes, verified, unverified, skipped, held }`.
+    ///
+    /// # What "verified" means, and why unverified is not a failure
+    ///
+    /// The root comes from the **origin**, over the connection already
+    /// authenticated to the ticket's endpoint id, and the bytes are hashed here
+    /// and compared against it. A mismatch is fatal for that file: the bytes
+    /// were altered in flight, or the origin is serving content it did not
+    /// hash.
+    ///
+    /// An origin that cannot vouch for an index answers "no hash" rather than
+    /// lying, and that is ordinary — it keeps the cache lazily. The copy stands
+    /// and is seedable; it simply is not provable from here. Refusing to store
+    /// it would make seeding depend on a cache the origin is free not to keep.
+    ///
+    /// # Errors
+    /// The manifest cannot be fetched, storage is unavailable, or a file's
+    /// bytes do not match the root the origin published.
+    pub async fn sync(&self, only: Option<Vec<String>>) -> Result<JsValue, JsValue> {
+        let (bytes, manifest) = self.fetch_manifest().await?;
+        let store = self.open_store().await?;
+        let only = only.unwrap_or_default();
+
+        let mut files = 0u32;
+        let mut total = 0u64;
+        let mut verified = 0u32;
+        let mut unverified = 0u32;
+        let mut skipped = 0u32;
+
+        for (index, entry) in manifest.files.iter().enumerate() {
+            // A tombstone holds a slot open so later indices keep meaning what
+            // they meant. There is nothing to fetch.
+            if entry.is_tombstone() {
+                continue;
+            }
+            if !wanted(&only, &entry.rel_path) {
+                skipped += 1;
+                continue;
+            }
+            let index = u32::try_from(index).map_err(|_| JsValue::from_str("index over u32"))?;
+            let file = file_id(entry);
+            if is_held(store.as_ref(), &file).await {
+                skipped += 1;
+                self.held.borrow_mut().insert(index);
+                continue;
+            }
+
+            let body = self.read_whole(index, entry.size).await?;
+            let ours = store
+                .insert_complete(&file, &body)
+                .await
+                .map_err(|error| err("storing a file", &error))?;
+            match self.fetch_hash(index).await? {
+                Some(theirs) if theirs != ours => {
+                    return Err(JsValue::from_str(&format!(
+                        "{} does not match the origin: the bytes were altered in transit, \
+                         or the origin is serving content it did not hash",
+                        entry.rel_path
+                    )));
+                }
+                Some(_) => verified += 1,
+                None => unverified += 1,
+            }
+            self.held.borrow_mut().insert(index);
+            files += 1;
+            total += body.len() as u64;
+        }
+
+        self.publish_serving(&bytes, &manifest).await;
+
+        let out = serde_json::json!({
+            "files": files,
+            "bytes": total,
+            "verified": verified,
+            "unverified": unverified,
+            "skipped": skipped,
+            "held": self.held.borrow().len(),
+        });
+        js_sys::JSON::parse(&out.to_string()).map_err(|error| JsValue::from(error))
+    }
+
+    /// Manifest indices this tab holds in full, and can seed.
+    #[must_use]
+    #[wasm_bindgen(getter)]
+    pub fn held(&self) -> Vec<u32> {
+        self.held.borrow().iter().copied().collect()
+    }
+
+    /// Recompute what is held from storage, and republish it.
+    ///
+    /// Called on mount so a reload shows what survived rather than an empty
+    /// grid. Never fails: a tab with no store simply holds nothing.
+    pub async fn refresh_held(&self) -> Result<(), JsValue> {
+        let Ok((bytes, manifest)) = self.fetch_manifest().await else {
+            return Ok(());
+        };
+        // Deliberately does *not* create a database — only adopts one already
+        // there. Browsing a share must not leave storage behind.
+        let Ok(store) = IdbStore::open(&self.store_name()).await else {
+            return Ok(());
+        };
+        let mut held = BTreeSet::new();
+        for (index, entry) in manifest.files.iter().enumerate() {
+            if entry.is_tombstone() {
+                continue;
+            }
+            if is_held(&store, &file_id(entry)).await
+                && let Ok(index) = u32::try_from(index)
+            {
+                held.insert(index);
+            }
+        }
+        *self.held.borrow_mut() = held;
+        *self.store.borrow_mut() = Some(Rc::new(store));
+        self.publish_serving(&bytes, &manifest).await;
+        Ok(())
+    }
+
+    /// Where this share's blocks live.
+    ///
+    /// Keyed by the mesh id, which is a one-way hash of the secret — so two
+    /// shares never share a database, and the secret itself never reaches a
+    /// name that storage inspectors or `about:` pages would display.
+    fn store_name(&self) -> String {
+        format!(
+            "agent-share/{}",
+            &agent_share_proto::mesh_key::share_mesh_key(&self.secret)[..16]
+        )
+    }
+
+    async fn open_store(&self) -> Result<Rc<IdbStore>, JsValue> {
+        if let Some(store) = self.store.borrow().as_ref() {
+            return Ok(Rc::clone(store));
+        }
+        let store = Rc::new(
+            IdbStore::open(&self.store_name())
+                .await
+                .map_err(|error| err("opening local storage", &error))?,
+        );
+        *self.store.borrow_mut() = Some(Rc::clone(&store));
+        Ok(store)
+    }
+
+    /// Tell the mesh which slots this tab can serve.
+    ///
+    /// Both fields together: an index means nothing without agreeing which
+    /// manifest it indexes into, so a `serving` set published against the wrong
+    /// tree would send readers to the wrong files.
+    async fn publish_serving(&self, manifest_bytes: &[u8], manifest: &MountManifest) {
+        let Some(mesh) = self.mesh.as_ref() else {
+            return;
+        };
+        mesh.set_tree(agent_share_proto::manifest::manifest_fingerprint(
+            manifest_bytes,
+        ))
+        .await;
+        let held: Vec<u32> = self.held.borrow().iter().copied().collect();
+        mesh.set_serving(agent_share_proto::serving::encode_serving(
+            &held,
+            manifest.files.len(),
+        ))
+        .await;
+    }
+
+    /// Read a whole file, in protocol-sized pieces.
+    async fn read_whole(&self, index: u32, size: u64) -> Result<Vec<u8>, JsValue> {
+        let mut out = Vec::new();
+        while (out.len() as u64) < size {
+            let remaining = size - out.len() as u64;
+            let want = u32::try_from(remaining.min(u64::from(MAX_READ_LEN)))
+                .map_err(|_| JsValue::from_str("read length over u32"))?;
+            let piece = self.read(index, out.len() as u64, want).await?;
+            if piece.is_empty() {
+                // Never treat a short answer as the end of the file: a caller
+                // cannot tell truncation from a small file, and a silently
+                // truncated mirror is the failure this whole design exists to
+                // avoid.
+                return Err(JsValue::from_str(
+                    "the peer stopped short of the size the manifest describes",
+                ));
+            }
+            out.extend_from_slice(&piece);
+        }
+        Ok(out)
+    }
+
+    /// The root the origin published for `index`, if it can vouch for one.
+    async fn fetch_hash(&self, index: u32) -> Result<Option<[u8; 32]>, JsValue> {
+        let (mut send, mut recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|error| err("open hash stream", &error))?;
+        send.write_all(&framing::encode_hash_request(&self.secret, index))
+            .await
+            .map_err(|error| err("send hash request", &error))?;
+        send.finish().map_err(|error| err("finish", &error))?;
+
+        let mut status = [0u8; 1];
+        recv.read_exact(&mut status)
+            .await
+            .map_err(|error| err("read hash status", &error))?;
+        // Anything but Ok means "cannot vouch", which is ordinary — the origin
+        // hashes lazily. Only a protocol failure is an error.
+        if status[0] != agent_share_proto::manifest::ReadStatus::Ok.to_byte() {
+            return Ok(None);
+        }
+        let mut root = [0u8; 32];
+        recv.read_exact(&mut root)
+            .await
+            .map_err(|error| err("read root", &error))?;
+        Ok(Some(root))
     }
 
     /// Connect using the transport encoded in the ticket and measure for
@@ -681,6 +929,12 @@ impl ShareClient {
             let version = card.as_ref().map(|c| c.version.clone());
             let runtime = card.as_ref().map(|c| c.runtime.clone());
             let app_role = card.as_ref().and_then(|c| c.role.clone());
+            // Availability, for the grid. `tree` rides along because a slot
+            // index means nothing without agreeing which manifest it indexes
+            // into — two peers on different trees must not be drawn as though
+            // their squares line up.
+            let serving = card.as_ref().and_then(|c| c.serving.clone());
+            let tree = card.as_ref().and_then(|c| c.tree.clone());
             let stats = bytes.get(id).copied().unwrap_or_default();
             serde_json::json!({
                 "id": id,
@@ -698,6 +952,8 @@ impl ShareClient {
                 "ip": ip,
                 "ip_kind": ip_kind,
                 "proto": proto,
+                "serving": serving,
+                "tree": tree,
             })
         };
 
@@ -1238,6 +1494,48 @@ async fn follow_watch(
             continue;
         }
     }
+}
+
+
+/// Whether `only` selects `rel_path`. An empty filter takes everything.
+///
+/// A prefix match only at a path boundary, so `--only docs` cannot quietly take
+/// `docsbackup/` too. Mirrors `agent_share`'s native `wanted`; the two must
+/// agree or the same request would fetch different sets in a browser and a
+/// terminal.
+fn wanted(only: &[String], rel_path: &str) -> bool {
+    only.is_empty()
+        || only
+            .iter()
+            .any(|want| rel_path == want || rel_path.starts_with(&format!("{want}/")))
+}
+
+/// The store's name for a manifest entry.
+///
+/// Size and mtime come from the manifest rather than from anything local,
+/// because they are what the *origin* says this version is. That is the
+/// comparison the store's version gate makes on every read.
+fn file_id(entry: &agent_share_proto::manifest::FileEntry) -> FileId {
+    FileId {
+        key: entry.rel_path.clone(),
+        size: entry.size,
+        mtime: entry.mtime,
+    }
+}
+
+/// Whether the store holds every byte of this file version.
+///
+/// Anything short of complete reads as not held: a partially fetched file
+/// cannot be handed to a reader as a file, and advertising it whole would send
+/// them somewhere that cannot answer.
+async fn is_held(store: &IdbStore, file: &FileId) -> bool {
+    let Ok(Some(root)) = store.bind(file).await else {
+        return false;
+    };
+    let Ok(present) = store.present(root).await else {
+        return false;
+    };
+    extent_of(file.size).is_subset(&present)
 }
 
 async fn wait_ms(millis: i32) {

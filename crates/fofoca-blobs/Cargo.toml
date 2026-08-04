@@ -53,6 +53,16 @@ version = "0.3"
 # `DedicatedWorkerGlobalScope` rather than `Window`. Verified reachable from
 # Rust by RFC 03's S0.5.
 features = [
+  # IndexedDB: the main-thread-capable backend. Event-based rather than
+  # promise-based, hence `IdbRequest` and `IdbTransaction` being named here.
+  "IdbFactory",
+  "IdbDatabase",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbTransaction",
+  "IdbTransactionMode",
+  "IdbObjectStore",
+  "DomException",
   "FileSystemDirectoryHandle",
   "FileSystemFileHandle",
   "FileSystemGetDirectoryOptions",

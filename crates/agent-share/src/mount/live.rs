@@ -113,6 +113,117 @@ impl LiveTree {
         }
     }
 
+    /// Seed a tree that **re-serves somebody else's manifest**.
+    ///
+    /// A mirror is not a second origin. It serves the origin's manifest bytes
+    /// *verbatim*, so every index means what the origin says it means, and a
+    /// consumer can move between them without re-reading anything. Re-deriving
+    /// the manifest from what happens to be on this disk would renumber every
+    /// slot after the first gap — and a reader still holding an old index would
+    /// then silently get a different file. That is the failure this module
+    /// exists to prevent, so the whole point is *not* to scan.
+    ///
+    /// A slot maps to a local path only when this peer actually has that file,
+    /// at the size the origin published. Everything else is `None`, which reads
+    /// as `BadIndex`: **partial mirrors are ordinary**, and saying "I do not
+    /// have that" is the honest answer. Anything laxer would serve a truncated
+    /// or stale file under the origin's name.
+    ///
+    /// `root` is where the copy lives; `origin_bytes` is exactly what
+    /// `OP_MANIFEST` returned from the origin.
+    ///
+    /// # Errors
+    /// `origin_bytes` does not decode as a manifest.
+    pub(super) fn mirrored(root: PathBuf, origin_bytes: Vec<u8>) -> Result<Self> {
+        let manifest = MountManifest::decode(&origin_bytes)?;
+        let index_of = manifest
+            .files
+            .iter()
+            .enumerate()
+            .map(|(position, file)| {
+                (
+                    file.rel_path.clone(),
+                    u32::try_from(position).expect("file count fits u32"),
+                )
+            })
+            .collect();
+
+        // Aligned to the origin's `files` by position, not by what a directory
+        // walk would find. A gap stays a gap.
+        let served = manifest
+            .files
+            .iter()
+            .map(|file| {
+                if file.is_tombstone() {
+                    return None;
+                }
+                let path = root.join(file.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+                // Size is the cheap half of the version gate, and the half that
+                // catches a half-written mirror. `fofoca-blobs` holds the other
+                // half for content this peer can prove.
+                match std::fs::metadata(&path) {
+                    Ok(meta) if meta.len() == file.size => Some(path),
+                    _ => None,
+                }
+            })
+            .collect();
+
+        let (updates, _) = broadcast::channel(UPDATE_BACKLOG);
+        Ok(Self {
+            root,
+            state: RwLock::new(TreeState {
+                dirs: manifest.dirs,
+                files: manifest.files,
+                served,
+                index_of,
+                // The origin's bytes, untouched. Re-encoding would be a
+                // different fingerprint for the same tree, and guard #1 reads
+                // that as two peers on different trees.
+                encoded: Arc::new(origin_bytes),
+            }),
+            updates,
+        })
+    }
+
+    /// How many slots this tree can actually serve, and how many exist.
+    ///
+    /// `(held, total)`, counting live slots only. Equal for an origin; a
+    /// partial mirror holds fewer.
+    pub(super) fn coverage(&self) -> (usize, usize) {
+        let state = self.read();
+        let total = state
+            .files
+            .iter()
+            .filter(|file| !file.is_tombstone())
+            .count();
+        let held = state.served.iter().filter(|slot| slot.is_some()).count();
+        (held, total)
+    }
+
+    /// Which slots this tree can serve, encoded for a peer card.
+    ///
+    /// `"*"` for a complete tree, sorted ranges for a partial mirror, `None`
+    /// when it holds nothing or the answer will not fit a frame — see
+    /// [`agent_share_proto::serving`].
+    pub(super) fn serving(&self) -> Option<String> {
+        let state = self.read();
+        let held: Vec<u32> = state
+            .served
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, path)| {
+                path.as_ref()?;
+                u32::try_from(slot).ok()
+            })
+            .collect();
+        let total = state
+            .files
+            .iter()
+            .filter(|file| !file.is_tombstone())
+            .count();
+        agent_share_proto::serving::encode_serving(&held, total)
+    }
+
     /// The encoded manifest as it stands.
     pub(super) fn manifest_bytes(&self) -> Arc<Vec<u8>> {
         Arc::clone(&self.read().encoded)
@@ -328,6 +439,99 @@ mod tests {
     use super::LiveTree;
     use agent_share_proto::manifest::{FileEntry, ManifestDelta, MountManifest};
     use std::path::PathBuf;
+
+    /// A throwaway directory holding a partial copy of a share.
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new(files: &[(&str, usize)]) -> Self {
+            use rand::RngCore as _;
+            let root =
+                std::env::temp_dir().join(format!("agent-share-mirror-{}", rand::rng().next_u64()));
+            for (name, size) in files {
+                let path = root.join(name);
+                std::fs::create_dir_all(path.parent().expect("has a parent")).expect("mkdir");
+                std::fs::write(&path, vec![7u8; *size]).expect("write");
+            }
+            std::fs::create_dir_all(&root).expect("mkdir root");
+            Self(root)
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// **The re-seeder's whole reason for existing.** A partial copy must serve
+    /// the origin's manifest untouched, so slot 2 is still slot 2 even when the
+    /// files at slots 0 and 1 were never fetched.
+    ///
+    /// Deriving the manifest from the directory instead would renumber every
+    /// slot after the first gap, and a reader holding an index from the origin
+    /// would silently get a different file.
+    #[test]
+    fn a_partial_mirror_keeps_the_origins_indices() {
+        // The origin's tree: three files. This peer fetched only the third.
+        let origin = MountManifest {
+            dirs: Vec::new(),
+            files: vec![
+                entry("a.txt", 5),
+                entry("b.txt", 5),
+                entry("docs/big.bin", 64),
+            ],
+        };
+        let bytes = origin.encode();
+        let copy = TempTree::new(&[("docs/big.bin", 64)]);
+
+        let tree = LiveTree::mirrored(copy.0.clone(), bytes.clone()).expect("mirrored");
+
+        assert_eq!(
+            *tree.manifest_bytes(),
+            bytes,
+            "the origin's bytes must be re-served verbatim, not re-encoded"
+        );
+        assert_eq!(tree.path_of(0), None, "a file we never fetched is absent");
+        assert_eq!(tree.path_of(1), None);
+        assert_eq!(
+            tree.path_of(2),
+            Some(copy.0.join("docs/big.bin")),
+            "the file we do hold is still at the origin's index"
+        );
+        assert_eq!(tree.coverage(), (1, 3));
+    }
+
+    /// A half-written file is not a servable file. Size is the cheap half of
+    /// the version gate and the half that catches an interrupted copy.
+    #[test]
+    fn a_truncated_copy_is_not_served() {
+        let origin = MountManifest {
+            dirs: Vec::new(),
+            files: vec![entry("a.bin", 1000)],
+        };
+        // On disk at the wrong length: an interrupted fetch.
+        let copy = TempTree::new(&[("a.bin", 400)]);
+        let tree = LiveTree::mirrored(copy.0.clone(), origin.encode()).expect("mirrored");
+
+        assert_eq!(
+            tree.path_of(0),
+            None,
+            "a file at the wrong size must read as absent, not be served short"
+        );
+        assert_eq!(tree.coverage(), (0, 1));
+    }
+
+    #[test]
+    fn a_complete_mirror_holds_everything() {
+        let origin = MountManifest {
+            dirs: Vec::new(),
+            files: vec![entry("a.txt", 5), entry("b.txt", 9)],
+        };
+        let copy = TempTree::new(&[("a.txt", 5), ("b.txt", 9)]);
+        let tree = LiveTree::mirrored(copy.0.clone(), origin.encode()).expect("mirrored");
+        assert_eq!(tree.coverage(), (2, 2));
+    }
 
     fn entry(path: &str, size: u64) -> FileEntry {
         FileEntry {

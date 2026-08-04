@@ -148,7 +148,7 @@ mod tests {
             manifest,
             paths,
         ));
-        let (endpoint, ticket, secret, _webrtc) = produce::bind(LookupOpts::loopback())
+        let (endpoint, ticket, secret, _webrtc) = produce::bind(LookupOpts::loopback(), None)
             .await
             .expect("bind producer");
         let accept_endpoint = endpoint.clone();
@@ -183,7 +183,7 @@ mod tests {
             manifest,
             paths,
         ));
-        let (endpoint, ticket, secret, _webrtc) = produce::bind(LookupOpts::loopback())
+        let (endpoint, ticket, secret, _webrtc) = produce::bind(LookupOpts::loopback(), None)
             .await
             .expect("bind producer");
         let accept_endpoint = endpoint.clone();
@@ -224,7 +224,7 @@ mod tests {
             manifest,
             paths,
         ));
-        let (endpoint, mut ticket, _minted, _webrtc) = produce::bind(LookupOpts::loopback())
+        let (endpoint, mut ticket, _minted, _webrtc) = produce::bind(LookupOpts::loopback(), None)
             .await
             .expect("bind re-seeder");
         // Advertise the origin's secret, not the freshly minted one.

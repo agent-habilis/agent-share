@@ -31,6 +31,7 @@ pub mod lookup;
 pub mod manifest;
 pub mod mesh_key;
 pub mod peer_addr;
+pub mod serving;
 pub mod ticket;
 pub mod token;
 

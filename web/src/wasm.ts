@@ -5,14 +5,16 @@
  * `new URL("…_bg.wasm", import.meta.url)` resolves to a `file://` path under
  * Bun's HTML/dev server (the crate lives outside `web/`), which browsers
  * refuse to fetch.
+ *
+ * The path is content-addressed and generated — see `scripts/wasm-asset.ts`
+ * for why a fixed name was not survivable.
  */
 
 import type * as WasmExports from '../../crates/agent-share-wasm-client/dist/web/agent_share_wasm_client.js'
+import { WASM_PATH } from './wasm-path.ts'
 
 export type WasmModule = typeof WasmExports
 
-/** Served by `dev.ts` / `preview.ts`, and copied into `dist/` by `build.ts`. */
-const WASM_PATH = '/agent_share_wasm_client_bg.wasm'
 
 /**
  * Caching the *promise* is load-bearing, not an optimisation. `__wbg_init`

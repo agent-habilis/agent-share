@@ -50,6 +50,15 @@ pub(crate) enum MountAction {
         ticket: String,
         /// Directory to copy into. Created if it does not exist.
         dest: PathBuf,
+        /// Copy only these paths, relative to the share root. Repeatable, and
+        /// naming a directory takes everything under it. Omit for the whole
+        /// share.
+        ///
+        /// A partial copy is still servable: it re-serves the origin's manifest
+        /// so the whole tree stays visible and its indices keep meaning what
+        /// the origin says, with the files it does not hold answered as absent.
+        #[arg(long = "only", value_name = "PATH")]
+        only: Vec<String>,
         /// Output format: human (default) — a cargo-style progress and summary
         /// — or json, a single `agent-share serve <dir>` line for machines.
         #[arg(long, default_value = "human")]

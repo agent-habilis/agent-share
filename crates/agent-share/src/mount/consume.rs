@@ -214,6 +214,9 @@ async fn join_share_mesh(join: MeshJoin<'_>) -> Option<ShareMesh> {
         protocols: Vec::new(),
         role: super::mesh::Role::Consumer,
         tree: join.tree,
+        // A lazy mount holds no bytes, so it advertises nothing. Becoming a
+        // seeder is the explicit `mirror` step, never a side effect of reading.
+        serving: None,
         // Match the endpoint: `--transport webrtc` built it with IP cleared,
         // and a mesh advertising paths its endpoint does not have is a mesh
         // whose peers dial nowhere.
@@ -475,18 +478,6 @@ impl RemoteClient {
     /// The root is learned from the **origin**, over a channel already
     /// authenticated to the ticket's endpoint id. That is what makes it safe to
     /// take the bytes from anybody afterwards.
-    // Exercised end-to-end by
-    // `mount::tests::a_consumer_learns_a_root_and_the_bytes_verify_against_it`,
-    // which is stage 3's deliverable: the wire op works and the bytes verify.
-    // The production caller is stage 4's source selection, so outside a test
-    // build there is not one yet.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "production caller arrives with stage 4 source selection"
-        )
-    )]
     pub(super) async fn fetch_hash(&self, index: u32) -> Result<Option<(Root, Vec<u8>)>> {
         let (mut send, mut recv) = self.request(OP_HASH).await?;
         send.write_all(&index.to_le_bytes()).await?;
@@ -517,6 +508,34 @@ impl RemoteClient {
             .await
             .context("reading the outboard failed")?;
         Ok(Some((root, outboard)))
+    }
+
+    /// The manifest as the origin sent it, before decoding.
+    ///
+    /// A mirror needs these exact bytes rather than a re-encode: it re-serves
+    /// them verbatim so its indices stay the origin's, and it fingerprints them
+    /// so peers on one tree agree. Decoding and re-encoding would be correct
+    /// only for as long as the encoding stays canonical, and there is no reason
+    /// to depend on that when the real bytes are right here.
+    pub(super) async fn fetch_manifest_bytes(&self) -> Result<Vec<u8>> {
+        let (mut send, mut recv) = self.request(OP_MANIFEST).await?;
+        let _ = send.finish();
+        let mut status = [0u8; 1];
+        recv.read_exact(&mut status)
+            .await
+            .context("reading the manifest status failed")?;
+        if ReadStatus::from_byte(status[0])? != ReadStatus::Ok {
+            bail!("the producer refused the manifest request");
+        }
+        let len = read_u32(&mut recv).await?;
+        if len > MAX_MANIFEST_BYTES {
+            bail!("manifest too large: {len} bytes");
+        }
+        let mut bytes = vec![0u8; usize::try_from(len).expect("u32 fits usize")];
+        recv.read_exact(&mut bytes)
+            .await
+            .context("reading the manifest failed")?;
+        Ok(bytes)
     }
 
     pub(super) async fn fetch_manifest(&self) -> Result<MountManifest> {
