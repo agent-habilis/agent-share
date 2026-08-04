@@ -89,7 +89,8 @@ function fitColumnWidth(dir: DirNode, padX: number): number {
 }
 
 function fitDetailWidth(node: Node, padX: number): number {
-  // "Download" label plus brackets from the primary button chrome.
+  // "Download" label plus the button's 1ch of padding on each side. Exact: the
+  // button's edge is an outline, so it adds nothing to the width.
   const downloadLabel = 10
   if (node.kind !== 'file') {
     return Math.max(MIN_WIDTH, Math.max(node.name.length, downloadLabel) + padX * 2)

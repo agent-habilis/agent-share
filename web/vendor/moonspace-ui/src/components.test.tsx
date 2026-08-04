@@ -20,13 +20,25 @@ test('Badge outline includes bracket content rules', () => {
   expect(css).toContain("'›'")
 })
 
-test('Button includes bracket content rules', () => {
+test('Button renders a padded box with a zero-layout edge', () => {
   render(Button({ children: 'OK' }), document.body)
   const btn = document.body.querySelector('button')
   expect(btn?.textContent?.endsWith('OK')).toBe(true)
-  const css = [...document.body.querySelectorAll('style')].map((s) => s.textContent ?? '').join('')
-  expect(css).toContain("'[ '")
-  expect(css).toContain("' ]'")
+  // The button's own scoped rules, not every style on the page: the `not`
+  // below would otherwise trip over `--ms-border-width` in the theme's :root.
+  const css = btn?.querySelector('style')?.textContent ?? ''
+  // One cell of horizontal padding, and no vertical padding — a cell is `1ch`
+  // wide but a row tall, so padding the block axis would take the control off
+  // the grid.
+  expect(css).toContain('padding:0 1ch')
+  // The edge is an outline, never a border: an outline costs no layout, so the
+  // content box stays a full row and the width stays a whole number of cells.
+  expect(css).toContain('outline:var(--ms-border-width) solid transparent')
+  // And the UA's `2px outset` on a bare <button> has to be zeroed, or it eats
+  // the content box the outline was chosen to preserve.
+  expect(css).toContain('border:0')
+  expect(css).not.toContain('border-width:')
+  expect(css).not.toContain('border-color:')
 })
 
 test('Text applies color role via inline style', () => {
