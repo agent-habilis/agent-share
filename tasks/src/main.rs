@@ -8,6 +8,7 @@ mod build;
 mod ci;
 mod clean;
 mod coverage;
+mod e2e;
 mod fmt;
 mod install;
 mod lint;
@@ -93,6 +94,15 @@ enum Task {
         #[arg(long, default_value = "baseline")]
         tag: String,
     },
+    /// Drive the web app in a headless browser against a real producer. Not in
+    /// the gate: it needs `agent-browse`, a built wasm and the network, and a
+    /// missing prerequisite is reported as a skip rather than a pass. See
+    /// `docs/testing.md`.
+    E2e {
+        /// `all`, or a comma-separated subset of cell names.
+        #[arg(long, default_value = "all")]
+        cells: String,
+    },
     /// Run tests with coverage.
     Coverage,
     /// Run the CI gate.
@@ -164,6 +174,7 @@ fn main() -> ExitCode {
         Task::Release { args } => release::run(&sh, &args),
         Task::Run { args } => run::run(&sh, &args),
         Task::Install => install::run(&sh),
+        Task::E2e { cells } => e2e::run(&sh, &cells),
         Task::Coverage => coverage::run(&sh),
         Task::Ci => ci::run(&sh),
         Task::Fmt => fmt::run(&sh),

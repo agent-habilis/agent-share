@@ -38,7 +38,7 @@ use row::{BenchReport, Provenance, Report, Row, SPREAD_WARN_PCT};
 const LOOPBACK_SWARM_ID: &str = "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2Msw3sco";
 
 /// The built artifact the browser leg serves, and the size finding #4 tracks.
-const WASM_ARTIFACT: &str =
+pub(crate) const WASM_ARTIFACT: &str =
     "crates/agent-share-wasm-client/dist/web/agent_share_wasm_client_bg.wasm";
 
 /// How long to wait for a producer to print its ticket.
@@ -299,6 +299,10 @@ fn start_bench_producer(binary: &str, transport: &str) -> Res<(Proc, String)> {
         .nth(2)
         .ok_or_else(|| format!("ticket line has no ticket token: {line}"))?
         .to_owned();
+    // Same hazard as the dev server: the producer keeps printing after its
+    // ticket line, and a closed pipe would kill it mid-cell. See
+    // `Lines::drain_in_background`.
+    lines.drain_in_background();
     Ok((producer, ticket))
 }
 

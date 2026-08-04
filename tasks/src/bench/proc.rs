@@ -131,6 +131,22 @@ impl Lines {
         None
     }
 
+    /// Keep reading in the background, discarding what arrives.
+    ///
+    /// For a child that outlives the line the harness was waiting for. Dropping
+    /// a `Lines` closes the receiver, so the pump threads stop and the child's
+    /// stdout loses its reader — and the next line it writes kills it with
+    /// `SIGPIPE`.
+    ///
+    /// The dev server is exactly that shape: it runs with `hmr` and `console`
+    /// on, so it logs long after it has printed its URL. It died partway
+    /// through an e2e run this way, and every cell after it failed with
+    /// `ERR_CONNECTION_REFUSED` — a harness fault wearing a product fault's
+    /// clothes.
+    pub(crate) fn drain_in_background(self) {
+        thread::spawn(move || while self.rx.recv().is_ok() {});
+    }
+
     /// Everything seen so far, for an error message when `wait_for` gives up.
     pub(crate) fn transcript(&mut self) -> String {
         while let Ok(line) = self.rx.try_recv() {
@@ -147,6 +163,58 @@ impl Lines {
 ///
 /// stderr is inherited rather than captured: it carries `tracing` output that
 /// is useful to see when a cell hangs, and nothing the harness parses.
+/// Like [`spawn_piped`], but stderr joins the same line channel.
+///
+/// For children whose *failure* is on stderr and whose success is on stdout —
+/// the dev server being the case that earned this. Bun reports `EADDRINUSE`
+/// there, so with stderr discarded a server that never started looked
+/// identical to one that was merely slow, and the harness waited out its
+/// timeout before reporting "no output" for a bug that had already announced
+/// itself.
+pub(crate) fn spawn_piped_with_stderr(mut cmd: Command, label: &str) -> Res<(Proc, Lines)> {
+    let marker = cmd.get_program().to_string_lossy().into_owned();
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to spawn {label}: {error}"))?;
+    super::reap::track_pid(child.id(), &marker);
+
+    let (tx, rx) = mpsc::channel();
+    // Two reader threads, one channel: order between the streams is not
+    // meaningful, and every caller here matches on content rather than order.
+    if let Some(out) = child.stdout.take() {
+        pump(out, tx.clone());
+    }
+    if let Some(err) = child.stderr.take() {
+        pump(err, tx);
+    }
+
+    Ok((
+        Proc { child },
+        Lines {
+            rx,
+            seen: Vec::new(),
+        },
+    ))
+}
+
+/// Feed one stream's lines onto `tx` from its own thread.
+fn pump<R: Read + Send + 'static>(stream: R, tx: mpsc::Sender<String>) {
+    thread::spawn(move || {
+        for line in BufReader::new(stream).lines() {
+            match line {
+                Ok(text) => {
+                    if tx.send(text).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
 pub(crate) fn spawn_piped(mut cmd: Command, label: &str) -> Res<(Proc, Lines)> {
     // The marker a stale-run reaper matches this pid against: the program we
     // asked for, so a recycled pid running something else is left alone.

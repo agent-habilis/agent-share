@@ -17,7 +17,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::proc::{POLL, Proc, Res, spawn_piped};
+use super::proc::{POLL, Proc, Res, spawn_piped_with_stderr};
 use super::row::{BenchReport, Cpu, Row};
 use super::{CellResult, Options, WASM_ARTIFACT};
 use crate::util::{self, output};
@@ -38,8 +38,19 @@ const MESH: &str = "none (bench does not join a share mesh)";
 
 /// Quits the headless window when the cells are done, however they end.
 #[derive(Debug)]
-struct Browser {
+pub(crate) struct Browser {
     folder: String,
+}
+
+impl Browser {
+    /// Take ownership of an already-launched window, so it is quit on drop.
+    ///
+    /// Separate from launching on purpose: `e2e` launches one window per cell
+    /// at its own URL, and the guard is what makes a failed cell tear its
+    /// window down rather than leave it for the next one to inherit.
+    pub(crate) fn new(folder: String) -> Self {
+        Self { folder }
+    }
 }
 
 impl Drop for Browser {
@@ -180,10 +191,23 @@ fn prepare() -> Result<(Proc, Browser), String> {
     Ok((server, browser))
 }
 
-fn start_dev_server(root: &Path) -> Res<(Proc, String)> {
+/// Start a dev server on a port nobody else can be holding.
+///
+/// `PORT=0` rather than `dev.ts`'s default 3000, and that is not a nicety. The
+/// default collided with a *sibling worktree's* dev server, which re-took the
+/// port within seconds of being freed — so the harness alternated between
+/// `EADDRINUSE` and, worse, adopting a server that was serving another
+/// checkout's build. A fixed port makes every concurrent checkout, and the
+/// human's own `bun run dev`, a contender for the same socket.
+///
+/// `dev.ts` prints the URL it actually bound (`dev ${server.url}`), so the
+/// ephemeral port costs nothing to discover.
+pub(crate) fn start_dev_server(root: &Path) -> Res<(Proc, String)> {
     let mut cmd = Command::new("bun");
-    cmd.arg("dev.ts").current_dir(root.join("web"));
-    let (server, mut lines) = spawn_piped(cmd, "bun dev server")?;
+    cmd.arg("dev.ts")
+        .current_dir(root.join("web"))
+        .env("PORT", "0");
+    let (server, mut lines) = spawn_piped_with_stderr(cmd, "bun dev server")?;
     // `dev.ts:36` prints `dev http://localhost:3000/` once bound.
     let Some(line) = lines.wait_for("dev http", Duration::from_mins(1)) else {
         return Err(format!(
@@ -197,7 +221,47 @@ fn start_dev_server(root: &Path) -> Res<(Proc, String)> {
         .nth(1)
         .ok_or_else(|| format!("dev server line has no URL: {line}"))?
         .to_owned();
+    assert_wasm_is_fresh(root, &url)?;
+    // The server keeps logging for the rest of the run, and something has to
+    // keep reading or it takes a `SIGPIPE` on the next line it writes.
+    lines.drain_in_background();
     Ok((server, url))
+}
+
+/// Refuse to test a build the server is not actually serving.
+///
+/// Twice in one session a mismatched wasm masqueraded as a product bug — once
+/// as `CompileError: … Custom section … would overflow Module's size`, once as
+/// `decode ticket: ticket address truncated`, a string present in neither the
+/// source nor the binary. Both times the harness looked like it was exercising
+/// the change and was not, and both cost far more than this check.
+///
+/// Compares length rather than content: the failure mode is serving a
+/// *different build*, which never has the same size, and reading 7 MB twice per
+/// run to catch a same-size difference that cannot happen is not worth it.
+fn assert_wasm_is_fresh(root: &Path, url: &str) -> Res<()> {
+    let on_disk = std::fs::metadata(root.join(WASM_ARTIFACT))
+        .map_err(|error| format!("cannot stat the built wasm: {error}"))?
+        .len();
+    let served = Command::new("curl")
+        .args(["-s", "-o", "/dev/null", "-w", "%{size_download}"])
+        .arg(format!("{url}agent_share_wasm_client_bg.wasm"))
+        .output()
+        .map_err(|error| format!("cannot fetch the served wasm: {error}"))?;
+    let served: u64 = String::from_utf8_lossy(&served.stdout)
+        .trim()
+        .parse()
+        .map_err(|_| "the dev server did not return a wasm".to_owned())?;
+    if served != on_disk {
+        return Err(format!(
+            "the dev server is serving a different wasm than the one on disk \
+             ({served} vs {on_disk} bytes). Something else is bound to this \
+             port, or the server predates the last `cargo task web-wasm`. \
+             Testing would report on a build that is not the one you changed."
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Browser as consumer, native `agent-share bench` as producer.
@@ -343,7 +407,7 @@ fn parse_report(log: &str) -> Option<Res<BenchReport>> {
 }
 
 /// Evaluate an expression in the page and return its string result.
-fn evaluate(expression: &str) -> Res<String> {
+pub(crate) fn evaluate(expression: &str) -> Res<String> {
     let params = serde_json::json!({
         "expression": expression,
         "returnByValue": true,
@@ -363,7 +427,7 @@ fn evaluate(expression: &str) -> Res<String> {
         .to_owned())
 }
 
-fn run_browse(args: &[&str]) -> Res<String> {
+pub(crate) fn run_browse(args: &[&str]) -> Res<String> {
     let output = Command::new("agent-browse")
         .args(args)
         .output()
@@ -381,6 +445,6 @@ fn run_browse(args: &[&str]) -> Res<String> {
 }
 
 /// A JSON string literal — safe to paste into an injected expression.
-fn js_string(value: &str) -> String {
+pub(crate) fn js_string(value: &str) -> String {
     serde_json::Value::String(value.to_owned()).to_string()
 }

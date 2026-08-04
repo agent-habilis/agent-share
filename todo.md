@@ -18,6 +18,20 @@ anyone adding a third failure will not notice.
    `Arc<BrowserHubTransport>` vs `Arc<WebRtcTransport>`. The crate is
    wasm-only; this is its *host*-target build, which nothing else exercises.
 
+## Nothing observably breaks when the zip entries are built eagerly
+
+`web/src/download.ts` builds its ZIP entries from a generator, and the comment
+there says an eager `.map()` "would have stalled on the first tick" past the
+producer's 100-stream ceiling. `cargo task e2e` says otherwise: reverting to
+`.map()` passed `web-download-zip` at 301 files and again at 1201. quinn queues
+stream opens beyond `max_concurrent_bidi_streams` rather than refusing them, so
+the reads drain and the archive completes.
+
+So the lazy form is hardening, not a fix for an observed failure — worth either
+finding the input that does break it (a share whose per-file reads are slow
+enough that 100 in flight cannot drain?), or softening the comment's claim. The
+lazy version is still the right shape; only the justification is overstated.
+
 ## The reconnect budget overruns in a hidden tab
 
 `RECONNECT_TIMEOUT_MS` is 60 s, but a tab in the background gives up at
