@@ -15,7 +15,7 @@ import {
   Text,
   roleVar,
 } from 'moonspace-ui'
-import { component, computed, signal } from 'visage-dom'
+import { component, computed, interval, signal } from 'visage-dom'
 import type { Child, Ctx } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
@@ -54,6 +54,16 @@ import { loadWasm } from './wasm.ts'
 
 interface Client {
   readonly transport: string
+  /**
+   * The mount connection is gone and this client can only fail from here.
+   *
+   * A backgrounded tab loses it intermittently — the browser throttles timers
+   * past the point where QUIC's keep-alive can beat the idle timeout — and
+   * nothing announces it. Asked before acting, and on the way back to visible.
+   */
+  readonly closed: boolean
+  /** Close the mount connection. Behind `?dev=true`; see `TechInfo`. */
+  close_connection(): void
   /** Announce departure from the share's mesh. Safe to call more than once. */
   leave_mesh(): void
   /** Members on the share's mesh, including us. 0 when the mesh is not up. */
@@ -158,10 +168,25 @@ function release(ticket: string, transport: TransportMode | undefined, owned: Pr
   const key = clientKey(ticket, transport)
   if (clients.get(key) !== owned) return
   clients.delete(key)
-  void owned.then(
-    (client) => client.leave_mesh(),
-    () => {},
-  )
+  // Best-effort on *both* legs, which the two-argument form was not.
+  //
+  // A rejection handler covers `owned` failing to resolve, but a throw inside
+  // `leave_mesh` rejects the promise `.then` hands back, and nothing was
+  // watching that one. So a wasm-side fault during teardown reached the page
+  // as an unhandled rejection — a crash overlay raised by a departure
+  // announcement nobody was waiting on. Observed once as
+  // `recursive use of an object detected which would lead to unsafe aliasing`
+  // while a revival retried against a dead producer.
+  //
+  // Swallowing is right regardless of the cause: this client is already
+  // discarded, the mesh drops silent members on its own, and there is nothing
+  // the user could do about it. Logged at debug so the signal survives for
+  // whoever chases the underlying fault, which is still unexplained.
+  void owned
+    .then((client) => client.leave_mesh())
+    .catch((error: unknown) => {
+      console.debug('[agent-share] leaving the mesh failed on teardown', error)
+    })
 }
 
 /** Fall back to the deepest prefix that still exists in the manifest. */
@@ -451,7 +476,12 @@ function transferLabel(kind: Transfer['kind']): string {
   return kind === 'download' ? 'downloading' : kind === 'mounting' ? 'mounting' : 'syncing'
 }
 
-const Session = component<{ ticket: string; view: ShareView; transport?: TransportMode }>(function* (
+const Session = component<{
+  ticket: string
+  view: ShareView
+  transport?: TransportMode
+  dev?: boolean
+}>(function* (
   props,
   ctx: Ctx,
 ) {
@@ -459,6 +489,27 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
   const path = signal<string[]>([])
   const transfer = signal<Transfer | null>(null)
   const mountError = signal<string | null>(null)
+  /**
+   * Why the last download stopped, when it was not a cancellation.
+   *
+   * A transfer can fail for reasons the peer connection knows about and the
+   * page cannot guess — the producer stopped sharing, or the connection
+   * expired while the tab sat in the background. Those need to reach the user
+   * as text on the page; before this they reached them as an unhandled
+   * rejection, which reads as a crash.
+   */
+  const downloadError = signal<string | null>(null)
+  /**
+   * Re-dialling a connection that died while the tab was away.
+   *
+   * Deliberately *not* the `connecting` phase: that renders a full-page
+   * loading view, and the manifest is still perfectly good — only the
+   * connection is gone. Dropping the listing on every tab switch would read as
+   * a fresh page load and lose the user's place for a heal they never asked
+   * for. So the browser stays on screen and only the actions that need the
+   * peer are held back.
+   */
+  const reviving = signal(false)
   /** Non-null while a host directory is mounted for this session. */
   const mountSession = signal<MountSession | null>(null)
 
@@ -537,46 +588,166 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
   // unmounts this session; the mesh membership belongs to it, so it goes too —
   // and it has to go even when the abort lands *during* the connect, which is
   // why this holds the promise rather than a client we may not have yet.
-  const pending = connect(props.ticket, props.transport)
+  let pending = connect(props.ticket, props.transport)
   ctx.aborted.addEventListener('abort', () => release(props.ticket, props.transport, pending))
+
+  // Announce departure while the page still exists. Without this the tab
+  // lingers on every peer's roster until the silence sweeper evicts it —
+  // which showed up immediately in testing as a share reporting more
+  // members than there were processes.
+  //
+  // `pagehide`, not `beforeunload`: the latter is unreliable on mobile.
+  // Registered once for the session rather than per connection: a reconnect
+  // would otherwise stack a second listener holding a stale client.
+  const onHide = (event: PageTransitionEvent) => {
+    // `persisted` means the page is going into the bfcache, and may come
+    // straight back on Back with its JS state intact — no remount, no
+    // hashchange, nothing that would rejoin. Leaving here took the tab off
+    // every roster while it still looked fully connected, and the peer row
+    // silently disappeared because `max_direct` fell to 0.
+    if (event.persisted) return
+    const current = state.peek()
+    if (current.phase === 'ready') current.client.leave_mesh()
+  }
+  window.addEventListener('pagehide', onHide)
+  ctx.aborted.addEventListener('abort', () => {
+    window.removeEventListener('pagehide', onHide)
+  })
+
+  /** Bring a connected client into view: listing first, then live updates. */
+  async function bringUp(promise: Promise<Client>): Promise<void> {
+    const client = await promise
+    if (ctx.aborted.aborted) return
+    const manifest = await client.manifest()
+    if (ctx.aborted.aborted) return
+    path.value = prunePath(path.peek(), manifest)
+    state.value = { phase: 'ready', client, manifest }
+    await client.watch((next) => {
+      if (ctx.aborted.aborted) return
+      path.value = prunePath(path.peek(), next)
+      state.value = { phase: 'ready', client, manifest: next }
+      if (mountSession.peek()) void runSync('syncing')
+    })
+  }
 
   void (async () => {
     try {
-      const client = await pending
-      if (ctx.aborted.aborted) return
-      const manifest = await client.manifest()
-      if (ctx.aborted.aborted) return
-      path.value = prunePath(path.peek(), manifest)
-      state.value = { phase: 'ready', client, manifest }
-      // Announce departure while the page still exists. Without this the tab
-      // lingers on every peer's roster until the silence sweeper evicts it —
-      // which showed up immediately in testing as a share reporting more
-      // members than there were processes.
-      //
-      // `pagehide`, not `beforeunload`: the latter is unreliable on mobile.
-      const onHide = (event: PageTransitionEvent) => {
-        // `persisted` means the page is going into the bfcache, and may come
-        // straight back on Back with its JS state intact — no remount, no
-        // hashchange, nothing that would rejoin. Leaving here took the tab off
-        // every roster while it still looked fully connected, and the peer row
-        // silently disappeared because `max_direct` fell to 0.
-        if (event.persisted) return
-        client.leave_mesh()
-      }
-      window.addEventListener('pagehide', onHide)
-      ctx.aborted.addEventListener('abort', () => {
-        window.removeEventListener('pagehide', onHide)
-      })
-      await client.watch((next) => {
-        if (ctx.aborted.aborted) return
-        path.value = prunePath(path.peek(), next)
-        state.value = { phase: 'ready', client, manifest: next }
-        if (mountSession.peek()) void runSync('syncing')
-      })
+      await bringUp(pending)
     } catch (error) {
       if (!ctx.aborted.aborted) state.value = { phase: 'failed', reason: String(error) }
     }
   })()
+
+  /** In-flight revival, so concurrent callers share one dial. */
+  let revivalInFlight: Promise<void> | null = null
+
+  /**
+   * Dial again if the connection died while we were not looking.
+   *
+   * A backgrounded tab loses the connection to QUIC's idle timeout — the
+   * browser throttles timers past the keep-alive interval — and nothing
+   * reports it: `watch`'s follower just returns. The tab then looks perfectly
+   * connected and fails every action until it is reloaded, which is the bug
+   * this exists to remove.
+   *
+   * Started the moment the death is noticed — by the poll below, by the tab
+   * coming back to the foreground, or by an action that needs the peer. The
+   * user therefore never sees a *disconnected* page, only a reconnecting one:
+   * there is no state in which the app knows it is dead and waits to be asked.
+   *
+   * Retries rather than failing on the first miss. A single attempt was fine
+   * while revival only ran on a click, but running automatically it would let
+   * one transient miss tear down a session that looks perfectly healthy — and
+   * `FailedBody` offers no way back, so the only exit is a page reload.
+   */
+  function ensureLive(): Promise<void> {
+    if (ctx.aborted.aborted) return Promise.resolve()
+    if (revivalInFlight) return revivalInFlight
+    const current = state.peek()
+    if (current.phase !== 'ready' || !current.client.closed) return Promise.resolve()
+
+    revivalInFlight = (async () => {
+      // The `ready` state is deliberately left in place: the manifest is still
+      // good, so the browser stays on screen and navigable while this runs.
+      // Only `reviving` flips, and only the actions that need the peer read it.
+      reviving.value = true
+      const deadline = Date.now() + RECONNECT_TIMEOUT_MS
+      let backoff = RECONNECT_BACKOFF_START_MS
+      let lastError: unknown = null
+      try {
+        while (!ctx.aborted.aborted) {
+          const remaining = deadline - Date.now()
+          if (remaining <= 0) break
+          try {
+            release(props.ticket, props.transport, pending)
+            pending = connect(props.ticket, props.transport)
+            // Raced against what is left of the budget, not just checked
+            // between attempts: a dial to a producer that is simply gone runs
+            // for far longer than the gap it was started in, so gating only
+            // the *start* of an attempt let the whole thing overrun to twice
+            // the deadline — measured at 126 s against a 60 s budget.
+            await Promise.race([
+              bringUp(pending),
+              new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('reconnect timed out')), remaining),
+              ),
+            ])
+            return
+          } catch (error) {
+            lastError = error
+            if (ctx.aborted.aborted) return
+            if (Date.now() + backoff >= deadline) break
+            await new Promise((resolve) => setTimeout(resolve, backoff))
+            backoff = Math.min(backoff * 2, RECONNECT_BACKOFF_MAX_MS)
+          }
+        }
+        if (!ctx.aborted.aborted) {
+          state.value = { phase: 'failed', reason: String(lastError) }
+        }
+      } finally {
+        reviving.value = false
+        revivalInFlight = null
+      }
+    })()
+    return revivalInFlight
+  }
+
+  /**
+   * Give up reconnecting and show the failure page.
+   *
+   * A browser re-dial was measured at about ten seconds over WebRTC, so this
+   * budget buys several honest attempts before concluding the share is gone.
+   * The native consumer's equivalent (`DISCOVERY_DEADLINE`) is 90 s; a tab is
+   * far likelier to be abandoned than a CLI process, so it waits less.
+   */
+  const RECONNECT_TIMEOUT_MS = 60_000
+  const RECONNECT_BACKOFF_START_MS = 1_000
+  const RECONNECT_BACKOFF_MAX_MS = 8_000
+
+  /**
+   * Notice a connection that died while nothing was using it.
+   *
+   * `closed` is a plain getter on the wasm client, not a signal, and nothing
+   * pushes on close — `watch`'s follower just returns. Polling is the cheap way
+   * in and matches how this app already samples the client for stats
+   * (`TechInfo`). A push callback from wasm would be tidier and can replace
+   * this without touching callers.
+   *
+   * Guarded on `ready`: while connecting or failed there is nothing to revive,
+   * and without the guard a share whose producer is gone would spin.
+   */
+  using _liveness = interval(1000, () => {
+    const current = state.peek()
+    if (current.phase === 'ready' && current.client.closed) void ensureLive()
+  })
+
+  const onVisible = () => {
+    if (document.visibilityState === 'visible') void ensureLive()
+  }
+  document.addEventListener('visibilitychange', onVisible)
+  ctx.aborted.addEventListener('abort', () => {
+    document.removeEventListener('visibilitychange', onVisible)
+  })
 
   // Drop the mount when the session unmounts (ticket change / leave).
   ctx.aborted.addEventListener('abort', () => {
@@ -589,9 +760,15 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
   })
 
   async function downloadFiles(files: FileNode[], baseName: string): Promise<void> {
+    if (transfer.peek() || files.length === 0) return
+    // Re-dial first if the tab was away long enough to lose the connection.
+    // Without this the first click after coming back always failed, and the
+    // failure named an internal stream operation rather than the cause.
+    await ensureLive()
     const current = state.peek()
-    if (current.phase !== 'ready' || transfer.peek() || files.length === 0) return
+    if (current.phase !== 'ready') return
     const abort = new AbortController()
+    downloadError.value = null
     transfer.value = {
       kind: 'download',
       progress: {
@@ -611,10 +788,14 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
         : zipStream(current.client, files, onProgress, abort.signal)
       await saveStream(stream, single ? single.name : `${baseName}.zip`, abort.signal)
     } catch (error) {
-      // Cancelling is a decision, not a failure — and the callers only ever
-      // `void` this, so an unswallowed abort would surface as an unhandled
-      // rejection. Anything else still propagates.
-      if (!abort.signal.aborted) throw error
+      // Cancelling is a decision, not a failure. Anything else is reported on
+      // the page rather than rethrown: every caller `void`s this, so a
+      // rethrow became an unhandled rejection — the user saw a crash overlay
+      // naming an internal operation, and the actual cause (producer gone, or
+      // a connection expired while the tab was backgrounded) reached nobody.
+      if (!abort.signal.aborted) {
+        downloadError.value = error instanceof Error ? error.message : String(error)
+      }
     } finally {
       if (transfer.peek()?.kind === 'download') transfer.value = null
     }
@@ -644,6 +825,11 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
     // this is unreachable without one — and reporting it after the click was
     // exactly the thing worth fixing.
     if (transfer.peek()) return
+    // Closes the gap between a connection dying and the poll noticing: a click
+    // landing in that second would otherwise mirror the whole file tree over a
+    // connection that is already gone.
+    await ensureLive()
+    if (state.peek().phase !== 'ready') return
     mountError.value = null
     try {
       const session = await pickMountRoot()
@@ -685,7 +871,10 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
     const total = files.reduce((sum, file) => sum + file.size, 0)
     const active = transfer.value
     const mounted = mountSession.value !== null
-    const mountable = canMount()
+    // Re-dialling a connection lost to a background tab. Browsing is unaffected
+    // — the tree is local — so only the two actions that reach the peer wait.
+    const redialling = reviving.value
+    const mountable = canMount() && !redialling
     const showingInfo = props.view === 'info'
     const closeInfo = () => {
       navigateToShare(props.ticket, 'files')
@@ -699,16 +888,25 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
       </Button>
     )
     const err = mountError.value
-    const status = active
-      ? transferLabel(active.kind)
-      : mounted
-        ? 'mounted'
-        : 'ready'
-    const crumb = showingInfo
-      ? 'info'
+    const status = redialling
+      ? 'reconnecting'
       : active
         ? transferLabel(active.kind)
-        : 'files'
+        : mounted
+          ? 'mounted'
+          : 'ready'
+    // `reconnecting` outranks the transfer label: the transfer is what is
+    // *waiting*, and naming it here would say "downloading" while nothing is
+    // moving. `status` alone was not enough — it renders only in the Info
+    // pane, so a revival on the file browser had no visible sign at all beyond
+    // a briefly disabled button.
+    const crumb = showingInfo
+      ? 'info'
+      : redialling
+        ? 'reconnecting'
+        : active
+          ? transferLabel(active.kind)
+          : 'files'
     const infoButton = (
       <Button variant="secondary" onclick={openInfo}>
         Info
@@ -764,17 +962,23 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
               {mountButton()}
             </span>
           )}
-          <Button variant="secondary" onclick={() => void downloadAll()}>
+          <Button
+            variant="secondary"
+            onclick={() => void downloadAll()}
+            disabled={redialling}
+          >
             Download
           </Button>
         </Stack>
       )
     }
 
+    const downloadErr = downloadError.value
     const belowBar =
-      err || built.skipped > 0 ? (
+      err || downloadErr || built.skipped > 0 ? (
         <>
           {err ? <Text color="danger">{err}</Text> : null}
+          {downloadErr ? <Text color="danger">{downloadErr}</Text> : null}
           {built.skipped > 0 ? (
             <Text color="warning">
               {built.skipped} entries hidden — unsafe paths in the peer&apos;s manifest
@@ -793,6 +997,11 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
             status={status}
             mounted={mounted}
             mountError={err}
+            dev={props.dev === true}
+            killDisabled={redialling}
+            onKillConnection={() => {
+              current.client.close_connection()
+            }}
             onClose={closeInfo}
           />
         ) : (
@@ -803,7 +1012,7 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
               path.value = next
             }}
             onDownload={() => void downloadSelected()}
-            downloadDisabled={active !== null}
+            downloadDisabled={active !== null || redialling}
           />
         )}
       </SessionChrome>
@@ -823,12 +1032,15 @@ export const App = component(function* (_props, ctx: Ctx) {
     if (!current) return <Home />
     // The transport is in the key as well as the props: changing it has to
     // remount the session, because a live client cannot switch data paths.
+    // `dev` deliberately stays out of the key — toggling a debug pane must not
+    // redial the share out from under the tab.
     return (
       <Session
         key={clientKey(current.ticket, current.transport)}
         ticket={current.ticket}
         view={current.view}
         transport={current.transport}
+        dev={current.dev}
       />
     )
   }

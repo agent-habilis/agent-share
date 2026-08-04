@@ -386,6 +386,42 @@ impl ShareClient {
         self.data_path.clone()
     }
 
+    /// Has the mount connection gone away?
+    ///
+    /// A tab that is backgrounded loses it intermittently: the browser
+    /// throttles timers — measured at 13–20 s intervals in Safari after about
+    /// ten seconds hidden — and QUIC's keep-alive cannot outrun the idle
+    /// timeout at that cadence. Nothing announces it, because [`Self::watch`]'s
+    /// follower simply returns when the connection closes.
+    ///
+    /// So the page asks before it acts, and dials again when the answer is
+    /// yes. Reconnecting is the only honest fix: a dead connection cannot be
+    /// revived, and the alternative is a tab that looks connected and fails
+    /// every action until it is reloaded.
+    #[wasm_bindgen(getter)]
+    pub fn closed(&self) -> bool {
+        self.connection.close_reason().is_some()
+    }
+
+    /// Close the mount connection on purpose, so recovery can be exercised.
+    ///
+    /// Behind `?dev=true` in the Info pane. The failure this exists to
+    /// rehearse is intermittent — a backgrounded tab loses its connection only
+    /// sometimes — so before this the only way to test the reconnect path was
+    /// to idle a tab for minutes and hope. Two such attempts produced no
+    /// evidence either way.
+    ///
+    /// **It is not a reproduction of the bug.** The real death is silent:
+    /// timers stretch past the keep-alive interval, packets stop arriving, and
+    /// QUIC notices 30 s later. This closes the connection outright. What the
+    /// two share is the state afterwards — [`Self::closed`] is true — which is
+    /// all the recovery path keys on, and recovery is exactly what needs
+    /// testing. Nothing here re-dials: that is left to the ordinary triggers,
+    /// because a button that healed itself would bypass them.
+    pub fn close_connection(&self) {
+        self.connection.close(0u32.into(), b"dev: closed from the info pane");
+    }
+
     /// The whole tree, in one shot: `{ dirs: [...], files: [...] }`.
     ///
     /// One request by design — the protocol has no per-directory listing op,
@@ -398,7 +434,7 @@ impl ShareClient {
             .connection
             .open_bi()
             .await
-            .map_err(|error| err("open manifest stream", &error))?;
+            .map_err(|error| stream_open_failed("could not fetch the listing", &error))?;
         send.write_all(&framing::encode_manifest_request(&self.secret))
             .await
             .map_err(|error| err("send manifest request", &error))?;
@@ -459,7 +495,7 @@ impl ShareClient {
             .connection
             .open_bi()
             .await
-            .map_err(|error| err("open read stream", &error))?;
+            .map_err(|error| stream_open_failed("could not read the file", &error))?;
         send.write_all(&framing::encode_read_request(
             &self.secret,
             index,
@@ -938,7 +974,7 @@ async fn echo_once(client: &ShareClient) -> Result<f64, JsValue> {
         .connection
         .open_bi()
         .await
-        .map_err(|error| err("open echo stream", &error))?;
+        .map_err(|error| stream_open_failed("bench echo", &error))?;
     send.write_all(&request)
         .await
         .map_err(|error| err("send echo", &error))?;
@@ -961,7 +997,7 @@ async fn fill_once(client: &ShareClient, want: u32) -> Result<u64, JsValue> {
         .connection
         .open_bi()
         .await
-        .map_err(|error| err("open fill stream", &error))?;
+        .map_err(|error| stream_open_failed("bench fill", &error))?;
     send.write_all(&request)
         .await
         .map_err(|error| err("send fill", &error))?;
@@ -1555,6 +1591,30 @@ fn relay_mode(ticket: &MountTicket) -> RelayMode {
 
 fn err(context: &str, error: &impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{context}: {error}"))
+}
+
+/// Explain a failure to open a stream in terms of what actually broke.
+///
+/// `open_bi()` has no timeout of its own: it parks until stream credit arrives
+/// and the *only* way it returns an error is a connection-level failure. So
+/// reporting it as "open read stream: timed out" blames stream setup for the
+/// connection's death, which is how one such failure cost an afternoon.
+///
+/// `TimedOut` is the connection's idle timeout, and in a tab the way a share
+/// reaches it is being backgrounded: Safari throttles timers to 13–20 s
+/// intervals after roughly ten seconds hidden (measured), which is longer than
+/// QUIC's keep-alive interval, so the connection goes quiet and expires. The
+/// message says so, because "timed out" alone sends the reader looking at the
+/// network.
+fn stream_open_failed(what: &str, error: &iroh::endpoint::ConnectionError) -> JsValue {
+    if matches!(error, iroh::endpoint::ConnectionError::TimedOut) {
+        return JsValue::from_str(&format!(
+            "{what}: the connection to the producer expired while idle. \
+             A backgrounded tab throttles timers below the keep-alive interval, \
+             which is enough to lose it. Reload the page to reconnect."
+        ));
+    }
+    err(&format!("{what}: connection to the producer lost"), error)
 }
 
 fn serde_wasm<T: serde::Serialize>(value: &T) -> Result<JsValue, JsValue> {

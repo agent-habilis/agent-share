@@ -6,7 +6,7 @@
  * window for the up/down rates, so it cannot lag the display.
  */
 
-import { Stack, Text, roleVar } from 'moonspace-ui'
+import { Button, Stack, Text, roleVar } from 'moonspace-ui'
 import { component, interval, listen, signal } from 'visage-dom'
 import type { Ctx } from 'visage-dom'
 
@@ -26,6 +26,12 @@ export interface TechInfoProps {
   status: string
   mounted: boolean
   mountError: string | null
+  /** Reveal the dev tools. Set by `?dev=true`; off for anyone handed a link. */
+  dev: boolean
+  /** Close the mount connection, so the reconnect path can be exercised. */
+  onKillConnection: () => void
+  /** True while a reconnect is already running — nothing left to kill. */
+  killDisabled: boolean
   onClose: () => void
 }
 
@@ -292,6 +298,41 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
           */}
           {info?.transfer.mount_fallback_reason ? (
             <Text color="warning">fell back: {info.transfer.mount_fallback_reason}</Text>
+          ) : null}
+
+          {/*
+            Behind `?dev=true`, and off for anyone handed a share link.
+
+            Killing the connection is the only way to rehearse recovery on
+            demand: the real failure — a backgrounded tab whose timers stretch
+            past the keep-alive interval — happens only sometimes, so testing
+            the reconnect used to mean idling a tab for minutes and hoping.
+
+            Nothing here re-dials. Recovery is left to the ordinary triggers
+            (press Download, or leave and return to the tab), because those are
+            the paths worth testing and a self-healing button would skip them.
+            So clicking this looks like it does nothing, which is the point.
+          */}
+          {props.dev ? (
+            <>
+              <Text color="fgMuted" caps>
+                Dev
+              </Text>
+              <Stack direction="row" gap={1}>
+                <Button
+                  variant="secondary"
+                  onclick={props.onKillConnection}
+                  disabled={props.killDisabled}
+                >
+                  Kill connection
+                </Button>
+              </Stack>
+              <Text color="fgSubtle">
+                Closes the mount connection. Nothing visible happens until you
+                press Download or leave and return to this tab — that is what
+                triggers the reconnect.
+              </Text>
+            </>
           ) : null}
         </Stack>
       </div>
