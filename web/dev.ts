@@ -5,6 +5,11 @@
  *
  * `/*` is the SPA catch-all so `/files/<ticket>` and `/info/<ticket>` hit the
  * app; `/lab` and the wasm path are more specific and win first.
+ *
+ * `PORT` picks the port, so two of these can run at once — one per checkout, or
+ * one beside `bun run preview`. Bun reads `PORT` on its own when `port` is
+ * omitted, but only as an undocumented default; spelling it out is what makes it
+ * discoverable from here.
  */
 
 import index from './index.html'
@@ -21,6 +26,7 @@ if (!(await Bun.file(WASM_SRC).exists())) {
 }
 
 const server = Bun.serve({
+  port: Number(process.env.PORT ?? 3000),
   routes: {
     '/lab': lab,
     '/lab/': lab,

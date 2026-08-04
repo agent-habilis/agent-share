@@ -883,7 +883,7 @@ const Session = component<{
       navigateToShare(props.ticket, 'info')
     }
     const mountButton = () => (
-      <Button variant="secondary" onclick={() => void mount()} disabled={!mountable}>
+      <Button variant="ghost" onclick={() => void mount()} disabled={!mountable}>
         {mounted ? 'Unmount' : 'Mount'}
       </Button>
     )
@@ -908,7 +908,7 @@ const Session = component<{
           ? transferLabel(active.kind)
           : 'files'
     const infoButton = (
-      <Button variant="secondary" onclick={openInfo}>
+      <Button variant="ghost" onclick={openInfo}>
         Info
       </Button>
     )
@@ -921,7 +921,7 @@ const Session = component<{
     let trailing: Child
     if (showingInfo) {
       trailing = (
-        <Button variant="secondary" onclick={closeInfo}>
+        <Button variant="ghost" onclick={closeInfo}>
           Close
         </Button>
       )

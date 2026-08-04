@@ -4,6 +4,11 @@
  * Bun's HTML multipage server rebundles source; this only hands out the
  * already-built files so preview matches a static host. Extensionless paths
  * (share routes like `/files/<ticket>`) fall back to the SPA `index.html`.
+ *
+ * `PORT` picks the port, so a preview can run alongside `bun run dev` instead of
+ * losing a coin flip for 3000 and exiting `EADDRINUSE`. Bun reads `PORT` on its
+ * own when `port` is omitted, but only as an undocumented default — spelling it
+ * out is what makes it discoverable from here.
  */
 
 const ROOT = new URL('./dist/', import.meta.url)
@@ -24,6 +29,7 @@ function looksLikeAsset(pathname: string): boolean {
 }
 
 const server = Bun.serve({
+  port: Number(process.env.PORT ?? 3000),
   async fetch(req) {
     const { pathname } = new URL(req.url)
 

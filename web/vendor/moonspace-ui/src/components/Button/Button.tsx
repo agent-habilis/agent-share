@@ -19,12 +19,17 @@ export interface ButtonProps {
 }
 
 /*
- * The affordance is the box: a fill for the two variants that carry weight, an
- * outline for the ones that don't. It used to be a pair of `[ ]` brackets in
+ * The affordance is the box: a fill for the three variants that carry weight,
+ * nothing at all for `ghost`. It used to be a pair of `[ ]` brackets in
  * pseudo-elements, which meant `primary` painted its accent edge-to-edge across
  * them with no breathing room and read as a highlighted string rather than a
  * control. `oneRowChrome` supplies the padding, the border and the box; only
  * colour varies below.
+ *
+ * `ghost` carries `secondary`'s text colour and none of its fill. Muted text
+ * was the earlier distinction, and it made the button read as de-emphasised
+ * prose rather than as a control of equal rank sitting one weight down — the
+ * missing box already says that, and says it without touching legibility.
  */
 const BUTTON = css({
   ...oneRowChrome,
@@ -41,10 +46,10 @@ const BUTTON = css({
   },
   '&[data-variant="secondary"]': {
     color: T.msFg,
-    outlineColor: T.msBorderStrong,
+    background: T.msBgRaised,
   },
   '&[data-variant="ghost"]': {
-    color: T.msFgMuted,
+    color: T.msFg,
   },
   '&[data-variant="danger"]': {
     background: T.msDanger,
@@ -58,16 +63,22 @@ const BUTTON = css({
     },
   },
   /*
-   * Hover fills the box with the colour already outlining it, so the border
-   * reads as the button growing into itself rather than as a second, unrelated
-   * cue. Replaces the underline the bracket-era button used: with a box to
-   * fill, underlining the label only added a third thing moving at once.
+   * Hover is one step further up the same stack the button already sits on:
+   * sunken page, raised button, this. Nothing is outlined, so the fill is the
+   * only thing that can carry the state — which is also why the bracket-era
+   * underline went, since it read as a second, unrelated cue.
    */
   '&[data-variant="secondary"]:hover:not(:disabled)': {
     background: T.msBorderStrong,
   },
+  /*
+   * Ghost steps up to exactly what `secondary` paints at rest, rather than to
+   * `secondary`'s own hover. It is a weight below `secondary`, and hovering it
+   * onto the same fill `secondary` hovers onto would collapse the two — and
+   * leave ghost, the lighter control, looking heavier than the one above it.
+   */
   '&[data-variant="ghost"]:hover:not(:disabled)': {
-    background: T.msBorderStrong,
+    background: T.msBgRaised,
   },
   /*
    * Focus recolours the edge rather than drawing a second ring, the way Input
@@ -89,6 +100,14 @@ const BUTTON = css({
   },
   '&:disabled': {
     ...disabled,
+  },
+  /*
+   * Ghost is the one variant with no box to grey out, so it keeps none here
+   * either — the subtle text `disabled` sets is the whole signal. Painting the
+   * shared fill would make the box *appear* on the way to disabled and vanish
+   * on the way back, which is the one thing the variant exists not to do.
+   */
+  '&:disabled:not([data-variant="ghost"])': {
     background: T.msBgRaised,
   },
 })
