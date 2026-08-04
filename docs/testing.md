@@ -93,6 +93,7 @@ report a clean pass.
 | `web-list` | the manifest arrives and every file appears in the tree | the floor: nothing below matters if this breaks |
 | `web-download-single` | bytes are **identical to source**, by digest | nothing anywhere compares transferred content; the bench checks a byte *count* against `io::sink()` |
 | `web-download-zip` | a 301-file share arrives as an archive holding 301 entries | a large multi-file archive completing at all — see the caveat below |
+| `web-download-dismissed` | dismissing the save dialog leaves **nothing** on the page, and the next download still works | closing the dialog printed `Failed to execute 'showSaveFilePicker'…` in red; the cancel suppression tested the Cancel *button*, which a dismissal never presses |
 | `web-reconnect` | kill the connection → it revives unprompted, and the revived session **delivers the file** | a backgrounded tab lost its connection and every action failed until reload — a page that merely *looks* connected is the bug, so the cell downloads |
 | `web-producer-gone` | the failure appears on the page | it appeared as an unhandled rejection in a crash overlay, naming an operation that was not at fault |
 | `web-transport-webrtc` | bytes flow with `?transport=webrtc` | the lane browsers depend on |
@@ -121,6 +122,7 @@ regression rather than assumed to work:
 | `web-reconnect` | disable the 1 s liveness poll | **fails** — "timed out waiting for the app to notice the connection died", and the page dump shows a healthy-looking share with an enabled Download button, which is exactly the bug's signature |
 | every cell | `Promise.reject` inside `bringUp` | **fails** — the rejection invariant catches it |
 | `web-list`, `web-transport-*`, `web-producer-gone` | dev server killed mid-run | **fail** — `ERR_CONNECTION_REFUSED`, quoted from the page |
+| `web-download-dismissed` | narrow the suppression back to `abort.signal.aborted` alone | **fails** — the DOM message is quoted back out of the page dump |
 | `web-download-zip` | build the zip entries eagerly with `.map()` | **passes — the cell does not catch it** |
 
 That last row is a real limit and is recorded rather than papered over. Reverting
@@ -138,6 +140,16 @@ handed, so the cells read a SHA-256 (and, for the archive, its entry count)
 instead of chasing a file into Chrome's download directory. The write to disk is
 the browser's; everything upstream of it — chunked reads, the zipper, `pipeTo`,
 the abort wiring — is still exercised.
+
+The stub also stands in for a user who says *no*: with `window.__e2eSaveAbort`
+set it rejects with the `AbortError` a dismissed dialog produces, and it counts
+its calls in `window.__e2eSaveAsks` so a cell can tell a dismissed dialog from
+one that never opened — both leave nothing saved.
+
+What no cell can assert is that the progress bar stays down *while* the dialog
+is open: the stub settles in a microtask, so there is no window to observe. That
+half of the fix — the picker opens before the transfer starts, so the dialog no
+longer sits over a `downloading 0%` row — is a manual check.
 
 ### The dev server takes an ephemeral port
 
@@ -165,6 +177,7 @@ privileged enable and is documented in-repo as unreliable on this host.
 |---|---|---|
 | idle reconnect | open a share, leave the tab **hidden** 5+ min, return, press Download | reconnects and downloads; no reload needed |
 | no File System Access | press Download | the in-memory Blob path is used; there is no save dialog — Safari has no `showSaveFilePicker` |
+| dismissed save dialog (Chrome) | press Download, close the dialog | nothing changes: no progress bar goes up while the dialog is open, and no red text is left behind |
 | timer throttling | in a hidden tab, time `setTimeout(1000)` | gaps stretch to 13–20 s after ~10 s hidden; this is what starves QUIC's keep-alive |
 | relay fallback | open with a producer ICE cannot reach | Info shows `transport relay` and a `fell back:` reason, and bytes still arrive |
 

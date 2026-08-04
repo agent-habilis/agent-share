@@ -33,8 +33,8 @@ export interface Progress {
  * an empty chunk means the file ended, not that something failed.
  *
  * `signal` is checked per chunk rather than left to `pipeTo` alone: the Blob
- * fallback in `saveStream` has no pipe to abort, so this is the only place a
- * cancel can reach it.
+ * fallback in `pickSaveTarget` has no pipe to abort, so this is the only place
+ * a cancel can reach it.
  */
 function fileStream(
   reader: Reader,
@@ -137,41 +137,56 @@ function countingReader(
   }
 }
 
-/**
- * Save the stream, preferring a direct-to-disk pipe.
- *
- * Aborting `signal` tears down the pipe, which aborts the writable rather than
- * closing it — so a cancelled download never commits a partial file.
- *
- * @returns `true` when it streamed to disk, `false` when it fell back to a
- * Blob (and therefore held the whole download in memory).
- */
-export async function saveStream(
-  stream: ReadableStream<Uint8Array>,
-  suggestedName: string,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  const picker = (
-    window as unknown as {
-      showSaveFilePicker?: (options: { suggestedName: string }) => Promise<{
-        createWritable(): Promise<WritableStream<Uint8Array>>
-      }>
-    }
-  ).showSaveFilePicker
+/** Somewhere to put the bytes, chosen before any of them are asked for. */
+export interface SaveTarget {
+  /**
+   * `true` when bytes go straight to disk, `false` when they go through a Blob
+   * and are therefore held whole in memory.
+   */
+  readonly toDisk: boolean
+  /**
+   * Consume `stream` into the chosen destination.
+   *
+   * Aborting `signal` tears down the pipe, which aborts the writable rather
+   * than closing it — so a cancelled download never commits a partial file.
+   */
+  write(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): Promise<void>
+}
 
+/**
+ * Ask where to save. AbortError propagates for a dismissed dialog.
+ *
+ * Picking is separate from writing so the caller can put the dialog *before*
+ * the stream exists. Both halves matter: a `ReadableStream` pulls as soon as it
+ * is constructed (see `zipStream`), so building one first means a dismissed
+ * dialog has already opened reads against the peer — and the caller cannot show
+ * a progress bar for a transfer that has nowhere to go yet.
+ */
+export async function pickSaveTarget(suggestedName: string): Promise<SaveTarget> {
+  const picker = window.showSaveFilePicker
   if (picker) {
     const handle = await picker({ suggestedName })
-    const writable = await handle.createWritable()
-    await stream.pipeTo(writable, signal ? { signal } : undefined)
-    return true
+    return {
+      toDisk: true,
+      async write(stream, signal) {
+        const writable = await handle.createWritable()
+        await stream.pipeTo(writable, signal ? { signal } : undefined)
+      },
+    }
   }
 
-  const blob = await new Response(stream).blob()
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = suggestedName
-  anchor.click()
-  URL.revokeObjectURL(url)
-  return false
+  // No File System Access API (Safari, Firefox): nothing to pick, so the whole
+  // download lands in memory and leaves through an anchor.
+  return {
+    toDisk: false,
+    async write(stream) {
+      const blob = await new Response(stream).blob()
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = suggestedName
+      anchor.click()
+      URL.revokeObjectURL(url)
+    },
+  }
 }

@@ -20,7 +20,13 @@ import type { Child, Ctx } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
 import { TechInfo } from './TechInfo.tsx'
-import { saveStream, singleFileStream, zipStream, type Progress } from './download.ts'
+import {
+  pickSaveTarget,
+  singleFileStream,
+  zipStream,
+  type Progress,
+  type SaveTarget,
+} from './download.ts'
 import {
   canMount,
   disposeMount,
@@ -767,8 +773,25 @@ const Session = component<{
     await ensureLive()
     const current = state.peek()
     if (current.phase !== 'ready') return
-    const abort = new AbortController()
     downloadError.value = null
+    // One file travels as itself; only a multi-file selection needs a ZIP.
+    const single = files.length === 1 ? files[0] : null
+
+    // The destination is chosen before anything else exists. Dismissing the
+    // dialog then costs nothing to unwind: no progress bar went up over a
+    // transfer that had nowhere to go, and no read was opened against the peer
+    // — a `ReadableStream` pulls the moment it is constructed.
+    let target: SaveTarget
+    try {
+      target = await pickSaveTarget(single ? single.name : `${baseName}.zip`)
+    } catch (error) {
+      // User dismissed the picker — not an error worth surfacing.
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      downloadError.value = error instanceof Error ? error.message : String(error)
+      return
+    }
+
+    const abort = new AbortController()
     transfer.value = {
       kind: 'download',
       progress: {
@@ -781,19 +804,19 @@ const Session = component<{
       const onProgress = (progress: Progress) => {
         transfer.value = { kind: 'download', progress, abort }
       }
-      // One file travels as itself; only a multi-file selection needs a ZIP.
-      const single = files.length === 1 ? files[0] : null
       const stream = single
         ? singleFileStream(current.client, single, onProgress, abort.signal)
         : zipStream(current.client, files, onProgress, abort.signal)
-      await saveStream(stream, single ? single.name : `${baseName}.zip`, abort.signal)
+      await target.write(stream, abort.signal)
     } catch (error) {
       // Cancelling is a decision, not a failure. Anything else is reported on
       // the page rather than rethrown: every caller `void`s this, so a
       // rethrow became an unhandled rejection — the user saw a crash overlay
       // naming an internal operation, and the actual cause (producer gone, or
       // a connection expired while the tab was backgrounded) reached nobody.
-      if (!abort.signal.aborted) {
+      const cancelled =
+        abort.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')
+      if (!cancelled) {
         downloadError.value = error instanceof Error ? error.message : String(error)
       }
     } finally {

@@ -75,7 +75,7 @@ struct Cell {
 /// The matrix, in one place so a skipped run still reports every row.
 ///
 /// A prerequisite missing at the top means nothing can run, and the honest
-/// output for that is seven skips with a reason — not silence, and not a pass.
+/// output for that is a skip per row with a reason — not silence, not a pass.
 const CELLS: &[Cell] = &[
     Cell {
         name: "web-list",
@@ -88,6 +88,10 @@ const CELLS: &[Cell] = &[
     Cell {
         name: "web-download-zip",
         run: cell_download_zip,
+    },
+    Cell {
+        name: "web-download-dismissed",
+        run: cell_download_dismissed,
     },
     Cell {
         name: "web-reconnect",
@@ -422,7 +426,9 @@ impl Page {
 /// it is handed. That is a deliberate trade: the write to disk is the browser's,
 /// and standing in for it buys a byte-exact assertion no other test in this repo
 /// makes, while still exercising the whole stream — chunked reads, the zipper,
-/// `pipeTo`, and the abort wiring.
+/// `pipeTo`, and the abort wiring. Setting `window.__e2eSaveAbort` makes the
+/// stub reject the way a dismissed dialog does, which is otherwise a path no
+/// cell could reach.
 fn arm() -> Res<()> {
     // Retried rather than run once: the reload is asynchronous, so the first
     // evaluate can land in the outgoing document and be thrown away with it.
@@ -484,25 +490,38 @@ const INSTRUMENT: &str = r"
   };
 
   window.__e2eSaved = null;
-  window.showSaveFilePicker = (options) => Promise.resolve({
-    createWritable: () => {
-      const parts = [];
-      return Promise.resolve(new WritableStream({
-        write(chunk) { parts.push(chunk); },
-        async close() {
-          const buffer = await new Blob(parts).arrayBuffer();
-          const bytes = new Uint8Array(buffer);
-          const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buffer));
-          window.__e2eSaved = {
-            name: options.suggestedName,
-            bytes: bytes.length,
-            sha256: [...digest].map((b) => b.toString(16).padStart(2, '0')).join(''),
-            entries: zipEntries(bytes),
-          };
-        },
-      }));
-    },
-  });
+  window.__e2eSaveAsks = 0;
+  window.__e2eSaveAbort = false;
+  window.showSaveFilePicker = (options) => {
+    // Counted so a cell can tell `the dialog was dismissed` apart from `the
+    // dialog never opened` — both leave `__e2eSaved` null.
+    window.__e2eSaveAsks += 1;
+    if (window.__e2eSaveAbort) {
+      // Chrome's own wording, so the cell fails on the exact text a user saw.
+      return Promise.reject(new DOMException(
+        `Failed to execute 'showSaveFilePicker' on 'Window': The user aborted a request.`,
+        'AbortError'));
+    }
+    return Promise.resolve({
+      createWritable: () => {
+        const parts = [];
+        return Promise.resolve(new WritableStream({
+          write(chunk) { parts.push(chunk); },
+          async close() {
+            const buffer = await new Blob(parts).arrayBuffer();
+            const bytes = new Uint8Array(buffer);
+            const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buffer));
+            window.__e2eSaved = {
+              name: options.suggestedName,
+              bytes: bytes.length,
+              sha256: [...digest].map((b) => b.toString(16).padStart(2, '0')).join(''),
+              entries: zipEntries(bytes),
+            };
+          },
+        }));
+      },
+    });
+  };
   return 'armed';
 })()
 ";
@@ -678,6 +697,61 @@ fn cell_download_zip(ctx: &Ctx<'_>) -> Res<()> {
             archive.entries
         )
         .into());
+    }
+    page.finish()
+}
+
+/// Dismissing the save dialog is a **no-op**, not a failure.
+///
+/// The bug: `downloadFiles` suppressed only the cancel *button* — it tested
+/// `abort.signal.aborted`, which a dismissed picker never sets — so closing the
+/// dialog left `Failed to execute 'showSaveFilePicker' on 'Window': The user
+/// aborted a request.` in red under the top bar. The picker also opened after
+/// the progress bar went up, so the dialog sat over a `downloading 0%` row with
+/// a Cancel button next to it.
+fn cell_download_dismissed(ctx: &Ctx<'_>) -> Res<()> {
+    let page = Page::open(ctx, 0, "")?;
+    wait_for_listing()?;
+
+    evaluate("String(window.__e2eSaveAbort = true)")?;
+    click("Download")?;
+    wait_for_true(
+        "window.__e2eSaveAsks > 0",
+        ACTION_TIMEOUT,
+        "the app to open the save dialog",
+    )?;
+
+    // The rejection is a microtask, but the render that would show it is not —
+    // so this waits rather than sampling the frame before the one that draws.
+    // There is nothing positive to poll for: on the fixed app the dismissal
+    // changes nothing on screen, which is the whole point.
+    std::thread::sleep(Duration::from_secs(2));
+    let quiet = evaluate(
+        "String(!/aborted|showSaveFilePicker|failed to execute/i\
+         .test(document.body.innerText))",
+    )?;
+    if quiet.trim() != "true" {
+        return Err(format!(
+            "dismissing the dialog put an error on the page:\n{}",
+            page_text()
+        )
+        .into());
+    }
+    if evaluate("String(window.__e2eSaved === null)")?.trim() != "true" {
+        return Err("a dismissed dialog still saved a file".into());
+    }
+    // Not asserted here: that the progress bar stayed down *while* the dialog
+    // was open. The stub rejects in a microtask, so there is no window in which
+    // to observe it, and a check that cannot fail is not one. That half of the
+    // fix is the Safari/Chrome manual row in `docs/testing.md`.
+
+    // Back to normal is the actual claim, and it is the half a lone
+    // no-error-text check would miss: a dismissal that left `transfer` set
+    // wedges the button and every later download with it.
+    evaluate("String(window.__e2eSaveAbort = false)")?;
+    let file = download()?;
+    if file.sha256 != page.blob_sha256 {
+        return Err("the download after a dismissed dialog delivered the wrong bytes".into());
     }
     page.finish()
 }
