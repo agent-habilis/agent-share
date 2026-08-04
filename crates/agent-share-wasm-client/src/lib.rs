@@ -156,7 +156,21 @@ pub struct ShareClient {
     /// viewers of one share peers rather than strangers. `None` when the mesh
     /// could not be joined; the share itself still works, so this is never
     /// allowed to fail a connect.
-    mesh: Option<mesh::MeshPeer>,
+    ///
+    /// Behind a `RefCell` so that [`Self::leave_mesh`] can take `&self`, which
+    /// is load-bearing rather than stylistic. wasm-bindgen holds an object
+    /// borrowed for the **entire lifetime of the future** returned by an async
+    /// `&self` method, and this type has four of them ([`Self::read`],
+    /// [`Self::manifest`], [`Self::watch`], [`Self::refresh_peer_ips`]). A
+    /// `&mut self` method called while any one of those is still pending
+    /// therefore panics with "recursive use of an object detected which would
+    /// lead to unsafe aliasing in Rust" — which is exactly what a revival did,
+    /// since it drops the old client via `leave_mesh` while reads may still be
+    /// parked on the connection that just died.
+    ///
+    /// So `ShareClient` deliberately exposes **no** `&mut self` method. That is
+    /// the invariant; this field is how it is kept.
+    mesh: RefCell<Option<mesh::MeshPeer>>,
 }
 
 fn new_share_client(
@@ -183,7 +197,7 @@ fn new_share_client(
         _session: session,
         mesh_endpoint,
         _endpoint: endpoint,
-        mesh: None,
+        mesh: RefCell::new(None),
     }
 }
 
@@ -242,7 +256,7 @@ impl ShareClient {
             None => mesh::default_card_parts(&client.data_path, Some("consumer".to_owned())),
         };
         match mesh::MeshPeer::join_share(&secret, &lookups, shared, card).await {
-            Ok(peer) => client.mesh = Some(peer),
+            Ok(peer) => *client.mesh.borrow_mut() = Some(peer),
             Err(error) => {
                 web_sys::console::warn_1(&JsValue::from_str(&format!(
                     "[share] mesh unavailable; peer counts disabled: {error:?}"
@@ -280,8 +294,16 @@ impl ShareClient {
         // milliseconds with no byte delta, which overwrites the real rate with
         // zero — the counters climb while the UI insists nothing is moving.
         let mut sampled: HashSet<String> = HashSet::new();
-        let mesh_hub = self.mesh.as_ref().map(mesh::MeshPeer::hub);
-        let hubs = [mesh_hub, self._hub.as_ref()];
+        // Cloned out, not borrowed across the loop below: `hub()` hands back a
+        // `&Arc`, and holding that reference would keep this `RefCell` borrowed
+        // across every `await` in the sweep — which is the borrow `leave_mesh`
+        // would then collide with, moving the panic rather than removing it.
+        let mesh_hub = self
+            .mesh
+            .borrow()
+            .as_ref()
+            .map(|peer| Arc::clone(peer.hub()));
+        let hubs = [mesh_hub, self._hub.clone()];
         for hub in hubs.into_iter().flatten() {
             for id in hub.live_peer_ids() {
                 let key = id.to_string();
@@ -325,7 +347,7 @@ impl ShareClient {
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn peers_gossip(&self) -> u32 {
-        self.mesh.as_ref().map_or(0, mesh::MeshPeer::peers_gossip)
+        self.mesh.borrow().as_ref().map_or(0, mesh::MeshPeer::peers_gossip)
     }
 
     /// Peers we hold a direct `WebRTC` data channel with.
@@ -346,7 +368,7 @@ impl ShareClient {
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn max_direct(&self) -> u32 {
-        self.mesh.as_ref().map_or(0, mesh::MeshPeer::max_direct)
+        self.mesh.borrow().as_ref().map_or(0, mesh::MeshPeer::max_direct)
     }
 
     /// Leave the share's mesh, announcing departure so peers drop us now.
@@ -370,8 +392,12 @@ impl ShareClient {
     /// unload (a `sendBeacon`-shaped path, or a relay-side hint), not an async
     /// gossip broadcast. Note the *direct* count is unaffected by any of this —
     /// the data channel closes immediately and `peers_direct` drops at once.
-    pub fn leave_mesh(&mut self) {
-        let Some(peer) = self.mesh.take() else {
+    /// Takes `&self`, not `&mut self`, and that is a hard requirement rather
+    /// than a preference — see the note on the `mesh` field. A `&mut self`
+    /// here panicked wasm-bindgen's borrow guard whenever a revival dropped
+    /// this client while one of its async methods was still pending.
+    pub fn leave_mesh(&self) {
+        let Some(peer) = self.mesh.borrow_mut().take() else {
             return;
         };
         wasm_bindgen_futures::spawn_local(async move {
@@ -591,8 +617,8 @@ impl ShareClient {
     fn info_json(&self) -> serde_json::Value {
         let producer = self.connection.remote_id().to_string();
         let local = self._endpoint.id().to_string();
-        let mesh_up = self.mesh.is_some();
-        let nickname = self.mesh.as_ref().map(|m| m.nickname());
+        let mesh_up = self.mesh.borrow().is_some();
+        let nickname = self.mesh.borrow().as_ref().map(|m| m.nickname());
         let peers_gossip = self.peers_gossip();
         let peers_direct = self.peers_direct();
         let max_direct = self.max_direct();
@@ -661,6 +687,7 @@ impl ShareClient {
     fn direct_peer_ids(&self) -> HashSet<String> {
         let mut ids: HashSet<String> = self
             .mesh
+            .borrow()
             .as_ref()
             .map(|mesh| {
                 mesh.hub()
@@ -688,7 +715,7 @@ impl ShareClient {
             &self.data_path,
             Some("consumer".to_owned()),
         );
-        let card_for = |id: &str| self.mesh.as_ref().and_then(|m| m.card_for(id));
+        let card_for = |id: &str| self.mesh.borrow().as_ref().and_then(|m| m.card_for(id));
         let peer_row = |id: &str,
                         role: &str,
                         flags: String,
@@ -781,7 +808,8 @@ impl ShareClient {
 
         // Gossip-only members publish meta cards but may never open a direct
         // hub session — still show them so the Peers list matches the roster.
-        if let Some(mesh) = self.mesh.as_ref() {
+        let mesh_ref = self.mesh.borrow();
+        if let Some(mesh) = mesh_ref.as_ref() {
             for card in mesh.known_cards() {
                 if !seen.insert(card.endpoint.clone()) {
                     continue;

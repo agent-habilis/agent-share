@@ -3,30 +3,6 @@
 Things found but not yet fixed. Each entry says what breaks and how it was
 found, so the next person does not have to rediscover it.
 
-## `leave_mesh` threw a recursive-borrow panic, once, unexplained
-
-Seen as an unhandled rejection while a revival retried against a dead producer:
-
-```
-recursive use of an object detected which would lead to unsafe aliasing in rust
-```
-
-That is wasm-bindgen's `RefCell` guard. The *escape route* is fixed —
-`release()` in `web/src/App.tsx` swallowed only `owned` rejecting, so a throw
-inside `leave_mesh` rejected the promise `.then` returns with nothing watching
-it; both legs are now caught and logged at `console.debug`. So it can no longer
-crash the page.
-
-**Why it threw is still unknown.** `leave_mesh` is the only `&mut self` method
-on `ShareClient` and it is synchronous — `spawn_local` schedules rather than
-runs inline — so its `borrow_mut` should not overlap anything, and every other
-method takes `&self`, where concurrent borrows are fine. Not reproduced in two
-targeted attempts, including replaying the exact sequence that produced it (a
-successful revival, then a dead producer, then a second kill).
-
-Next step: a wasm panic hook that captures a Rust-side backtrace. The JS stack
-was empty, which is why reading the code has not settled it.
-
 ## `cargo task ci` is red at HEAD, in two independent places
 
 Both confirmed pre-existing by stashing all local work and re-running, so
@@ -68,4 +44,15 @@ regardless of timer drift.
   to patch it. `build.ts` now content-hashes the wasm and rewrites the path in
   the emitted chunks, failing the build loudly if that literal ever disappears.
 - **Safari caching the bad copy hard.** A consequence of the two above; hashed
-  URLs make it unreachable.
+  URLs make it unreachable. Note the dev-server fix does *not* retroactively
+  evict what Safari already stored — an entry cached before `no-store` existed
+  keeps being served. `fetch(url, { cache: 'reload' })` from the console
+  replaces it without emptying the whole cache by hand.
+- **`leave_mesh` throwing wasm-bindgen's recursive-borrow panic.** Fixed
+  structurally rather than empirically: it was never reproduced in four
+  targeted attempts, but the hazard is provable from the signatures, since
+  wasm-bindgen holds an object borrowed for the entire lifetime of an async
+  `&self` future and `ShareClient` has four such methods. `mesh` moved behind a
+  `RefCell` so `leave_mesh` takes `&self`, leaving the type with **no `&mut
+  self` methods at all** — which is the invariant, and is checkable by
+  inspection even though the symptom never was.
