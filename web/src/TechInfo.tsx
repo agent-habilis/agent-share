@@ -1,18 +1,26 @@
 /**
  * Torrent-style session Info panel for the viewer.
  *
- * Renders in the app content area (not a modal). Counters and the getStats
- * sample both refresh every second — the sample interval is the averaging
- * window for the up/down rates, so it cannot lag the display.
+ * Renders in the app content area (not a modal). It does not sample: `Session`
+ * owns the app's one sampler and this pane repaints on the `tick` it publishes.
+ * Two samplers would each compute the other's second reading over a few
+ * milliseconds with no byte delta, overwriting the real rates with zero — the
+ * counters would climb while the UI insisted nothing was moving.
+ *
+ * That tick is 1s, and the interval *is* the averaging window for the up/down
+ * rates, since they come from differencing cumulative counters.
  */
 
 import { Stack, Text, roleVar } from 'moonspace-ui'
-import { component, interval, listen, signal } from 'visage-dom'
-import type { Ctx } from 'visage-dom'
+import { component, listen, signal } from 'visage-dom'
+import type { Ctx, ReadonlySignal } from 'visage-dom'
 
 import { missingSlots, peerAvailability } from './availability.ts'
+import { sortPeers } from './peers.ts'
 import type { PeerAvailability } from './availability.ts'
 import { formatIpWithFlag, isGeoLookupCandidate, lookupCountryCode } from './countryFlag/index.ts'
+import { formatRate, formatRatio, laneSummary, ratio } from './transferStats.ts'
+import type { LinkSample } from './transferStats.ts'
 import { humanBytes } from './tree.ts'
 
 export interface InfoClient {
@@ -22,6 +30,8 @@ export interface InfoClient {
 
 export interface TechInfoProps {
   client: InfoClient
+  /** The session sampler's tick. Read during render, to repaint on each one. */
+  tick: ReadonlySignal<number>
   fileCount: number
   totalBytes: number
   /** ready / mounting / syncing / downloading / mounted */
@@ -145,6 +155,11 @@ interface SessionInfo {
     mount_paths: string[]
     /** Why `dynamic` ended up on the relay. Null on a clean WebRTC connect. */
     mount_fallback_reason: string | null
+    /**
+     * Wire bytes on the mount connection, per path and in total — the last
+     * reading the session sampler took, never a fresh one. See `link.rs`.
+     */
+    link: LinkSample
   }
 }
 
@@ -156,16 +171,6 @@ function formatDuration(ms: number): string {
   if (h > 0) return `${h}h ${m}m ${s}s`
   if (m > 0) return `${m}m ${s}s`
   return `${s}s`
-}
-
-/** `12.3 KB/s`, or `—` when there is nothing to report yet.
- *
- * Rounded before formatting: `humanBytes` only fixes the decimals above 1 KB,
- * so a raw bytes-per-second below that renders every float digit it has.
- */
-function rate(bytesPerSecond: number): string {
-  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return '—'
-  return `${humanBytes(Math.round(bytesPerSecond))}/s`
 }
 
 /** Ping to one decimal — sub-millisecond on a loopback pair is normal. */
@@ -200,7 +205,6 @@ function readInfo(client: InfoClient): SessionInfo | null {
 }
 
 export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
-  const tick = signal(0)
   /** IP → ISO country code (or `null` after a failed / non-candidate lookup). */
   const countries = signal<Record<string, string | null>>({})
   const inflight = new Set<string>()
@@ -216,15 +220,8 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
     })
   }
 
-  using _tick = interval(1000, () => {
-    tick.value = tick.peek() + 1
-  })
-  // 1s: these are differenced counters, so the sampling interval *is* the
-  // averaging window. At 5s a transfer that starts and ends between samples
-  // never shows a rate at all.
-  using _ips = interval(1000, () => {
-    void props.client.refresh_peer_ips()
-  })
+  // One sweep on open, so a pane opened between ticks is not blank for up to a
+  // second. The recurring sweep belongs to the session's sampler.
   void props.client.refresh_peer_ips()
 
   using _keys = listen(window, 'keydown', (event: Event) => {
@@ -236,9 +233,13 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
   })
 
   yield () => {
-    tick.value
+    // Read, not used: this is the dependency that repaints the pane each time
+    // the session samples.
+    props.tick.value
     const countryMap = countries.value
     const info = readInfo(props.client)
+    // Absent until the session sampler has taken its first reading.
+    const link = info?.transfer.link ?? null
     const reach = info?.trackers.producer_reach
     const reachLine = reach
       ? [
@@ -253,14 +254,17 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
     // The manifest's file count, which the host already knows — a slot is a
     // file, so the grid has a width even before any peer publishes anything.
     const totalSlots = props.fileCount
-    const ourTree =
-      (info?.swarm.peers ?? []).find((peer) => peer.role === 'self')?.tree ?? null
-    const availabilities = (info?.swarm.peers ?? []).map((peer) =>
+    // Sorted once, here, because everything below reads from it. The wasm
+    // client's own order is hash-derived and reshuffles on every poll — see
+    // `peers.ts`.
+    const peers = sortPeers(info?.swarm.peers ?? [])
+    const ourTree = peers.find((peer) => peer.role === 'self')?.tree ?? null
+    const availabilities = peers.map((peer) =>
       peerAvailability(peer.id, peer.serving, peer.tree, totalSlots),
     )
     const gaps = totalSlots > 0 ? missingSlots(availabilities, totalSlots) : []
 
-    const peerRows = (info?.swarm.peers ?? []).map((peer) => {
+    const peerRows = peers.map((peer) => {
       if (peer.ip) requestCountry(peer.ip)
       return {
         ...peer,
@@ -276,6 +280,12 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
 
     return (
       <div
+        /*
+          The one pane in the app that exists to be copied out of — fingerprints,
+          relay URLs, peer addresses, fallback reasons. Selection is off
+          app-wide (see `app.css`); this opts the whole surface back in.
+        */
+        class="selectable"
         style={{
           flex: 1,
           minHeight: 0,
@@ -346,7 +356,7 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
                   {peer.bytes_sent > 0 || peer.bytes_received > 0 ? (
                     <>
                       <Text color="fgMuted">
-                        up {rate(peer.up_bps)} · down {rate(peer.down_bps)}
+                        up {formatRate(peer.up_bps)} · down {formatRate(peer.down_bps)}
                       </Text>
                       <Text color="fgMuted">ping {pingLabel(peer.rtt_ms)}</Text>
                       <Text color="fgMuted">
@@ -393,6 +403,29 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
           */}
           {info?.transfer.mount_fallback_reason ? (
             <Text color="warning">fell back: {info.transfer.mount_fallback_reason}</Text>
+          ) : null}
+          {/*
+            The mount connection's own counters, which — unlike the per-peer
+            rows above — answer on the relay path too: they come from the QUIC
+            state machine rather than a candidate pair. On a relay mount the
+            peer rows can show a kilobyte of mesh chatter while megabytes of
+            share moved right here, so this line is the one that reconciles.
+
+            Wire bytes, and a smaller unit than the peer rows: QUIC sits below
+            DTLS/SCTP on the WebRTC lane and below the relay's framing on the
+            other. The two are not addable, which is why they are separate
+            lines rather than one total.
+          */}
+          {link ? (
+            <>
+              <Text color="fgMuted">
+                mount wire: down {formatRate(link.total.down_bps)} · up{' '}
+                {formatRate(link.total.up_bps)} · received{' '}
+                {humanBytes(link.total.received)} · sent {humanBytes(link.total.sent)} ·
+                ratio {formatRatio(ratio(link.total.sent, link.total.received))}
+              </Text>
+              <Text color="fgSubtle">by path: {laneSummary(link.lanes)} received</Text>
+            </>
           ) : null}
         </Stack>
       </div>

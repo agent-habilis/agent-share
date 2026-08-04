@@ -15,12 +15,14 @@ import {
   Text,
   roleVar,
 } from 'moonspace-ui'
-import { component, computed, signal } from 'visage-dom'
+import { component, computed, interval, signal } from 'visage-dom'
 import type { Child, Ctx } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
 import { seedState, shareSeedSummary } from './seeding.ts'
 import { TechInfo } from './TechInfo.tsx'
+import { TransferStatus } from './TransferStatus.tsx'
+import type { LinkSample, TransferSnapshot } from './transferStats.ts'
 import { saveStream, singleFileStream, zipStream, type Progress } from './download.ts'
 import {
   canMount,
@@ -66,6 +68,12 @@ interface Client {
   info(): unknown
   /** Refresh ICE remote-candidate addresses (slower cadence). */
   refresh_peer_ips(): Promise<void>
+  /**
+   * Sample the mount connection's wire counters. **Not a getter** — it
+   * differences cumulative counters, so calling it twice in one tick zeroes the
+   * rates. Exactly one driver may call it; see the sampler in `Session`.
+   */
+  sample_link(): LinkSample
   manifest(): Promise<Manifest>
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
   /** Subscribe to tree changes. Each call delivers the whole manifest. */
@@ -198,12 +206,15 @@ function prunePath(current: string[], manifest: Manifest): string[] {
  */
 function SessionChrome({
   crumb,
+  center,
   trailing,
   belowBar,
   children,
 }: {
   /** When omitted, the top bar is just the brand. */
   crumb?: string
+  /** Status between the brand and the actions. Must be exactly `oneRow` tall. */
+  center?: Child
   trailing?: Child
   belowBar?: Child
   children: Child
@@ -226,7 +237,37 @@ function SessionChrome({
           gap: 'calc(1 * var(--ms-row))',
         }}
       >
-        <Stack direction="row" gap={2} justify="between">
+        {/*
+          A grid, not a flex row, and only because of the middle slot.
+
+          Centring the status in the *slack* between the two ends ties its
+          position to their widths, and both ends change width on their own
+          schedule — the Sync button alone relabels through `Sync` /
+          `Syncing share…` / `Seeding 6`. Measured, that dragged the whole
+          readout 23px sideways mid-transfer, which is precisely the jitter the
+          readout's own fixed-width fields exist to prevent, arriving one level
+          up.
+
+          Equal `minmax(0, 1fr)` rails on either side of an `auto` middle pin
+          the middle to the *container's* centre instead, so it holds still
+          whatever the ends do. `minmax(0, …)` rather than `1fr` so a rail may
+          shrink below its content on a narrow window; the middle is the one
+          thing that must not move.
+        */}
+        <div
+          style={{
+            display: 'grid',
+            // `minmax(0, auto)` for the middle, not plain `auto`: an `auto`
+            // track refuses to shrink below its content, so on a narrow window
+            // the actions overflow *into* the status and the two draw on top of
+            // each other. This lets the status be the one that gives.
+            gridTemplateColumns: center
+              ? 'minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr)'
+              : '1fr auto',
+            alignItems: 'center',
+            gap: '2ch',
+          }}
+        >
           <Stack direction="row" gap={1}>
             <Text weight="bold">agent-share</Text>
             {crumb ? (
@@ -236,8 +277,17 @@ function SessionChrome({
               </>
             ) : null}
           </Stack>
-          {trailing ?? null}
-        </Stack>
+          {center ? (
+            // `overflow: hidden` so a window too narrow for everything clips
+            // the status rather than shoving the actions off the edge.
+            <div style={{ display: 'flex', justifyContent: 'center', overflow: 'hidden' }}>
+              {center}
+            </div>
+          ) : null}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', minWidth: 0 }}>
+            {trailing ?? null}
+          </div>
+        </div>
         {belowBar ?? null}
       </div>
       <div
@@ -303,7 +353,10 @@ function FailedBody({ reason, kind }: { reason: string; kind?: FailureKind }) {
                   ? 'WebRTC could not open a path between the two browsers (LAN/mDNS and TURN both failed). On macOS, allow Local Network for this browser under System Settings → Privacy & Security → Local Network, hard-refresh both tabs, and retry.'
                   : 'A direct connection to this peer could not be established. Both ends may be behind restrictive NATs.'}
             </Text>
-            <Text color="fgSubtle">{reason}</Text>
+            {/* The raw error, which is exactly what gets pasted into a report. */}
+            <Text color="fgSubtle" class="selectable">
+              {reason}
+            </Text>
           </Stack>
         </Box>
       </div>
@@ -419,7 +472,11 @@ const Home = component(function* (_props, ctx: Ctx) {
                     </Text>
                   </Stack>
                   <Text color="fgMuted">Peers open this link:</Text>
-                  <Text>{url}</Text>
+                  {/*
+                    `Copy link` below takes the whole string; selection is for
+                    taking part of it — the ticket alone, say.
+                  */}
+                  <Text class="selectable">{url}</Text>
                   <Button
                     variant="primary"
                     onclick={() => {
@@ -491,6 +548,40 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
   /** In-flight sync, so the button can say what it is doing. */
   const seeding = signal<{ label: string } | null>(null)
   const seedError = signal<string | null>(null)
+  /**
+   * The latest transfer reading, from the one sampler below.
+   *
+   * A signal rather than a prop computed during render, so only the readouts
+   * that read it repaint each second — the file list must not.
+   */
+  const sample = signal<TransferSnapshot | null>(null)
+  /** Bumped by the same tick, for views that re-read `info()` rather than this. */
+  const tick = signal(0)
+
+  /*
+    The app's single sampler.
+
+    Both calls difference cumulative counters, so the interval *is* the
+    averaging window for every rate on screen — at 5s a transfer that starts and
+    ends between samples never shows a rate at all. And there is exactly one of
+    them: two samplers would each compute the other's second reading over a few
+    milliseconds with no byte delta, overwriting real rates with zero. The Info
+    pane used to own its own pair of intervals; it now reads what this produces.
+  */
+  using _sampler = interval(1000, () => {
+    const current = state.peek()
+    if (current.phase !== 'ready') return
+    // getStats, for the per-peer rows and the ICE addresses behind them.
+    void current.client.refresh_peer_ips()
+    // QUIC, for the whole connection — the half that answers on the relay path,
+    // where there is no candidate pair to ask.
+    sample.value = {
+      link: current.client.sample_link(),
+      gossip: current.client.peers_gossip,
+      direct: current.client.peers_direct,
+    }
+    tick.value = tick.peek() + 1
+  })
 
   let synced: SyncedState = emptySyncedState()
   let syncing = false
@@ -872,9 +963,14 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
     const belowBar =
       err || built.skipped > 0 ? (
         <>
-          {err ? <Text color="danger">{err}</Text> : null}
+          {/* Both are diagnostics, so both stay copyable — see `app.css`. */}
+          {err ? (
+            <Text color="danger" class="selectable">
+              {err}
+            </Text>
+          ) : null}
           {built.skipped > 0 ? (
-            <Text color="warning">
+            <Text color="warning" class="selectable">
               {built.skipped} entries hidden — unsafe paths in the peer&apos;s manifest
             </Text>
           ) : null}
@@ -882,10 +978,24 @@ const Session = component<{ ticket: string; view: ShareView; transport?: Transpo
       ) : null
 
     return (
-      <SessionChrome crumb={crumb} trailing={trailing} belowBar={belowBar}>
+      <SessionChrome
+        crumb={crumb}
+        center={
+          /*
+            Dropped while a transfer runs: that branch already gives the whole
+            row to a `ProgressBar`, which answers "what is moving" better than a
+            rate does, and two answers competing for one row is how the row stops
+            being one row.
+          */
+          active ? null : <TransferStatus sample={sample} />
+        }
+        trailing={trailing}
+        belowBar={belowBar}
+      >
         {showingInfo ? (
           <TechInfo
             client={current.client}
+            tick={tick}
             fileCount={files.length}
             totalBytes={total}
             status={status}

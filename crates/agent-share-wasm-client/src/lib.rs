@@ -50,6 +50,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+mod link;
 mod live_state;
 mod mesh;
 mod produce;
@@ -76,52 +77,18 @@ struct MeshEndpoint {
 /// Cached ICE remote candidate for one peer endpoint id.
 type IpCache = Rc<RefCell<HashMap<String, (Option<String>, Option<String>)>>>;
 
-/// Per-peer transport stats: cumulative counters, derived rates, and RTT.
+/// Per-peer transport meters, keyed by endpoint id string. See [`link`].
+type BytesCache = Rc<RefCell<HashMap<String, link::Meter>>>;
+
+/// Per-lane meters for the mount connection, keyed by [`link::path_label`].
 ///
-/// `f64` throughout because that is what `getStats` hands back — the counters
-/// sit well under 2^53, so nothing is lost and converting would only invent
-/// precision.
-#[derive(Debug, Clone, Copy, Default)]
-struct PeerStats {
-    sent: f64,
-    received: f64,
-    /// Bytes per second since the previous sample. Zero until there are two.
-    up_bps: f64,
-    down_bps: f64,
-    /// Round-trip time in milliseconds, when the pair has been measured.
-    rtt_ms: Option<f64>,
-    /// `js_sys::Date::now()` of this sample, for the next difference.
-    at_ms: f64,
-}
+/// Owned by [`ShareClient::sample_link`], read (never advanced) by
+/// [`ShareClient::info`]. `TOTAL_LANE` holds the whole-connection figure.
+type LinkCache = RefCell<HashMap<String, link::LaneMeter>>;
 
-impl PeerStats {
-    /// Fold a fresh reading in, carrying rates over from `self`.
-    ///
-    /// Rates come from differencing cumulative counters — WebRTC exposes no
-    /// instantaneous throughput for a data channel. A non-advancing clock or a
-    /// counter that went backwards (a renegotiated pair resets them) yields no
-    /// rate rather than a negative or infinite one.
-    fn sample(self, sent: f64, received: f64, rtt: Option<f64>, now_ms: f64) -> Self {
-        let elapsed_s = (now_ms - self.at_ms) / 1000.0;
-        let rate = |current: f64, previous: f64| {
-            if self.at_ms > 0.0 && elapsed_s > 0.0 && current >= previous {
-                (current - previous) / elapsed_s
-            } else {
-                0.0
-            }
-        };
-        Self {
-            up_bps: rate(sent, self.sent),
-            down_bps: rate(received, self.received),
-            sent,
-            received,
-            rtt_ms: rtt.map(|seconds| seconds * 1000.0),
-            at_ms: now_ms,
-        }
-    }
-}
-
-type BytesCache = Rc<RefCell<HashMap<String, PeerStats>>>;
+/// Cache key for the connection totals, which are not a path and so cannot
+/// collide with a [`link::path_label`].
+const TOTAL_LANE: &str = "total";
 
 /// A connected share, ready to list and read.
 #[wasm_bindgen]
@@ -146,8 +113,15 @@ pub struct ShareClient {
     connected_at_ms: f64,
     /// Last-known getStats IPs, keyed by endpoint id string.
     ip_cache: IpCache,
-    /// Last-known wire byte counters, keyed by endpoint id string.
+    /// Last-known candidate-pair counters, keyed by endpoint id string.
+    ///
+    /// The `getStats` half of [`link`] — per peer, and `WebRTC`-only.
     bytes_cache: BytesCache,
+    /// Last-known QUIC counters for the mount connection, per lane.
+    ///
+    /// The other half of [`link`], and the one that answers on the relay path
+    /// too. Advanced only by [`Self::sample_link`].
+    link_cache: LinkCache,
     // Held so the hub (and its data channel) outlives the connection when used.
     _hub: Option<Arc<BrowserHubTransport>>,
     _session: Option<BrowserSession>,
@@ -196,6 +170,7 @@ fn new_share_client(
         connected_at_ms: now_ms(),
         ip_cache: Rc::new(RefCell::new(HashMap::new())),
         bytes_cache: Rc::new(RefCell::new(HashMap::new())),
+        link_cache: RefCell::new(HashMap::new()),
         _hub: hub,
         _session: session,
         mesh_endpoint,
@@ -312,11 +287,11 @@ impl ShareClient {
                         .borrow_mut()
                         .insert(key.clone(), split_candidate(ip, kind));
                 }
-                if let Some((sent, received, rtt)) = hub.selected_pair_stats(&id).await {
+                if let Some((sent, received, rtt_ms)) = link::read_ice(hub, &id).await {
                     let now = now_ms();
                     let mut cache = self.bytes_cache.borrow_mut();
                     let previous = cache.get(&key).copied().unwrap_or_default();
-                    cache.insert(key, previous.sample(sent, received, rtt, now));
+                    cache.insert(key, previous.sample(sent, received, rtt_ms, now));
                 }
                 // Our own address, from the same selected pair. Any live
                 // session answers it — they all run on this tab's ICE agent —
@@ -336,6 +311,49 @@ impl ShareClient {
             }
         }
         Ok(())
+    }
+
+    /// Sample the mount connection's wire counters and return totals and rates.
+    ///
+    /// **A sampler, not a getter** — hence the name. Rates come from
+    /// differencing cumulative counters, so the caller's cadence *is* the
+    /// averaging window, and a second call within the same tick computes a rate
+    /// over a few milliseconds with no byte delta: it would overwrite the real
+    /// rate with zero. Exactly one driver may call this. [`Self::refresh_peer_ips`]
+    /// carries the same hazard for the same reason.
+    ///
+    /// Synchronous — the QUIC state machine answers without awaiting — and it
+    /// answers on the **relay** path as well as the `WebRTC` one, which is the
+    /// whole reason [`link`] exists. `getStats` cannot: there is no
+    /// `RTCPeerConnection` on the relay.
+    ///
+    /// Shape: `{ total: {…}, lanes: [{ label, selected, … }] }`, each meter
+    /// carrying `sent` / `received` / `up_bps` / `down_bps` / `rtt_ms`.
+    #[must_use]
+    #[wasm_bindgen]
+    pub fn sample_link(&self) -> JsValue {
+        let now = now_ms();
+        let mut cache = self.link_cache.borrow_mut();
+        let mut fold = |key: &str, sent: u64, received: u64, rtt_ms: Option<f64>, selected| {
+            let previous = cache.get(key).copied().unwrap_or_default();
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "wire byte counts stay far below 2^53; see link::Meter"
+            )]
+            let meter = previous.meter.sample(sent as f64, received as f64, rtt_ms, now);
+            cache.insert(key.to_owned(), link::LaneMeter { meter, selected });
+        };
+
+        let (sent, received) = link::read_quic_total(&self.connection);
+        fold(TOTAL_LANE, sent, received, None, false);
+        for lane in link::read_quic(&self.connection) {
+            fold(&lane.label, lane.sent, lane.received, lane.rtt_ms, lane.selected);
+        }
+
+        // Rendered through the same function `info` uses, so a sampled reading
+        // and a reported one cannot describe the same state differently.
+        let json = link::to_json(&cache, TOTAL_LANE);
+        js_sys::JSON::parse(&json.to_string()).unwrap_or(JsValue::NULL)
     }
 
     /// Members on this share's mesh, including us. `0` when the mesh is not up.
@@ -868,8 +886,19 @@ impl ShareClient {
                 "mount_path": live_path,
                 "mount_paths": path_labels(&self.connection),
                 "mount_fallback_reason": self.fallback_reason,
+                "link": self.link_snapshot(),
             },
         })
+    }
+
+    /// The last [`Self::sample_link`] reading, **without taking a new one**.
+    ///
+    /// `info` is documented as a getter that never samples, and it has to stay
+    /// one: the Info pane and the status bar read on the same tick, so a
+    /// sampling `info` would difference over a few milliseconds and zero the
+    /// rates the bar had just computed. Empty until the driver has sampled once.
+    fn link_snapshot(&self) -> serde_json::Value {
+        link::to_json(&self.link_cache.borrow(), TOTAL_LANE)
     }
 
     /// Endpoint ids we hold a live data channel with, across both hubs.
@@ -1028,6 +1057,7 @@ impl ShareClient {
                 ));
             }
         }
+
         rows
     }
 }
@@ -1037,24 +1067,6 @@ fn identity_fingerprint(secret: &[u8; SECRET_LEN]) -> String {
     let head = key.get(..8).unwrap_or(&key);
     let tail = key.get(key.len().saturating_sub(8)..).unwrap_or("");
     format!("{head}…{tail}")
-}
-
-/// One path's transport, as the label the UI and the mode assertion both use.
-///
-/// `data_path`, `mount_paths` and the WebRTC-mode check have to agree on what
-/// counts as "webrtc", so they share this rather than each carrying a copy of
-/// the match.
-fn path_label(addr: &TransportAddr) -> String {
-    match addr {
-        TransportAddr::Relay(_) => "relay".to_owned(),
-        TransportAddr::Ip(_) => "ip".to_owned(),
-        TransportAddr::Custom(custom)
-            if custom.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID =>
-        {
-            "webrtc".to_owned()
-        }
-        other => format!("{other:?}"),
-    }
 }
 
 /// Split a getStats candidate into the cache's `(address, kind)` shape.
@@ -1082,14 +1094,14 @@ fn selected_path_label(connection: &Connection) -> Option<String> {
         .paths()
         .iter()
         .find(|path| path.is_selected())
-        .map(|path| path_label(path.remote_addr()))
+        .map(|path| link::path_label(path.remote_addr()))
 }
 
 fn path_labels(connection: &Connection) -> Vec<String> {
     connection
         .paths()
         .iter()
-        .map(|path| path_label(path.remote_addr()))
+        .map(|path| link::path_label(path.remote_addr()))
         .collect()
 }
 
@@ -1415,7 +1427,7 @@ async fn settled_path_label(conn: &Connection) -> Option<String> {
             paths
                 .iter()
                 .find(|path| path.is_selected())
-                .map(|path| path_label(path.remote_addr()))
+                .map(|path| link::path_label(path.remote_addr()))
         };
         if selected.is_some() {
             return selected;
@@ -1875,3 +1887,4 @@ fn pinned_ladder() -> Vec<iroh::RelayUrl> {
         })
         .collect()
 }
+
