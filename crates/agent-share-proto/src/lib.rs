@@ -16,11 +16,14 @@
 //! - [`lookup`]: the discovery allowlist baked into a ticket.
 //! - [`peer_addr`]: the `EndpointAddr` JSON codec the ticket embeds.
 //!
-//! Everything here is wire format. A change to any byte layout breaks every
-//! already-issued ticket and every peer on an older build, so the golden
-//! tests (`wire_constants_are_pinned`, `type_bytes_are_pinned_wire_format`)
-//! live beside the code they pin and must fail loudly rather than be updated
-//! to match.
+//! Everything here is wire format. Breaking it is *permitted* — there is no
+//! compatibility promise — but it must be **deliberate**, and that is what the
+//! golden tests (`wire_constants_are_pinned`,
+//! `type_bytes_are_pinned_wire_format`) are for. Two builds of the same version
+//! still have to agree, so a constant that shifts as a refactor's side effect
+//! is a silent break between a producer on `main` and a consumer on a branch.
+//! The tests live beside the code they pin and must fail loudly; when a change
+//! really is intended, update them in the same commit that makes it.
 
 pub mod client;
 pub mod framing;
@@ -28,6 +31,7 @@ pub mod lookup;
 pub mod manifest;
 pub mod mesh_key;
 pub mod peer_addr;
+pub mod serving;
 pub mod ticket;
 pub mod token;
 
@@ -43,6 +47,6 @@ pub use framing::{
 };
 pub use manifest::{DirEntry, FileEntry, MountManifest, ReadStatus};
 pub use ticket::{
-    MountTicket, TICKET_FLAG_BENCH_QUIC, TICKET_FLAG_BENCH_RELAY, TICKET_FLAG_BENCH_WEBRTC,
-    TICKET_FLAG_NONE,
+    MountTicket, TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC,
+    TICKET_KIND_SHARE,
 };

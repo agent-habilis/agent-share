@@ -1,0 +1,5 @@
+[toolchain]
+# Mirrors the repo pin so the spike reflects the real build.
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

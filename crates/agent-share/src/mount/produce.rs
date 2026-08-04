@@ -18,8 +18,8 @@ use super::ReadStatus;
 use super::WEBRTC_SIGNAL_ALPN;
 use super::live::LiveTree;
 use super::{
-    MAX_READ_LEN, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN,
-    wait_online,
+    MAX_READ_LEN, MOUNT_ALPN, OP_HASH, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN,
+    SECRET_LEN, wait_online,
 };
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 
@@ -46,41 +46,65 @@ pub(crate) async fn serve(
     if !root.is_dir() {
         bail!("mount serves a directory, not a single file");
     }
-    let (manifest, paths) = super::scan::scan(&root)?;
-    let file_count = manifest.files.len();
-    let total_bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
-    let encoded_len = manifest.encode().len();
-    // Enforce the consumer-side cap here too: past it, every redeem would
-    // abort with "manifest too large" — fail at serve time with a reason
-    // instead of minting a ticket nobody can use.
-    if encoded_len > usize::try_from(super::MAX_MANIFEST_BYTES).expect("u32 fits usize") {
-        bail!(
-            "tree too large to serve: the manifest is {} for {file_count} files (cap {})",
-            human_bytes(u64::try_from(encoded_len).expect("usize fits u64")),
-            human_bytes(u64::from(super::MAX_MANIFEST_BYTES))
+    // A directory a mirror produced carries the origin's manifest beside it.
+    // Re-serving those bytes rather than scanning is what keeps every index
+    // meaning what the origin says it means — and what lets a *partial* mirror
+    // serve at all, since a scan of a half-copy would renumber every slot after
+    // the first missing file.
+    // Adopted below so the copy joins the share it came from instead of
+    // starting a rival one. See `bind`.
+    let inherited_secret = super::mirror::origin_secret_for(&root);
+    let (tree, description) = if let Some(origin_bytes) = super::mirror::origin_manifest_for(&root)
+    {
+        let tree = Arc::new(LiveTree::mirrored(root.clone(), origin_bytes)?);
+        let (held, total) = tree.coverage();
+        let description = format!(
+            "{} (re-seeding another share: {held} of {total} files held, read-only)",
+            root.display()
         );
-    }
-    let tree = Arc::new(LiveTree::new(root.clone(), manifest, paths));
-    // A watcher that cannot start is not fatal: the share still serves, it
-    // just serves the startup snapshot. Losing the whole share over it would
-    // be a worse trade than losing liveness.
-    if let Err(error) = super::live::spawn_watcher(Arc::clone(&tree)) {
-        tracing::warn!(%error, "watching the tree failed; serving a fixed snapshot");
-    }
+        (tree, description)
+    } else {
+        let (manifest, paths) = super::scan::scan(&root)?;
+        let file_count = manifest.files.len();
+        let total_bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
+        let encoded_len = manifest.encode().len();
+        // Enforce the consumer-side cap here too: past it, every redeem
+        // would abort with "manifest too large" — fail at serve time with a
+        // reason instead of minting a ticket nobody can use.
+        if encoded_len > usize::try_from(super::MAX_MANIFEST_BYTES).expect("u32 fits usize") {
+            bail!(
+                "tree too large to serve: the manifest is {} for {file_count} files (cap {})",
+                human_bytes(u64::try_from(encoded_len).expect("usize fits u64")),
+                human_bytes(u64::from(super::MAX_MANIFEST_BYTES))
+            );
+        }
+        let tree = Arc::new(LiveTree::new(root.clone(), manifest, paths));
+        // A watcher that cannot start is not fatal: the share still serves,
+        // it just serves the startup snapshot. Losing the whole share over
+        // it would be a worse trade than losing liveness.
+        if let Err(error) = super::live::spawn_watcher(Arc::clone(&tree)) {
+            tracing::warn!(%error, "watching the tree failed; serving a fixed snapshot");
+        }
+        let description = format!(
+            "{} ({file_count} files, {}, read-only)",
+            root.display(),
+            human_bytes(total_bytes)
+        );
+        (tree, description)
+    };
 
     let lookups = resolve_transfer_lookups(swarm, flags)?;
-    let (endpoint, ticket, secret, webrtc) = bind(lookups).await?;
+    let (endpoint, ticket, secret, webrtc) = bind(lookups, inherited_secret).await?;
+
+    let hashes = open_hash_cache(&secret);
+
     // Shell-quoted: the hint is printed for copy-paste (and captured verbatim
     // by scripts in json mode), so a dir name with a space must stay one word.
     // Target parent for the consumer — it creates `agent-share-…/` under this.
     let mount_hint = super::shell_word(".");
     super::announce(
         json,
-        &format!(
-            "{} ({file_count} files, {}, read-only)",
-            root.display(),
-            human_bytes(total_bytes)
-        ),
+        &description,
         &format!("agent-share {} {mount_hint}", ticket.encode()),
     );
 
@@ -88,25 +112,7 @@ pub(crate) async fn serve(
     // accept loop had to go. The share's two ALPNs are registered on a Router
     // instead, normally the mesh's.
     let ice = IceConfig::default();
-    let protocols = || -> Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> {
-        vec![
-            (
-                MOUNT_ALPN.to_vec(),
-                Box::new(super::handlers::MountHandler::new(
-                    secret,
-                    Arc::clone(&tree),
-                )),
-            ),
-            (
-                WEBRTC_SIGNAL_ALPN.to_vec(),
-                Box::new(super::handlers::SignalHandler::new(
-                    endpoint.id(),
-                    webrtc.clone(),
-                    ice.clone(),
-                )),
-            ),
-        ]
-    };
+    let protocols = || share_protocols(secret, &tree, hashes.clone(), &endpoint, &webrtc, &ice);
 
     // The mesh normally owns the accept loop, but it must never be the reason a
     // share fails to serve. Sharing an endpoint made the mesh load-bearing for
@@ -127,6 +133,16 @@ pub(crate) async fn serve(
         },
         protocols: protocols(),
         role: super::mesh::Role::Producer,
+        // Over the bytes `OP_MANIFEST` actually serves, not a re-encode of the
+        // struct. The producer holds them, so it can fingerprint the exact
+        // thing a consumer will hash on the other side.
+        tree: Some(agent_share_proto::manifest::manifest_fingerprint(
+            &tree.manifest_bytes(),
+        )),
+        // What this peer can actually hand over. An origin holds everything; a
+        // mirror serving a partial copy holds a subset, and says so rather than
+        // letting readers discover the gaps by asking.
+        serving: tree.serving(),
         // The producer never clears IP: it is the peer everyone else dials.
         transports: agent_habilis_mesh::net::TransportOpts::default(),
     })
@@ -148,10 +164,52 @@ pub(crate) async fn serve(
         }
     };
 
-    // Nothing to accept here any more; just wait for ctrl-c so the mesh can
-    // announce a graceful `Left` instead of peers waiting out a silence
-    // timeout.
-    let _ = tokio::signal::ctrl_c().await;
+    // Nothing to accept here any more; wait for ctrl-c so the mesh can announce
+    // a graceful `Left` instead of peers waiting out a silence timeout — and,
+    // while waiting, keep the card's `tree` honest.
+    //
+    // A producer whose tree changes under the watcher would otherwise keep
+    // advertising the fingerprint it started with, which is worse than
+    // advertising none: a consumer would read agreement where there is none and
+    // treat a diverged peer as a valid source. `set_tree` dedupes by value, so
+    // the rescan timer firing with nothing changed costs nothing.
+    match &share_mesh {
+        Some(mesh) => {
+            use tokio::sync::broadcast::error::RecvError;
+            let mut updates = tree.subscribe();
+            loop {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    update = updates.recv() => match update {
+                        // A lagged watcher has missed frames but the tree is
+                        // still readable, so recompute rather than give up.
+                        Ok(_) | Err(RecvError::Lagged(_)) => {
+                            mesh.set_tree(agent_share_proto::manifest::manifest_fingerprint(
+                                &tree.manifest_bytes(),
+                            ))
+                            .await;
+                            // Availability moves for the same reasons the tree
+                            // does — a file appearing or vanishing under the
+                            // watcher, and a partial mirror filling in. A stale
+                            // grid is the same failure as a stale fingerprint:
+                            // it sends readers to a peer that cannot answer.
+                            // Both dedupe by value, so a rescan that changed
+                            // nothing costs no gossip.
+                            mesh.set_serving(tree.serving()).await;
+                        }
+                        Err(RecvError::Closed) => {
+                            // The watcher is gone; the share still serves.
+                            let _ = tokio::signal::ctrl_c().await;
+                            break;
+                        }
+                    },
+                }
+            }
+        }
+        None => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
     if let Some(mesh) = share_mesh {
         mesh.leave().await;
     }
@@ -160,14 +218,74 @@ pub(crate) async fn serve(
     Ok(())
 }
 
+/// The share's two ALPNs, ready for the mesh's Router.
+fn share_protocols(
+    secret: [u8; SECRET_LEN],
+    tree: &Arc<LiveTree>,
+    hashes: Option<Arc<super::hash::HashCache>>,
+    endpoint: &Endpoint,
+    webrtc: &WebRtcHandle,
+    ice: &IceConfig,
+) -> Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> {
+    vec![
+        (
+            MOUNT_ALPN.to_vec(),
+            Box::new(super::handlers::MountHandler::new(
+                secret,
+                Arc::clone(tree),
+                hashes,
+            )),
+        ),
+        (
+            WEBRTC_SIGNAL_ALPN.to_vec(),
+            Box::new(super::handlers::SignalHandler::new(
+                endpoint.id(),
+                webrtc.clone(),
+                ice.clone(),
+            )),
+        ),
+    ]
+}
+
+/// Open this share's hash cache, or `None` if it cannot be opened.
+///
+/// Keyed by the share's mesh id, which is already a one-way hash of the secret —
+/// see `mesh_key` for why the secret itself must never reach a path.
+///
+/// Never fatal. Without a cache a consumer cannot verify bytes from a third
+/// party and falls back to reading from this origin, which is exactly today's
+/// behaviour.
+fn open_hash_cache(secret: &[u8; SECRET_LEN]) -> Option<Arc<super::hash::HashCache>> {
+    let cache_dir = std::env::temp_dir()
+        .join("agent-share-hashes")
+        .join(&agent_share_proto::mesh_key::share_mesh_key(secret)[..16]);
+    match super::hash::HashCache::open(&cache_dir) {
+        Ok(cache) => Some(Arc::new(cache)),
+        Err(error) => {
+            tracing::warn!(%error, "hash cache unavailable; serving without verifiable hashes");
+            None
+        }
+    }
+}
+
 /// Bind the producer endpoint and mint its ticket + secret — no I/O, no print.
 ///
 /// The endpoint answers on two ALPNs: the mount protocol, and the `WebRTC`
 /// signal exchange that lets a peer with no IP path to us negotiate a data
 /// channel first. The `WebRtcHandle` comes back so the accept loop can attach
 /// negotiated sessions to it.
+/// `inherited` is `Some` when serving a directory a mirror produced. Minting a
+/// fresh secret there would build a *second* share: its own mesh id, its own
+/// ticket, and no way for anyone holding the original link to discover it.
+/// Adopting the origin's secret is what makes a copy an extra source for the
+/// share it came from — the peers already looking for it find it, and the link
+/// they were given keeps working after the origin is gone.
+///
+/// The endpoint key is still fresh. The secret is the *share* capability, not
+/// this peer's identity, and two peers must never share the latter.
 pub(super) async fn bind(
     lookups: LookupOpts,
+    inherited: Option<[u8; SECRET_LEN]>,
 ) -> Result<(Endpoint, MountTicket, [u8; SECRET_LEN], WebRtcHandle)> {
     // Chicken and egg: the transport advertises `custom_addr(local_id)` as the
     // address peers dial it on, so it has to know the endpoint's identity —
@@ -196,13 +314,16 @@ pub(super) async fn bind(
     if !lookups.is_loopback() {
         wait_online(&endpoint).await;
     }
-    let mut secret = [0u8; SECRET_LEN];
-    rand::rng().fill_bytes(&mut secret);
+    let secret = inherited.unwrap_or_else(|| {
+        let mut minted = [0u8; SECRET_LEN];
+        rand::rng().fill_bytes(&mut minted);
+        minted
+    });
     let ticket = MountTicket {
         addr: endpoint.addr(),
         secret,
         lookups,
-        flags: 0,
+        kind: agent_share_proto::ticket::TICKET_KIND_SHARE,
     };
     Ok((endpoint, ticket, secret, webrtc))
 }
@@ -217,14 +338,18 @@ pub async fn serve_established(
     conn: Connection,
     secret: [u8; SECRET_LEN],
     tree: Arc<LiveTree>,
+    hashes: Option<Arc<super::hash::HashCache>>,
 ) -> Result<()> {
     // `accept_bi` errors once the connection is gone (peer closed, or a bad
     // secret closed it from within a stream task) — that ends the loop.
     while let Ok((send, recv)) = conn.accept_bi().await {
         let conn = conn.clone();
         let tree = Arc::clone(&tree);
+        let hashes = hashes.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve_stream(&conn, send, recv, &secret, &tree).await {
+            if let Err(error) =
+                serve_stream(&conn, send, recv, &secret, &tree, hashes.as_deref()).await
+            {
                 tracing::debug!(%error, "mount stream ended");
             }
         });
@@ -241,6 +366,7 @@ async fn serve_stream(
     mut recv: RecvStream,
     secret: &[u8; SECRET_LEN],
     tree: &LiveTree,
+    hashes: Option<&super::hash::HashCache>,
 ) -> Result<()> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
     if recv.read_exact(&mut header).await.is_err() {
@@ -277,6 +403,31 @@ async fn serve_stream(
             let data_len = u32::try_from(data.len()).expect("bounded by MAX_READ_LEN");
             send.write_all(&data_len.to_le_bytes()).await?;
             send.write_all(&data).await?;
+        }
+        OP_HASH => {
+            let mut request = [0u8; 4];
+            if recv.read_exact(&mut request).await.is_err() {
+                return Ok(());
+            }
+            let index = u32::from_le_bytes(request);
+            // `None` covers two cases that look identical from the far side and
+            // should: this producer keeps no hash cache, or it cannot vouch for
+            // that index. Either way the consumer must fall back to reading
+            // from the origin, which is exactly what `BadIndex` tells it.
+            let answer = match hashes {
+                Some(cache) => cache.root_of_index(tree, index).await,
+                None => None,
+            };
+            let Some((root, outboard)) = answer else {
+                send.write_all(&[ReadStatus::BadIndex.to_byte()]).await?;
+                let _ = send.finish();
+                return Ok(());
+            };
+            send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
+            send.write_all(&root).await?;
+            let len = u32::try_from(outboard.len()).context("outboard too large")?;
+            send.write_all(&len.to_le_bytes()).await?;
+            send.write_all(&outboard).await?;
         }
         other => {
             // Unknown op: drop just this stream, keep the connection.

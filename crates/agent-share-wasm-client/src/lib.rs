@@ -30,23 +30,27 @@
 //! mount bytes; under `webrtc` it fails loudly.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+
+use fofoca_blobs::{BlobStore, FileId, IdbStore, extent_of};
 use std::sync::Arc;
 
 use agent_share_proto::framing::{
     self, BENCH_ECHO_INTERVAL_SECS, DEFAULT_BENCH_DURATION_SECS, MAX_BENCH_ECHO_BYTES,
-    MAX_BENCH_FILL_BYTES, MAX_MANIFEST_BYTES, MOUNT_ALPN, SECRET_LEN, WEBRTC_SIGNAL_ALPN,
+    MAX_BENCH_FILL_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, SECRET_LEN,
+    WEBRTC_SIGNAL_ALPN,
 };
 use agent_share_proto::lookup::{LookupOpts, RelayChoice};
 use agent_share_proto::manifest::{ManifestDelta, MountManifest};
 use agent_share_proto::mesh_key::share_mesh_key;
-use agent_share_proto::ticket::{MountTicket, TICKET_FLAG_BENCH_RELAY, TICKET_FLAG_BENCH_WEBRTC};
+use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+mod link;
 mod live_state;
 mod mesh;
 mod produce;
@@ -73,52 +77,18 @@ struct MeshEndpoint {
 /// Cached ICE remote candidate for one peer endpoint id.
 type IpCache = Rc<RefCell<HashMap<String, (Option<String>, Option<String>)>>>;
 
-/// Per-peer transport stats: cumulative counters, derived rates, and RTT.
+/// Per-peer transport meters, keyed by endpoint id string. See [`link`].
+type BytesCache = Rc<RefCell<HashMap<String, link::Meter>>>;
+
+/// Per-lane meters for the mount connection, keyed by [`link::path_label`].
 ///
-/// `f64` throughout because that is what `getStats` hands back — the counters
-/// sit well under 2^53, so nothing is lost and converting would only invent
-/// precision.
-#[derive(Debug, Clone, Copy, Default)]
-struct PeerStats {
-    sent: f64,
-    received: f64,
-    /// Bytes per second since the previous sample. Zero until there are two.
-    up_bps: f64,
-    down_bps: f64,
-    /// Round-trip time in milliseconds, when the pair has been measured.
-    rtt_ms: Option<f64>,
-    /// `js_sys::Date::now()` of this sample, for the next difference.
-    at_ms: f64,
-}
+/// Owned by [`ShareClient::sample_link`], read (never advanced) by
+/// [`ShareClient::info`]. `TOTAL_LANE` holds the whole-connection figure.
+type LinkCache = RefCell<HashMap<String, link::LaneMeter>>;
 
-impl PeerStats {
-    /// Fold a fresh reading in, carrying rates over from `self`.
-    ///
-    /// Rates come from differencing cumulative counters — WebRTC exposes no
-    /// instantaneous throughput for a data channel. A non-advancing clock or a
-    /// counter that went backwards (a renegotiated pair resets them) yields no
-    /// rate rather than a negative or infinite one.
-    fn sample(self, sent: f64, received: f64, rtt: Option<f64>, now_ms: f64) -> Self {
-        let elapsed_s = (now_ms - self.at_ms) / 1000.0;
-        let rate = |current: f64, previous: f64| {
-            if self.at_ms > 0.0 && elapsed_s > 0.0 && current >= previous {
-                (current - previous) / elapsed_s
-            } else {
-                0.0
-            }
-        };
-        Self {
-            up_bps: rate(sent, self.sent),
-            down_bps: rate(received, self.received),
-            sent,
-            received,
-            rtt_ms: rtt.map(|seconds| seconds * 1000.0),
-            at_ms: now_ms,
-        }
-    }
-}
-
-type BytesCache = Rc<RefCell<HashMap<String, PeerStats>>>;
+/// Cache key for the connection totals, which are not a path and so cannot
+/// collide with a [`link::path_label`].
+const TOTAL_LANE: &str = "total";
 
 /// A connected share, ready to list and read.
 #[wasm_bindgen]
@@ -143,8 +113,15 @@ pub struct ShareClient {
     connected_at_ms: f64,
     /// Last-known getStats IPs, keyed by endpoint id string.
     ip_cache: IpCache,
-    /// Last-known wire byte counters, keyed by endpoint id string.
+    /// Last-known candidate-pair counters, keyed by endpoint id string.
+    ///
+    /// The `getStats` half of [`link`] — per peer, and `WebRTC`-only.
     bytes_cache: BytesCache,
+    /// Last-known QUIC counters for the mount connection, per lane.
+    ///
+    /// The other half of [`link`], and the one that answers on the relay path
+    /// too. Advanced only by [`Self::sample_link`].
+    link_cache: LinkCache,
     // Held so the hub (and its data channel) outlives the connection when used.
     _hub: Option<Arc<BrowserHubTransport>>,
     _session: Option<BrowserSession>,
@@ -169,8 +146,31 @@ pub struct ShareClient {
     /// parked on the connection that just died.
     ///
     /// So `ShareClient` deliberately exposes **no** `&mut self` method. That is
-    /// the invariant; this field is how it is kept.
-    mesh: RefCell<Option<mesh::MeshPeer>>,
+    /// the invariant; this field is how it is kept, and why `store` and `held`
+    /// below are behind one too.
+    ///
+    /// `Rc` inside the cell, because a `RefCell` solves the `&mut self` problem
+    /// only to hand back a borrow one. [`Self::publish_serving`] and
+    /// [`Self::manifest`] both `await` on the peer, and holding
+    /// `self.mesh.borrow()` across a yield point is what earns the *other*
+    /// panic: `leave_mesh` takes `borrow_mut` and fires from `pagehide` or a
+    /// revival at any moment. Cloning the `Rc` out first ends the borrow before
+    /// the await, the same move [`Self::refresh_peer_ips`] makes with the hub.
+    mesh: RefCell<Option<Rc<mesh::MeshPeer>>>,
+    /// Bytes this tab holds, and can therefore seed.
+    ///
+    /// Opened on the first sync rather than at connect: a tab that only browses
+    /// should not create a database, and `IndexedDB` can be refused outright in
+    /// private mode — which must cost seeding, never the share.
+    store: RefCell<Option<Rc<IdbStore>>>,
+    /// Manifest indices fully held, so the UI can mark what is seedable and the
+    /// card can advertise it.
+    ///
+    /// Indices rather than paths because that is what a `READ` addresses and
+    /// what the availability grid paints. Recomputed from the store rather than
+    /// accumulated, so a reload shows what actually survived instead of what
+    /// this session happened to fetch.
+    held: RefCell<BTreeSet<u32>>,
 }
 
 fn new_share_client(
@@ -193,11 +193,14 @@ fn new_share_client(
         connected_at_ms: now_ms(),
         ip_cache: Rc::new(RefCell::new(HashMap::new())),
         bytes_cache: Rc::new(RefCell::new(HashMap::new())),
+        link_cache: RefCell::new(HashMap::new()),
         _hub: hub,
         _session: session,
         mesh_endpoint,
         _endpoint: endpoint,
         mesh: RefCell::new(None),
+        store: RefCell::new(None),
+        held: RefCell::new(BTreeSet::new()),
     }
 }
 
@@ -256,7 +259,7 @@ impl ShareClient {
             None => mesh::default_card_parts(&client.data_path, Some("consumer".to_owned())),
         };
         match mesh::MeshPeer::join_share(&secret, &lookups, shared, card).await {
-            Ok(peer) => *client.mesh.borrow_mut() = Some(peer),
+            Ok(peer) => *client.mesh.borrow_mut() = Some(Rc::new(peer)),
             Err(error) => {
                 web_sys::console::warn_1(&JsValue::from_str(&format!(
                     "[share] mesh unavailable; peer counts disabled: {error:?}"
@@ -315,11 +318,11 @@ impl ShareClient {
                         .borrow_mut()
                         .insert(key.clone(), split_candidate(ip, kind));
                 }
-                if let Some((sent, received, rtt)) = hub.selected_pair_stats(&id).await {
+                if let Some((sent, received, rtt_ms)) = link::read_ice(&hub, &id).await {
                     let now = now_ms();
                     let mut cache = self.bytes_cache.borrow_mut();
                     let previous = cache.get(&key).copied().unwrap_or_default();
-                    cache.insert(key, previous.sample(sent, received, rtt, now));
+                    cache.insert(key, previous.sample(sent, received, rtt_ms, now));
                 }
                 // Our own address, from the same selected pair. Any live
                 // session answers it — they all run on this tab's ICE agent —
@@ -330,9 +333,7 @@ impl ShareClient {
                 // lives across the `.await` that follows it, which is how a
                 // single-threaded runtime earns an `already borrowed` panic
                 // from code that reads as a plain short-circuit.
-                if !local_seen
-                    && let Some((ip, kind)) = hub.selected_local_candidate(&id).await
-                {
+                if !local_seen && let Some((ip, kind)) = hub.selected_local_candidate(&id).await {
                     self.ip_cache
                         .borrow_mut()
                         .insert(local_key.clone(), split_candidate(ip, kind));
@@ -343,11 +344,54 @@ impl ShareClient {
         Ok(())
     }
 
+    /// Sample the mount connection's wire counters and return totals and rates.
+    ///
+    /// **A sampler, not a getter** — hence the name. Rates come from
+    /// differencing cumulative counters, so the caller's cadence *is* the
+    /// averaging window, and a second call within the same tick computes a rate
+    /// over a few milliseconds with no byte delta: it would overwrite the real
+    /// rate with zero. Exactly one driver may call this. [`Self::refresh_peer_ips`]
+    /// carries the same hazard for the same reason.
+    ///
+    /// Synchronous — the QUIC state machine answers without awaiting — and it
+    /// answers on the **relay** path as well as the `WebRTC` one, which is the
+    /// whole reason [`link`] exists. `getStats` cannot: there is no
+    /// `RTCPeerConnection` on the relay.
+    ///
+    /// Shape: `{ total: {…}, lanes: [{ label, selected, … }] }`, each meter
+    /// carrying `sent` / `received` / `up_bps` / `down_bps` / `rtt_ms`.
+    #[must_use]
+    #[wasm_bindgen]
+    pub fn sample_link(&self) -> JsValue {
+        let now = now_ms();
+        let mut cache = self.link_cache.borrow_mut();
+        let mut fold = |key: &str, sent: u64, received: u64, rtt_ms: Option<f64>, selected| {
+            let previous = cache.get(key).copied().unwrap_or_default();
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "wire byte counts stay far below 2^53; see link::Meter"
+            )]
+            let meter = previous.meter.sample(sent as f64, received as f64, rtt_ms, now);
+            cache.insert(key.to_owned(), link::LaneMeter { meter, selected });
+        };
+
+        let (sent, received) = link::read_quic_total(&self.connection);
+        fold(TOTAL_LANE, sent, received, None, false);
+        for lane in link::read_quic(&self.connection) {
+            fold(&lane.label, lane.sent, lane.received, lane.rtt_ms, lane.selected);
+        }
+
+        // Rendered through the same function `info` uses, so a sampled reading
+        // and a reported one cannot describe the same state differently.
+        let json = link::to_json(&cache, TOTAL_LANE);
+        js_sys::JSON::parse(&json.to_string()).unwrap_or(JsValue::NULL)
+    }
+
     /// Members on this share's mesh, including us. `0` when the mesh is not up.
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn peers_gossip(&self) -> u32 {
-        self.mesh.borrow().as_ref().map_or(0, mesh::MeshPeer::peers_gossip)
+        self.mesh.borrow().as_ref().map_or(0, |peer| peer.peers_gossip())
     }
 
     /// Peers we hold a direct `WebRTC` data channel with.
@@ -368,7 +412,7 @@ impl ShareClient {
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn max_direct(&self) -> u32 {
-        self.mesh.borrow().as_ref().map_or(0, mesh::MeshPeer::max_direct)
+        self.mesh.borrow().as_ref().map_or(0, |peer| peer.max_direct())
     }
 
     /// Leave the share's mesh, announcing departure so peers drop us now.
@@ -456,6 +500,16 @@ impl ShareClient {
     /// # Errors
     /// The producer refuses the request or the manifest does not decode.
     pub async fn manifest(&self) -> Result<JsValue, JsValue> {
+        let (_, manifest) = self.fetch_manifest().await?;
+        serde_wasm(&manifest)
+    }
+
+    /// The manifest, and the exact bytes it was decoded from.
+    ///
+    /// The bytes matter separately from the struct: the tree fingerprint is
+    /// taken over what the producer actually served, so both sides hash the
+    /// same thing rather than trusting a re-encode to be canonical.
+    async fn fetch_manifest(&self) -> Result<(Vec<u8>, MountManifest), JsValue> {
         let (mut send, mut recv) = self
             .connection
             .open_bi()
@@ -473,7 +527,17 @@ impl ShareClient {
             .map_err(|error| err("read manifest", &error))?;
         let manifest =
             MountManifest::decode(&bytes).map_err(|error| err("decode manifest", &error))?;
-        serde_wasm(&manifest)
+        // The card could not carry a tree at join — `join_share` runs from the
+        // constructor, before this — so publish it now that we know one.
+        //
+        // Cloned out of the cell, not borrowed across the await below: see the
+        // note on the `mesh` field.
+        let mesh = self.mesh.borrow().clone();
+        if let Some(mesh) = mesh {
+            mesh.set_tree(agent_share_proto::manifest::manifest_fingerprint(&bytes))
+                .await;
+        }
+        Ok((bytes, manifest))
     }
 
     /// Follow the share as it changes, calling `on_manifest` with the whole
@@ -540,6 +604,230 @@ impl ShareClient {
         Ok(data)
     }
 
+
+    /// Fetch bytes into local storage so this tab can seed them.
+    ///
+    /// `only` names paths to take — a file, or a directory and everything under
+    /// it. Omit it for the whole share. Everything already held is skipped, so
+    /// calling this twice costs one manifest fetch.
+    ///
+    /// Returns `{ files, bytes, verified, unverified, skipped, held }`.
+    ///
+    /// # What "verified" means, and why unverified is not a failure
+    ///
+    /// The root comes from the **origin**, over the connection already
+    /// authenticated to the ticket's endpoint id, and the bytes are hashed here
+    /// and compared against it. A mismatch is fatal for that file: the bytes
+    /// were altered in flight, or the origin is serving content it did not
+    /// hash.
+    ///
+    /// An origin that cannot vouch for an index answers "no hash" rather than
+    /// lying, and that is ordinary — it keeps the cache lazily. The copy stands
+    /// and is seedable; it simply is not provable from here. Refusing to store
+    /// it would make seeding depend on a cache the origin is free not to keep.
+    ///
+    /// # Errors
+    /// The manifest cannot be fetched, storage is unavailable, or a file's
+    /// bytes do not match the root the origin published.
+    pub async fn sync(&self, only: Option<Vec<String>>) -> Result<JsValue, JsValue> {
+        let (bytes, manifest) = self.fetch_manifest().await?;
+        let store = self.open_store().await?;
+        let only = only.unwrap_or_default();
+
+        let mut files = 0u32;
+        let mut total = 0u64;
+        let mut verified = 0u32;
+        let mut unverified = 0u32;
+        let mut skipped = 0u32;
+
+        for (index, entry) in manifest.files.iter().enumerate() {
+            // A tombstone holds a slot open so later indices keep meaning what
+            // they meant. There is nothing to fetch.
+            if entry.is_tombstone() {
+                continue;
+            }
+            if !wanted(&only, &entry.rel_path) {
+                skipped += 1;
+                continue;
+            }
+            let index = u32::try_from(index).map_err(|_| JsValue::from_str("index over u32"))?;
+            let file = file_id(entry);
+            if is_held(store.as_ref(), &file).await {
+                skipped += 1;
+                self.held.borrow_mut().insert(index);
+                continue;
+            }
+
+            let body = self.read_whole(index, entry.size).await?;
+            let ours = store
+                .insert_complete(&file, &body)
+                .await
+                .map_err(|error| err("storing a file", &error))?;
+            match self.fetch_hash(index).await? {
+                Some(theirs) if theirs != ours => {
+                    return Err(JsValue::from_str(&format!(
+                        "{} does not match the origin: the bytes were altered in transit, \
+                         or the origin is serving content it did not hash",
+                        entry.rel_path
+                    )));
+                }
+                Some(_) => verified += 1,
+                None => unverified += 1,
+            }
+            self.held.borrow_mut().insert(index);
+            files += 1;
+            total += body.len() as u64;
+        }
+
+        self.publish_serving(&bytes, &manifest).await;
+
+        let out = serde_json::json!({
+            "files": files,
+            "bytes": total,
+            "verified": verified,
+            "unverified": unverified,
+            "skipped": skipped,
+            "held": self.held.borrow().len(),
+        });
+        js_sys::JSON::parse(&out.to_string()).map_err(|error| JsValue::from(error))
+    }
+
+    /// Manifest indices this tab holds in full, and can seed.
+    #[must_use]
+    #[wasm_bindgen(getter)]
+    pub fn held(&self) -> Vec<u32> {
+        self.held.borrow().iter().copied().collect()
+    }
+
+    /// Recompute what is held from storage, and republish it.
+    ///
+    /// Called on mount so a reload shows what survived rather than an empty
+    /// grid. Never fails: a tab with no store simply holds nothing.
+    pub async fn refresh_held(&self) -> Result<(), JsValue> {
+        let Ok((bytes, manifest)) = self.fetch_manifest().await else {
+            return Ok(());
+        };
+        // Deliberately does *not* create a database — only adopts one already
+        // there. Browsing a share must not leave storage behind.
+        let Ok(store) = IdbStore::open(&self.store_name()).await else {
+            return Ok(());
+        };
+        let mut held = BTreeSet::new();
+        for (index, entry) in manifest.files.iter().enumerate() {
+            if entry.is_tombstone() {
+                continue;
+            }
+            if is_held(&store, &file_id(entry)).await
+                && let Ok(index) = u32::try_from(index)
+            {
+                held.insert(index);
+            }
+        }
+        *self.held.borrow_mut() = held;
+        *self.store.borrow_mut() = Some(Rc::new(store));
+        self.publish_serving(&bytes, &manifest).await;
+        Ok(())
+    }
+
+    /// Where this share's blocks live.
+    ///
+    /// Keyed by the mesh id, which is a one-way hash of the secret — so two
+    /// shares never share a database, and the secret itself never reaches a
+    /// name that storage inspectors or `about:` pages would display.
+    fn store_name(&self) -> String {
+        format!(
+            "agent-share/{}",
+            &agent_share_proto::mesh_key::share_mesh_key(&self.secret)[..16]
+        )
+    }
+
+    async fn open_store(&self) -> Result<Rc<IdbStore>, JsValue> {
+        if let Some(store) = self.store.borrow().as_ref() {
+            return Ok(Rc::clone(store));
+        }
+        let store = Rc::new(
+            IdbStore::open(&self.store_name())
+                .await
+                .map_err(|error| err("opening local storage", &error))?,
+        );
+        *self.store.borrow_mut() = Some(Rc::clone(&store));
+        Ok(store)
+    }
+
+    /// Tell the mesh which slots this tab can serve.
+    ///
+    /// Both fields together: an index means nothing without agreeing which
+    /// manifest it indexes into, so a `serving` set published against the wrong
+    /// tree would send readers to the wrong files.
+    async fn publish_serving(&self, manifest_bytes: &[u8], manifest: &MountManifest) {
+        // Cloned out of the cell, not borrowed across the two awaits below:
+        // see the note on the `mesh` field.
+        let mesh = self.mesh.borrow().clone();
+        let Some(mesh) = mesh else {
+            return;
+        };
+        mesh.set_tree(agent_share_proto::manifest::manifest_fingerprint(
+            manifest_bytes,
+        ))
+        .await;
+        let held: Vec<u32> = self.held.borrow().iter().copied().collect();
+        mesh.set_serving(agent_share_proto::serving::encode_serving(
+            &held,
+            manifest.files.len(),
+        ))
+        .await;
+    }
+
+    /// Read a whole file, in protocol-sized pieces.
+    async fn read_whole(&self, index: u32, size: u64) -> Result<Vec<u8>, JsValue> {
+        let mut out = Vec::new();
+        while (out.len() as u64) < size {
+            let remaining = size - out.len() as u64;
+            let want = u32::try_from(remaining.min(u64::from(MAX_READ_LEN)))
+                .map_err(|_| JsValue::from_str("read length over u32"))?;
+            let piece = self.read(index, out.len() as u64, want).await?;
+            if piece.is_empty() {
+                // Never treat a short answer as the end of the file: a caller
+                // cannot tell truncation from a small file, and a silently
+                // truncated mirror is the failure this whole design exists to
+                // avoid.
+                return Err(JsValue::from_str(
+                    "the peer stopped short of the size the manifest describes",
+                ));
+            }
+            out.extend_from_slice(&piece);
+        }
+        Ok(out)
+    }
+
+    /// The root the origin published for `index`, if it can vouch for one.
+    async fn fetch_hash(&self, index: u32) -> Result<Option<[u8; 32]>, JsValue> {
+        let (mut send, mut recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|error| err("open hash stream", &error))?;
+        send.write_all(&framing::encode_hash_request(&self.secret, index))
+            .await
+            .map_err(|error| err("send hash request", &error))?;
+        send.finish().map_err(|error| err("finish", &error))?;
+
+        let mut status = [0u8; 1];
+        recv.read_exact(&mut status)
+            .await
+            .map_err(|error| err("read hash status", &error))?;
+        // Anything but Ok means "cannot vouch", which is ordinary — the origin
+        // hashes lazily. Only a protocol failure is an error.
+        if status[0] != agent_share_proto::manifest::ReadStatus::Ok.to_byte() {
+            return Ok(None);
+        }
+        let mut root = [0u8; 32];
+        recv.read_exact(&mut root)
+            .await
+            .map_err(|error| err("read root", &error))?;
+        Ok(Some(root))
+    }
+
     /// Connect using the transport encoded in the ticket and measure for
     /// `duration_secs` (default 30s after connect).
     ///
@@ -556,12 +844,12 @@ impl ShareClient {
     ) -> Result<JsValue, JsValue> {
         console_error_panic_hook::set_once();
         let ticket = MountTicket::decode(&ticket).map_err(|error| err("decode ticket", &error))?;
-        let transport_label = match ticket.flags {
-            TICKET_FLAG_BENCH_RELAY => "relay",
-            TICKET_FLAG_BENCH_WEBRTC => "webrtc",
+        let transport_label = match ticket.kind {
+            TICKET_KIND_BENCH_RELAY => "relay",
+            TICKET_KIND_BENCH_WEBRTC => "webrtc",
             other => {
                 return Err(JsValue::from_str(&format!(
-                    "ticket has no bench transport (flags={other}); produce with --transport webrtc|relay"
+                    "ticket has no bench transport (kind={other}); produce with --transport webrtc|relay"
                 )));
             }
         };
@@ -571,11 +859,11 @@ impl ShareClient {
         );
 
         let connect_start = now_ms();
-        let client = match ticket.flags {
+        let client = match ticket.kind {
             // Bench relay must not fall through to direct IP (same-machine
             // benches were reporting ~localhost numbers labeled "relay").
-            TICKET_FLAG_BENCH_RELAY => connect_relay_only(ticket).await?,
-            TICKET_FLAG_BENCH_WEBRTC => {
+            TICKET_KIND_BENCH_RELAY => connect_relay_only(ticket).await?,
+            TICKET_KIND_BENCH_WEBRTC => {
                 connect_webrtc(ticket, /*allow_relay_fallback=*/ false).await?
             }
             _ => unreachable!("validated above"),
@@ -676,8 +964,19 @@ impl ShareClient {
                 "mount_path": live_path,
                 "mount_paths": path_labels(&self.connection),
                 "mount_fallback_reason": self.fallback_reason,
+                "link": self.link_snapshot(),
             },
         })
+    }
+
+    /// The last [`Self::sample_link`] reading, **without taking a new one**.
+    ///
+    /// `info` is documented as a getter that never samples, and it has to stay
+    /// one: the Info pane and the status bar read on the same tick, so a
+    /// sampling `info` would difference over a few milliseconds and zero the
+    /// rates the bar had just computed. Empty until the driver has sampled once.
+    fn link_snapshot(&self) -> serde_json::Value {
+        link::to_json(&self.link_cache.borrow(), TOTAL_LANE)
     }
 
     /// Endpoint ids we hold a live data channel with, across both hubs.
@@ -723,16 +1022,13 @@ impl ShareClient {
                         ip: Option<String>,
                         ip_kind: Option<String>| {
             let card = card_for(id);
-            let client = card
-                .as_ref()
-                .map(|c| c.client.clone())
-                .unwrap_or_else(|| {
-                    if id == local {
-                        self_card.client.clone()
-                    } else {
-                        "unknown".to_owned()
-                    }
-                });
+            let client = card.as_ref().map(|c| c.client.clone()).unwrap_or_else(|| {
+                if id == local {
+                    self_card.client.clone()
+                } else {
+                    "unknown".to_owned()
+                }
+            });
             let proto = card
                 .as_ref()
                 .map(|c| c.transport.clone())
@@ -741,6 +1037,12 @@ impl ShareClient {
             let version = card.as_ref().map(|c| c.version.clone());
             let runtime = card.as_ref().map(|c| c.runtime.clone());
             let app_role = card.as_ref().and_then(|c| c.role.clone());
+            // Availability, for the grid. `tree` rides along because a slot
+            // index means nothing without agreeing which manifest it indexes
+            // into — two peers on different trees must not be drawn as though
+            // their squares line up.
+            let serving = card.as_ref().and_then(|c| c.serving.clone());
+            let tree = card.as_ref().and_then(|c| c.tree.clone());
             let stats = bytes.get(id).copied().unwrap_or_default();
             serde_json::json!({
                 "id": id,
@@ -758,6 +1060,8 @@ impl ShareClient {
                 "ip": ip,
                 "ip_kind": ip_kind,
                 "proto": proto,
+                "serving": serving,
+                "tree": tree,
             })
         };
 
@@ -777,10 +1081,7 @@ impl ShareClient {
         // whichever half it missed.
         let live: Vec<String> = self.direct_peer_ids().into_iter().collect();
         let producer_direct = live.iter().any(|id| id == producer);
-        let (ip, ip_kind) = cache
-            .get(producer)
-            .cloned()
-            .unwrap_or((None, None));
+        let (ip, ip_kind) = cache.get(producer).cloned().unwrap_or((None, None));
         let mut flags = String::from("S");
         if producer_direct {
             flags.push('D');
@@ -803,7 +1104,14 @@ impl ShareClient {
                 continue;
             }
             let (ip, ip_kind) = cache.get(&id).cloned().unwrap_or((None, None));
-            rows.push(peer_row(&id, "direct", "D".to_owned(), "webrtc", ip, ip_kind));
+            rows.push(peer_row(
+                &id,
+                "direct",
+                "D".to_owned(),
+                "webrtc",
+                ip,
+                ip_kind,
+            ));
         }
 
         // Gossip-only members publish meta cards but may never open a direct
@@ -829,6 +1137,7 @@ impl ShareClient {
                 ));
             }
         }
+
         rows
     }
 }
@@ -836,28 +1145,8 @@ impl ShareClient {
 fn identity_fingerprint(secret: &[u8; SECRET_LEN]) -> String {
     let key = share_mesh_key(secret);
     let head = key.get(..8).unwrap_or(&key);
-    let tail = key
-        .get(key.len().saturating_sub(8)..)
-        .unwrap_or("");
+    let tail = key.get(key.len().saturating_sub(8)..).unwrap_or("");
     format!("{head}…{tail}")
-}
-
-/// One path's transport, as the label the UI and the mode assertion both use.
-///
-/// `data_path`, `mount_paths` and the WebRTC-mode check have to agree on what
-/// counts as "webrtc", so they share this rather than each carrying a copy of
-/// the match.
-fn path_label(addr: &TransportAddr) -> String {
-    match addr {
-        TransportAddr::Relay(_) => "relay".to_owned(),
-        TransportAddr::Ip(_) => "ip".to_owned(),
-        TransportAddr::Custom(custom)
-            if custom.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID =>
-        {
-            "webrtc".to_owned()
-        }
-        other => format!("{other:?}"),
-    }
 }
 
 /// Split a getStats candidate into the cache's `(address, kind)` shape.
@@ -885,14 +1174,14 @@ fn selected_path_label(connection: &Connection) -> Option<String> {
         .paths()
         .iter()
         .find(|path| path.is_selected())
-        .map(|path| path_label(path.remote_addr()))
+        .map(|path| link::path_label(path.remote_addr()))
 }
 
 fn path_labels(connection: &Connection) -> Vec<String> {
     connection
         .paths()
         .iter()
-        .map(|path| path_label(path.remote_addr()))
+        .map(|path| link::path_label(path.remote_addr()))
         .collect()
 }
 
@@ -1218,7 +1507,7 @@ async fn settled_path_label(conn: &Connection) -> Option<String> {
             paths
                 .iter()
                 .find(|path| path.is_selected())
-                .map(|path| path_label(path.remote_addr()))
+                .map(|path| link::path_label(path.remote_addr()))
         };
         if selected.is_some() {
             return selected;
@@ -1297,6 +1586,48 @@ async fn follow_watch(
             continue;
         }
     }
+}
+
+
+/// Whether `only` selects `rel_path`. An empty filter takes everything.
+///
+/// A prefix match only at a path boundary, so `--only docs` cannot quietly take
+/// `docsbackup/` too. Mirrors `agent_share`'s native `wanted`; the two must
+/// agree or the same request would fetch different sets in a browser and a
+/// terminal.
+fn wanted(only: &[String], rel_path: &str) -> bool {
+    only.is_empty()
+        || only
+            .iter()
+            .any(|want| rel_path == want || rel_path.starts_with(&format!("{want}/")))
+}
+
+/// The store's name for a manifest entry.
+///
+/// Size and mtime come from the manifest rather than from anything local,
+/// because they are what the *origin* says this version is. That is the
+/// comparison the store's version gate makes on every read.
+fn file_id(entry: &agent_share_proto::manifest::FileEntry) -> FileId {
+    FileId {
+        key: entry.rel_path.clone(),
+        size: entry.size,
+        mtime: entry.mtime,
+    }
+}
+
+/// Whether the store holds every byte of this file version.
+///
+/// Anything short of complete reads as not held: a partially fetched file
+/// cannot be handed to a reader as a file, and advertising it whole would send
+/// them somewhere that cannot answer.
+async fn is_held(store: &IdbStore, file: &FileId) -> bool {
+    let Ok(Some(root)) = store.bind(file).await else {
+        return false;
+    };
+    let Ok(present) = store.present(root).await else {
+        return false;
+    };
+    extent_of(file.size).is_subset(&present)
 }
 
 async fn wait_ms(millis: i32) {
@@ -1443,7 +1774,9 @@ async fn connect_webrtc(
                 // "selection never settled" report rather than a lost race.
                 client.fallback_reason = Some(format!(
                     "the mount reported {} rather than WebRTC on a relay-free endpoint",
-                    selected.as_deref().unwrap_or("no path before the settle deadline"),
+                    selected
+                        .as_deref()
+                        .unwrap_or("no path before the settle deadline"),
                 ));
             }
             Ok(client)
@@ -1489,9 +1822,7 @@ async fn finish_relay_fallback(
 /// A `JsValue` error as one line of prose, without the `JsValue("…")` wrapper
 /// `{:?}` puts around a string.
 fn describe(error: &JsValue) -> String {
-    error
-        .as_string()
-        .unwrap_or_else(|| format!("{error:?}"))
+    error.as_string().unwrap_or_else(|| format!("{error:?}"))
 }
 
 fn ensure_reachable_addr(addr: &EndpointAddr) -> Result<(), JsValue> {
@@ -1660,3 +1991,4 @@ fn pinned_ladder() -> Vec<iroh::RelayUrl> {
         })
         .collect()
 }
+

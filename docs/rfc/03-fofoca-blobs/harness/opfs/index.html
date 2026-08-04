@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>S0.5 — OPFS random access from a Worker</title>
+<style>
+  body { font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; margin: 2rem; max-width: 70rem; }
+  h1 { font-size: 1.1rem; }
+  p.note { color: #555; }
+  #out div { padding: .35rem .5rem; border-left: 3px solid #ccc; margin: .25rem 0; white-space: pre-wrap; }
+  .ok   { border-left-color: #2a7 !important; background: #f2fbf6; }
+  .fail { border-left-color: #d33 !important; background: #fdf3f3; }
+  button { font: inherit; padding: .4rem .9rem; }
+</style>
+
+<h1>S0.5 — OPFS random-access range writes from a Worker</h1>
+<p class="note">
+  Answers three things <code>fofoca-blobs</code>' <code>OpfsStore</code> depends on:
+  (1) are synchronous access handles reachable in a Worker,
+  (2) do out-of-order range writes at arbitrary offsets work and read back correctly,
+  (3) does the data survive a page reload.
+  <br><b>Run this in both Safari and Chrome.</b> Reload once to confirm persistence.
+</p>
+
+<p>
+  <label>Size (MiB): <input id="mib" type="number" value="64" min="1" max="1024" style="width:6rem"></label>
+  <button id="run">Run</button>
+</p>
+<div id="out"></div>
+
+<script>
+  const out = document.getElementById("out");
+  function line(msg, ok) {
+    const d = document.createElement("div");
+    d.textContent = (ok === true ? "PASS  " : ok === false ? "FAIL  " : "      ") + msg;
+    if (ok === true) d.className = "ok";
+    if (ok === false) d.className = "fail";
+    out.appendChild(d);
+  }
+
+  document.getElementById("run").onclick = () => {
+    out.textContent = "";
+    if (!window.isSecureContext) {
+      line("not a secure context — serve over http://localhost or https://", false);
+      return;
+    }
+    const w = new Worker("opfs-worker.js");
+    w.onmessage = (e) => {
+      if (e.data.type === "log") line(e.data.msg, e.data.ok);
+      if (e.data.type === "done") w.terminate();
+    };
+    w.onerror = (e) => line("worker error: " + e.message, false);
+    w.postMessage({ mib: Number(document.getElementById("mib").value) || 64 });
+  };
+</script>

@@ -71,7 +71,59 @@ pub struct MountManifest {
     pub files: Vec<FileEntry>,
 }
 
+/// Domain separator, distinct from every other label in the tree so this
+/// derivation can never collide with one of the mesh engine's own. Mirrors
+/// `mesh_key::SHARE_MESH_LABEL`.
+const TREE_LABEL: &[u8] = b"agent-share/tree/v1";
+
+/// Hex characters kept from the digest.
+///
+/// Eight bytes of SHA-256. This is an *agreement* check between peers who each
+/// already hold the bytes, not a security boundary: a peer that wants to lie
+/// about its tree can simply publish someone else's fingerprint, and mesh
+/// membership already implies the full read capability. What it has to survive
+/// is accidental collision across the trees one share sees in its lifetime,
+/// and 64 bits is far more than that needs. The cap matters because the card
+/// rides a CRDT under a 3840-byte frame ceiling.
+const TREE_FINGERPRINT_HEX: usize = 16;
+
+/// Fingerprint the **exact bytes** `OP_MANIFEST` returned.
+///
+/// Takes bytes rather than a [`MountManifest`] on purpose. The producer holds
+/// the wire bytes already, and so does a consumer at the moment it reads them;
+/// hashing those directly means the two agree without either of them having to
+/// re-encode. [`MountManifest::fingerprint`] is the convenience for callers
+/// that kept only the struct, and it is safe because `decode` → `encode`
+/// round-trips byte-for-byte — pinned by `encoding_is_canonical` below, which
+/// is what stops two peers on one tree from computing different fingerprints.
+#[must_use]
+pub fn manifest_fingerprint(manifest_bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(TREE_LABEL);
+    hasher.update(manifest_bytes);
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(TREE_FINGERPRINT_HEX);
+    for byte in digest.iter().take(TREE_FINGERPRINT_HEX / 2) {
+        use std::fmt::Write as _;
+        // `expect`-free: writing to a String cannot fail.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 impl MountManifest {
+    /// This tree's fingerprint, as published on [`crate::PeerCard`]'s `tree`.
+    ///
+    /// Equal to [`manifest_fingerprint`] over the bytes this manifest was
+    /// decoded from. Prefer the free function when the wire bytes are still in
+    /// hand: it cannot drift, whereas this one leans on the encoding being
+    /// canonical.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        manifest_fingerprint(&self.encode())
+    }
+
     /// # Panics
     /// If the tree holds more than `u32::MAX` directories or files, or a path
     /// longer than `u16::MAX` bytes. `scan` bounds both well below these, so
@@ -448,7 +500,9 @@ impl Cursor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DirEntry, FileEntry, ManifestDelta, MountManifest, ReadStatus};
+    use super::{
+        DirEntry, FileEntry, ManifestDelta, MountManifest, ReadStatus, manifest_fingerprint,
+    };
 
     fn sample_delta() -> ManifestDelta {
         ManifestDelta {
@@ -615,6 +669,82 @@ mod tests {
         let manifest = sample();
         let decoded = MountManifest::decode(&manifest.encode()).expect("decode");
         assert_eq!(decoded, manifest);
+    }
+
+    /// **What makes [`MountManifest::fingerprint`] safe.**
+    ///
+    /// The fingerprint is defined over the exact bytes `OP_MANIFEST` returned.
+    /// A producer has those bytes; a consumer decoded them and threw them away,
+    /// so its convenience path re-encodes. If the encoding were not canonical
+    /// the two would disagree, and two peers on the *same* tree would read as
+    /// being on different ones — rejecting a perfectly good source.
+    #[test]
+    fn encoding_is_canonical() {
+        let bytes = sample().encode();
+        let reencoded = MountManifest::decode(&bytes).expect("decode").encode();
+        assert_eq!(bytes, reencoded, "decode then encode must be byte-exact");
+    }
+
+    #[test]
+    fn a_fingerprint_is_short_stable_hex() {
+        let manifest = sample();
+        let print = manifest.fingerprint();
+        assert_eq!(print, manifest.fingerprint(), "not stable");
+        assert_eq!(
+            print.len(),
+            16,
+            "16 hex chars keeps the card inside a frame"
+        );
+        assert!(print.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    /// The producer fingerprints wire bytes, the consumer fingerprints a
+    /// re-encode. They have to land on the same string or the guard is useless.
+    #[test]
+    fn both_paths_to_a_fingerprint_agree() {
+        let bytes = sample().encode();
+        assert_eq!(
+            manifest_fingerprint(&bytes),
+            MountManifest::decode(&bytes).expect("decode").fingerprint()
+        );
+    }
+
+    /// The whole point: a tree that changed must fingerprint differently, or a
+    /// peer on a stale manifest passes as current.
+    #[test]
+    fn a_changed_tree_changes_its_fingerprint() {
+        let base = sample();
+        let mut grown = base.clone();
+        grown.files[0].size += 1;
+        assert_ne!(base.fingerprint(), grown.fingerprint(), "a resized file");
+
+        let mut renamed = base.clone();
+        renamed.files[0].rel_path = "renamed.txt".to_owned();
+        assert_ne!(base.fingerprint(), renamed.fingerprint(), "a renamed file");
+
+        let mut reordered = base.clone();
+        reordered.files.swap(0, 1);
+        assert_ne!(
+            base.fingerprint(),
+            reordered.fingerprint(),
+            "order is the READ address, so a reorder is a different tree"
+        );
+    }
+
+    /// Domain separation: the fingerprint must not be a bare SHA-256 of the
+    /// bytes, or it could collide with some other derivation over the same
+    /// input.
+    #[test]
+    fn the_fingerprint_is_domain_separated() {
+        use sha2::{Digest, Sha256};
+        let bytes = sample().encode();
+        let bare = Sha256::digest(&bytes);
+        let mut bare_hex = String::new();
+        for byte in bare.iter().take(8) {
+            use std::fmt::Write as _;
+            let _ = write!(bare_hex, "{byte:02x}");
+        }
+        assert_ne!(manifest_fingerprint(&bytes), bare_hex);
     }
 
     #[test]

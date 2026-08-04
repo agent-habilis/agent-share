@@ -18,9 +18,15 @@ use super::MountTicket;
 use super::mesh::ShareMesh;
 use super::nfs;
 use super::nfs::{ByteSource, RemoteFs, TreeIds, build_tree};
-use super::{MAX_MANIFEST_BYTES, MOUNT_ALPN, OP_MANIFEST, OP_READ, OP_WATCH, SECRET_LEN};
+use super::{
+    MAX_MANIFEST_BYTES, MAX_OUTBOARD_BYTES, MOUNT_ALPN, OP_HASH, OP_MANIFEST, OP_READ, OP_WATCH,
+    SECRET_LEN,
+};
+// The root type comes from the store, not from this crate: `agent-share` names
+// what `fofoca-blobs` verifies against rather than defining a second one.
 use super::{MountManifest, ReadStatus};
 use super::{WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
+use fofoca_blobs::Root;
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
 
 /// How long to keep retrying the dial while the producer's address propagates
@@ -84,6 +90,10 @@ pub(crate) async fn attach(
     let client = Arc::new(client);
     let manifest = client.fetch_manifest().await?;
     let file_count = manifest.files.len();
+    // Taken before `manifest` moves into the watch task below. Re-encodes
+    // rather than hashing the wire bytes, which `fetch_manifest` discards;
+    // safe because the encoding is canonical (`encoding_is_canonical`).
+    let tree_fingerprint = manifest.fingerprint();
     let mut ids = TreeIds::default();
     let nodes = build_tree(&mut ids, &manifest)?;
 
@@ -145,6 +155,7 @@ pub(crate) async fn attach(
         webrtc: &webrtc,
         webrtc_only,
         json,
+        tree: Some(tree_fingerprint),
     })
     .await;
 
@@ -169,6 +180,8 @@ pub(crate) async fn attach(
 /// booleans are adjacent and would otherwise be swappable in silence.
 struct MeshJoin<'a> {
     secret: &'a [u8; SECRET_LEN],
+    /// Fingerprint of the manifest this consumer mounted.
+    tree: Option<String>,
     lookups: &'a agent_share_proto::lookup::LookupOpts,
     endpoint: &'a Endpoint,
     webrtc: &'a WebRtcHandle,
@@ -200,6 +213,10 @@ async fn join_share_mesh(join: MeshJoin<'_>) -> Option<ShareMesh> {
         // on this endpoint and everything it accepts belongs to the mesh.
         protocols: Vec::new(),
         role: super::mesh::Role::Consumer,
+        tree: join.tree,
+        // A lazy mount holds no bytes, so it advertises nothing. Becoming a
+        // seeder is the explicit `mirror` step, never a side effect of reading.
+        serving: None,
         // Match the endpoint: `--transport webrtc` built it with IP cleared,
         // and a mesh advertising paths its endpoint does not have is a mesh
         // whose peers dial nowhere.
@@ -446,6 +463,77 @@ impl RemoteClient {
             }
         }
         unreachable!("the loop returns on success and on the second failure")
+    }
+
+    /// Ask the origin for a file's BLAKE3 root and bao outboard.
+    ///
+    /// `Ok(None)` means *this producer cannot vouch for that index* — no hash
+    /// cache, an index out of range, or a file that changed under it. All three
+    /// are ordinary and all three mean the same thing to a caller: read those
+    /// bytes from the origin, which is what happens today anyway. Only a
+    /// protocol failure is an error.
+    ///
+    /// The root is learned from the **origin**, over a channel already
+    /// authenticated to the ticket's endpoint id. That is what makes it safe to
+    /// take the bytes from anybody afterwards.
+    pub(super) async fn fetch_hash(&self, index: u32) -> Result<Option<(Root, Vec<u8>)>> {
+        let (mut send, mut recv) = self.request(OP_HASH).await?;
+        send.write_all(&index.to_le_bytes()).await?;
+        let _ = send.finish();
+
+        let mut status = [0u8; 1];
+        recv.read_exact(&mut status)
+            .await
+            .context("reading the hash status failed")?;
+        match ReadStatus::from_byte(status[0])? {
+            ReadStatus::Ok => {}
+            // Not an error: see the note above. Named rather than wildcarded so
+            // a future status has to be considered here rather than silently
+            // folded into "cannot vouch".
+            ReadStatus::BadIndex | ReadStatus::Io | ReadStatus::LenOverCap => return Ok(None),
+        }
+
+        let mut root = [0u8; 32];
+        recv.read_exact(&mut root)
+            .await
+            .context("reading the root failed")?;
+        let len = read_u32(&mut recv).await?;
+        if len > MAX_OUTBOARD_BYTES {
+            bail!("outboard too large: {len} bytes");
+        }
+        let mut outboard = vec![0u8; usize::try_from(len).expect("u32 fits usize")];
+        recv.read_exact(&mut outboard)
+            .await
+            .context("reading the outboard failed")?;
+        Ok(Some((root, outboard)))
+    }
+
+    /// The manifest as the origin sent it, before decoding.
+    ///
+    /// A mirror needs these exact bytes rather than a re-encode: it re-serves
+    /// them verbatim so its indices stay the origin's, and it fingerprints them
+    /// so peers on one tree agree. Decoding and re-encoding would be correct
+    /// only for as long as the encoding stays canonical, and there is no reason
+    /// to depend on that when the real bytes are right here.
+    pub(super) async fn fetch_manifest_bytes(&self) -> Result<Vec<u8>> {
+        let (mut send, mut recv) = self.request(OP_MANIFEST).await?;
+        let _ = send.finish();
+        let mut status = [0u8; 1];
+        recv.read_exact(&mut status)
+            .await
+            .context("reading the manifest status failed")?;
+        if ReadStatus::from_byte(status[0])? != ReadStatus::Ok {
+            bail!("the producer refused the manifest request");
+        }
+        let len = read_u32(&mut recv).await?;
+        if len > MAX_MANIFEST_BYTES {
+            bail!("manifest too large: {len} bytes");
+        }
+        let mut bytes = vec![0u8; usize::try_from(len).expect("u32 fits usize")];
+        recv.read_exact(&mut bytes)
+            .await
+            .context("reading the manifest failed")?;
+        Ok(bytes)
     }
 
     pub(super) async fn fetch_manifest(&self) -> Result<MountManifest> {

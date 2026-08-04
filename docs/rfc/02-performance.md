@@ -96,6 +96,23 @@ Caveat: at depth > 1 the RTT column measures queueing, not path latency — the
 echo probe queues behind the in-flight fills. It is still the right number for
 "what does a request experience", just not for "how far away is the peer".
 
+### Also measured, outside phase 1
+
+Two more items have numbers, gathered while validating
+[RFC 03](03-fofoca-blobs/README.md) rather than by working through this
+document's phases:
+
+- **`blake3/wasm32_simd`** — measured at 1.80×, not the 6× cited below, and its
+  "modest" rating flips if RFC 03 lands. See the SIMD section.
+- **Whether a second connection adds throughput** — yes, ≥1.61×
+  ([S0.4](03-fofoca-blobs/findings/s04-multi-source-throughput.md)). That work
+  also re-derived the per-connection ceiling claim this document flagged as
+  unbacked, and found the *mechanism* RFC 01 named to be wrong — see the
+  re-derivation note under Context.
+
+The caveat below about `agent-share bench` measuring a serial single-stream
+shape applies to those two numbers as well as to the phase-1 matrix.
+
 ### Still not measured
 
 - **Depth at the mount's actual request size.** The sweep uses 1 MiB fills; the
@@ -135,6 +152,21 @@ reason this document opens this way. Note that
 for its throughput argument (the per-connection SCTP ceiling claim in its
 Context and Edge-cases sections); that argument now has no backing and should
 be re-derived, not inherited.
+
+> **RE-DERIVED, and the mechanism was wrong.** The conclusion survives —
+> **[measured]** a second source is worth ≥1.61×
+> ([S0.4](03-fofoca-blobs/findings/s04-multi-source-throughput.md)) — but the
+> *cause* RFC 01 named does not apply: **[verified]** the data channel is
+> negotiated **unreliable and unordered**
+> (`Reliability::MaxRetransmits { retransmits: 0 }`,
+> `fofoca-iroh-webrtc-transport/src/host/jsep.rs:104-106`), so the
+> reliable-ordered SCTP receive-window stall cannot be what limits it. Any
+> figure derived from 128 KiB/RTT should be dropped. RFC 01 now carries the
+> correction inline, and its two dangling citations to this directory are
+> marked.
+
+This document's own warning applies to that re-derivation: the numbers come from
+`agent-share bench`, which measures a serial single-stream path (see below).
 
 What we have instead is `agent-share bench`, and it measures less than it looks
 like it does. `fill_once` is awaited one at a time and opens its own bi-stream
@@ -200,7 +232,25 @@ acts on them.
 
 ## Tier 1 — the six that most likely dominate
 
-### 1. Reads are strictly serial, depth 1 [verified]
+### 1. Reads are strictly serial, depth 1 [verified, but falsified as a bottleneck]
+
+> **FALSIFIED, by its own named falsifier.** The shape below is real — reads
+> *are* serial — but raising depth does not recover anything, which is what the
+> item claimed it would. The depth sweep ran exactly the test named under
+> "Killed by": depth 2/4/8 on both native paths. QUIC stays flat at ~115 MiB/s
+> and *loses* ground at depth 8; WebRTC more than halves. See
+> [Depth sweep](#depth-sweep-finding-1-is-falsified-on-both-native-paths).
+>
+> The `256 KiB / RTT` arithmetic below is not wrong, it is simply not binding:
+> at the 0.07 ms RTT measured on the QUIC leg the serial ceiling is ~14 GB/s,
+> two orders of magnitude above what the path delivers. Depth pays only when
+> request size is small relative to bandwidth × RTT, and the one shape where
+> that might still hold — 128 KiB mount reads rather than 1 MiB fills — is
+> listed under "Still not measured". **Fix finding #2's backpressure before
+> touching depth anywhere**, because on WebRTC more in flight means more drops.
+>
+> Read the rest of this section as the original hypothesis, kept for its
+> mechanism and its citations rather than its ranking.
 
 `web/src/download.ts:45-64`, `web/src/mount.ts:161-170`
 
@@ -511,10 +561,29 @@ this is decided entirely at compile time. Levers in order:
    shipped in Chrome 91 and Safari 16.4 (March 2023). The usual caveat — a
    `+simd128` module fails *validation* outright on an engine without it, rather
    than degrading — does not apply to us. No feature detection, no dual builds.
-3. **`blake3` feature `wasm32_simd`** — upstream reports 6× on large inputs
-   under Wasmtime plus a later ~20%. Requires adding a direct dependency on the
-   wasm client purely to enable it through feature unification. Rated modest:
-   blake3 is iroh's hashing and is not obviously on our per-byte path.
+3. **`blake3` feature `wasm32_simd`** — ~~upstream reports 6× on large inputs
+   under Wasmtime plus a later ~20%~~. Requires adding a direct dependency on
+   the wasm client purely to enable it through feature unification.
+   ~~Rated modest: blake3 is iroh's hashing and is not obviously on our per-byte
+   path.~~
+
+   > **MEASURED, and both halves of the rating were wrong.**
+   > [`03-fofoca-blobs`](03-fofoca-blobs/findings/s03-hash-throughput.md)
+   > benchmarked it: **1.80× under node/V8**, not 6×. The 6× figure is
+   > Wasmtime's; engine choice evidently matters enormously here, so quote it
+   > as engine-specific or not at all. Absolute numbers: 1197 MiB/s portable →
+   > 2160 MiB/s with `simd128`, which is **92% of native single-threaded
+   > blake3**. Costs +12 KB of module.
+   >
+   > The "not obviously on our per-byte path" rating also flips **if
+   > [RFC 03](03-fofoca-blobs/README.md) lands**: bao verification puts blake3
+   > on *every non-origin byte*, and outboard construction becomes a latency the
+   > user waits on before a file's first swarm fetch. Under that design this is
+   > the largest wasm lever in this section, not a modest one.
+   >
+   > Caveat in the other direction: at ~2 GiB/s, hashing is far above the link
+   > ceiling either way. This buys **latency, not throughput** — see that
+   > document's Performance section, which is emphatic about the distinction.
 4. **`--cfg curve25519_dalek_bits="64"`** — wasm32 is a 32-bit target so the
    crate picks 32-bit limbs despite wasm having native `i64`. Handshake cost,
    not throughput; it moves time-to-first-byte, not MiB/s.

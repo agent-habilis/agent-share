@@ -38,6 +38,10 @@ path = "src/main.rs"
 # The wire format, shared verbatim with the browser client. Anything both
 # ends must agree on lives there, not here.
 agent-share-proto = { path = "../agent-share-proto" }
+# The verified byte store. The dependency runs one way only: `agent-share` knows
+# about `fofoca-blobs`, and `fofoca-blobs` knows nothing about shares — enforced
+# on its side by `tests/isolation.rs`.
+fofoca-blobs = { path = "../fofoca-blobs" }
 # The gossip engine. A share joins a mesh derived from its own ticket secret, so
 # everyone holding the link becomes a peer of everyone else rather than only of
 # the producer. Note this pulls the vendored mesh into `default-members`, which

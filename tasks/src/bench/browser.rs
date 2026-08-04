@@ -243,9 +243,10 @@ fn assert_wasm_is_fresh(root: &Path, url: &str) -> Res<()> {
     let on_disk = std::fs::metadata(root.join(WASM_ARTIFACT))
         .map_err(|error| format!("cannot stat the built wasm: {error}"))?
         .len();
+    let path = served_wasm_path(root)?;
     let served = Command::new("curl")
         .args(["-s", "-o", "/dev/null", "-w", "%{size_download}"])
-        .arg(format!("{url}agent_share_wasm_client_bg.wasm"))
+        .arg(format!("{}{}", url.trim_end_matches('/'), path))
         .output()
         .map_err(|error| format!("cannot fetch the served wasm: {error}"))?;
     let served: u64 = String::from_utf8_lossy(&served.stdout)
@@ -262,6 +263,27 @@ fn assert_wasm_is_fresh(root: &Path, url: &str) -> Res<()> {
         .into());
     }
     Ok(())
+}
+
+/// The URL path the dev server actually answers the wasm on.
+///
+/// Content-addressed, so it cannot be a constant here: `web/scripts/wasm-asset.ts`
+/// hashes the binary and writes the path into `web/src/wasm-path.ts`, and the
+/// dev server 404s the old fixed name on purpose. Read from that generated file
+/// rather than re-deriving the hash, so there is one source of truth and no
+/// second implementation of the digest to drift.
+///
+/// Safe to read at this point in the run: `dev.ts` regenerates it before it
+/// binds a port, and the caller has already seen the server's ready line.
+fn served_wasm_path(root: &Path) -> Res<String> {
+    const GENERATED: &str = "web/src/wasm-path.ts";
+    let source = std::fs::read_to_string(root.join(GENERATED))
+        .map_err(|error| format!("cannot read {GENERATED}: {error}"))?;
+    source
+        .split_once("WASM_PATH = '")
+        .and_then(|(_, rest)| rest.split_once('\''))
+        .map(|(path, _)| path.to_owned())
+        .ok_or_else(|| format!("{GENERATED} has no WASM_PATH literal to read").into())
 }
 
 /// Browser as consumer, native `agent-share bench` as producer.

@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>S0.6 — IdbStore in a browser</title>
+<body style="font:13px ui-monospace,monospace;padding:16px">
+<button id="go">Run</button>
+<span id="hint">run, then <b>reload and run again</b> for persistence</span>
+<pre id="out"></pre>
+<script type="module">
+import init, { run } from './pkg/s06_idb.js';
+await init();
+document.getElementById('go').onclick = async () => {
+  document.getElementById('out').textContent = 'running…';
+  const t0 = performance.now();
+  const report = await run();
+  document.getElementById('out').textContent =
+    report + `\nelapsed ${(performance.now()-t0).toFixed(0)} ms`;
+};
+</script>
+</body>

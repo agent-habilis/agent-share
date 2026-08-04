@@ -33,11 +33,23 @@ use super::live::LiveTree;
 pub(crate) struct MountHandler {
     secret: [u8; SECRET_LEN],
     tree: Arc<LiveTree>,
+    /// Outboards for files somebody has asked to verify. `None` when the cache
+    /// directory could not be opened — the share still serves every byte, it
+    /// just cannot vouch for them to a third party.
+    hashes: Option<Arc<super::hash::HashCache>>,
 }
 
 impl MountHandler {
-    pub(crate) fn new(secret: [u8; SECRET_LEN], tree: Arc<LiveTree>) -> Self {
-        Self { secret, tree }
+    pub(crate) fn new(
+        secret: [u8; SECRET_LEN],
+        tree: Arc<LiveTree>,
+        hashes: Option<Arc<super::hash::HashCache>>,
+    ) -> Self {
+        Self {
+            secret,
+            tree,
+            hashes,
+        }
     }
 }
 
@@ -45,8 +57,13 @@ impl ProtocolHandler for MountHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         // Held for the connection's life, exactly as the old accept loop's
         // spawned task was. Errors are the peer going away, which is routine.
-        if let Err(error) =
-            super::produce::serve_established(conn, self.secret, Arc::clone(&self.tree)).await
+        if let Err(error) = super::produce::serve_established(
+            conn,
+            self.secret,
+            Arc::clone(&self.tree),
+            self.hashes.clone(),
+        )
+        .await
         {
             tracing::debug!(%error, "mount connection ended");
         }

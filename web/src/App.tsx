@@ -19,7 +19,10 @@ import { component, computed, interval, signal } from 'visage-dom'
 import type { Child, Ctx } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
+import { seedState, shareSeedSummary } from './seeding.ts'
 import { TechInfo } from './TechInfo.tsx'
+import { TransferStatus } from './TransferStatus.tsx'
+import type { LinkSample, TransferSnapshot } from './transferStats.ts'
 import {
   pickSaveTarget,
   singleFileStream,
@@ -81,10 +84,34 @@ interface Client {
   info(): unknown
   /** Refresh ICE remote-candidate addresses (slower cadence). */
   refresh_peer_ips(): Promise<void>
+  /**
+   * Sample the mount connection's wire counters. **Not a getter** — it
+   * differences cumulative counters, so calling it twice in one tick zeroes the
+   * rates. Exactly one driver may call it; see the sampler in `Session`.
+   */
+  sample_link(): LinkSample
   manifest(): Promise<Manifest>
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
   /** Subscribe to tree changes. Each call delivers the whole manifest. */
   watch(onManifest: (manifest: Manifest) => void): Promise<void>
+  /**
+   * Pull bytes into local storage so this tab can seed them.
+   *
+   * `only` names paths to take — a file, or a folder and everything under it.
+   * Omit it for the whole share.
+   */
+  sync(only?: string[]): Promise<{
+    files: number
+    bytes: number
+    verified: number
+    unverified: number
+    skipped: number
+    held: number
+  }>
+  /** Manifest indices held in full, and therefore seedable. */
+  readonly held: Uint32Array
+  /** Recompute what is held from storage — what survived a reload. */
+  refresh_held(): Promise<void>
 }
 
 type State =
@@ -210,12 +237,15 @@ function prunePath(current: string[], manifest: Manifest): string[] {
  */
 function SessionChrome({
   crumb,
+  center,
   trailing,
   belowBar,
   children,
 }: {
   /** When omitted, the top bar is just the brand. */
   crumb?: string
+  /** Status between the brand and the actions. Must be exactly `oneRow` tall. */
+  center?: Child
   trailing?: Child
   belowBar?: Child
   children: Child
@@ -238,7 +268,37 @@ function SessionChrome({
           gap: 'calc(1 * var(--ms-row))',
         }}
       >
-        <Stack direction="row" gap={2} justify="between">
+        {/*
+          A grid, not a flex row, and only because of the middle slot.
+
+          Centring the status in the *slack* between the two ends ties its
+          position to their widths, and both ends change width on their own
+          schedule — the Sync button alone relabels through `Sync` /
+          `Syncing share…` / `Seeding 6`. Measured, that dragged the whole
+          readout 23px sideways mid-transfer, which is precisely the jitter the
+          readout's own fixed-width fields exist to prevent, arriving one level
+          up.
+
+          Equal `minmax(0, 1fr)` rails on either side of an `auto` middle pin
+          the middle to the *container's* centre instead, so it holds still
+          whatever the ends do. `minmax(0, …)` rather than `1fr` so a rail may
+          shrink below its content on a narrow window; the middle is the one
+          thing that must not move.
+        */}
+        <div
+          style={{
+            display: 'grid',
+            // `minmax(0, auto)` for the middle, not plain `auto`: an `auto`
+            // track refuses to shrink below its content, so on a narrow window
+            // the actions overflow *into* the status and the two draw on top of
+            // each other. This lets the status be the one that gives.
+            gridTemplateColumns: center
+              ? 'minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr)'
+              : '1fr auto',
+            alignItems: 'center',
+            gap: '2ch',
+          }}
+        >
           <Stack direction="row" gap={1}>
             <Text weight="bold">agent-share</Text>
             {crumb ? (
@@ -248,8 +308,17 @@ function SessionChrome({
               </>
             ) : null}
           </Stack>
-          {trailing ?? null}
-        </Stack>
+          {center ? (
+            // `overflow: hidden` so a window too narrow for everything clips
+            // the status rather than shoving the actions off the edge.
+            <div style={{ display: 'flex', justifyContent: 'center', overflow: 'hidden' }}>
+              {center}
+            </div>
+          ) : null}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', minWidth: 0 }}>
+            {trailing ?? null}
+          </div>
+        </div>
         {belowBar ?? null}
       </div>
       <div
@@ -315,7 +384,10 @@ function FailedBody({ reason, kind }: { reason: string; kind?: FailureKind }) {
                   ? 'WebRTC could not open a path between the two browsers (LAN/mDNS and TURN both failed). On macOS, allow Local Network for this browser under System Settings → Privacy & Security → Local Network, hard-refresh both tabs, and retry.'
                   : 'A direct connection to this peer could not be established. Both ends may be behind restrictive NATs.'}
             </Text>
-            <Text color="fgSubtle">{reason}</Text>
+            {/* The raw error, which is exactly what gets pasted into a report. */}
+            <Text color="fgSubtle" class="selectable">
+              {reason}
+            </Text>
           </Stack>
         </Box>
       </div>
@@ -431,7 +503,11 @@ const Home = component(function* (_props, ctx: Ctx) {
                     </Text>
                   </Stack>
                   <Text color="fgMuted">Peers open this link:</Text>
-                  <Text>{url}</Text>
+                  {/*
+                    `Copy link` below takes the whole string; selection is for
+                    taking part of it — the ticket alone, say.
+                  */}
+                  <Text class="selectable">{url}</Text>
                   <Button
                     variant="primary"
                     onclick={() => {
@@ -518,6 +594,51 @@ const Session = component<{
   const reviving = signal(false)
   /** Non-null while a host directory is mounted for this session. */
   const mountSession = signal<MountSession | null>(null)
+  /**
+   * Manifest indices this tab holds in full, and so can seed.
+   *
+   * Mirrored out of the wasm client rather than tracked here: the store is the
+   * only thing that knows what actually survived, and a set maintained in JS
+   * would drift from it on every reload.
+   */
+  const held = signal<ReadonlySet<number>>(new Set())
+  /** In-flight sync, so the button can say what it is doing. */
+  const seeding = signal<{ label: string } | null>(null)
+  const seedError = signal<string | null>(null)
+  /**
+   * The latest transfer reading, from the one sampler below.
+   *
+   * A signal rather than a prop computed during render, so only the readouts
+   * that read it repaint each second — the file list must not.
+   */
+  const sample = signal<TransferSnapshot | null>(null)
+  /** Bumped by the same tick, for views that re-read `info()` rather than this. */
+  const tick = signal(0)
+
+  /*
+    The app's single sampler.
+
+    Both calls difference cumulative counters, so the interval *is* the
+    averaging window for every rate on screen — at 5s a transfer that starts and
+    ends between samples never shows a rate at all. And there is exactly one of
+    them: two samplers would each compute the other's second reading over a few
+    milliseconds with no byte delta, overwriting real rates with zero. The Info
+    pane used to own its own pair of intervals; it now reads what this produces.
+  */
+  using _sampler = interval(1000, () => {
+    const current = state.peek()
+    if (current.phase !== 'ready') return
+    // getStats, for the per-peer rows and the ICE addresses behind them.
+    void current.client.refresh_peer_ips()
+    // QUIC, for the whole connection — the half that answers on the relay path,
+    // where there is no candidate pair to ask.
+    sample.value = {
+      link: current.client.sample_link(),
+      gossip: current.client.peers_gossip,
+      direct: current.client.peers_direct,
+    }
+    tick.value = tick.peek() + 1
+  })
 
   let synced: SyncedState = emptySyncedState()
   let syncing = false
@@ -628,6 +749,13 @@ const Session = component<{
     if (ctx.aborted.aborted) return
     path.value = prunePath(path.peek(), manifest)
     state.value = { phase: 'ready', client, manifest }
+    // What survived a previous visit. Reads storage without creating any, so
+    // a tab that only browses leaves nothing behind. Inside `bringUp` rather
+    // than beside the first call, so a revived connection re-reads it too —
+    // the client is new after a redial and its held set starts empty.
+    void client.refresh_held().then(() => {
+      if (!ctx.aborted.aborted) refreshHeld(client)
+    })
     await client.watch((next) => {
       if (ctx.aborted.aborted) return
       path.value = prunePath(path.peek(), next)
@@ -824,6 +952,51 @@ const Session = component<{
     }
   }
 
+  /** Take the client's held set into the signal, and repaint. */
+  function refreshHeld(client: Client): void {
+    held.value = new Set(Array.from(client.held))
+  }
+
+  /**
+   * Fetch bytes so this tab can seed them.
+   *
+   * `only` is a path filter — a file or a folder — or nothing for the whole
+   * share. Already-held files are skipped by the client, so pressing this
+   * twice is cheap rather than a re-download.
+   */
+  async function syncSeed(only: string[] | undefined, label: string): Promise<void> {
+    if (seeding.peek()) return
+    // Re-dial first, for the same reason `downloadFiles` does: sync pulls the
+    // bytes over the mount connection, so a tab that was backgrounded long
+    // enough to lose it would fail here and blame storage.
+    await ensureLive()
+    const current = state.peek()
+    if (current.phase !== 'ready') return
+    seeding.value = { label }
+    seedError.value = null
+    try {
+      await current.client.sync(only)
+      refreshHeld(current.client)
+    } catch (error) {
+      // Storage can be refused outright — private mode, or a full quota — and
+      // that must cost seeding rather than the share. Surfaced rather than
+      // logged: a Sync button that silently does nothing is worse than one
+      // that says why.
+      seedError.value = String(error)
+      console.warn('[share] sync failed', error)
+    } finally {
+      seeding.value = null
+    }
+  }
+
+  async function syncSelected(): Promise<void> {
+    const built = tree.peek()
+    if (!built) return
+    const selected = nodeAtPath(built.root, path.peek())
+    if (!selected) return
+    await syncSeed([selected.path], selected.name || 'share')
+  }
+
   async function downloadSelected(): Promise<void> {
     const built = tree.peek()
     if (!built) return
@@ -935,6 +1108,28 @@ const Session = component<{
         Info
       </Button>
     )
+    /*
+      Whole-share sync. The label carries the state rather than a separate
+      line, because this row is exactly `oneRow` tall and anything taller
+      would move every pixel of content under it.
+    */
+    const summary = shareSeedSummary(built.root, held.value)
+    const syncing = seeding.value
+    const syncButton = (
+      <Button
+        variant="secondary"
+        onclick={() => void syncSeed(undefined, 'share')}
+        disabled={syncing !== null || summary.state === 'full'}
+      >
+        {syncing
+          ? `Syncing ${syncing.label}…`
+          : summary.state === 'full'
+            ? `Seeding ${summary.total}`
+            : summary.state === 'partial'
+              ? `Sync ${summary.total - summary.held} more`
+              : 'Sync'}
+      </Button>
+    )
 
     /*
       One row, always. A transfer takes the middle of the row rather than
@@ -967,6 +1162,7 @@ const Session = component<{
     } else {
       trailing = (
         <Stack direction="row" gap={1}>
+          {syncButton}
           {infoButton}
           {mountable ? (
             mountButton()
@@ -1000,10 +1196,19 @@ const Session = component<{
     const belowBar =
       err || downloadErr || built.skipped > 0 ? (
         <>
-          {err ? <Text color="danger">{err}</Text> : null}
-          {downloadErr ? <Text color="danger">{downloadErr}</Text> : null}
+          {/* All three are diagnostics, so all three stay copyable — see `app.css`. */}
+          {err ? (
+            <Text color="danger" class="selectable">
+              {err}
+            </Text>
+          ) : null}
+          {downloadErr ? (
+            <Text color="danger" class="selectable">
+              {downloadErr}
+            </Text>
+          ) : null}
           {built.skipped > 0 ? (
-            <Text color="warning">
+            <Text color="warning" class="selectable">
               {built.skipped} entries hidden — unsafe paths in the peer&apos;s manifest
             </Text>
           ) : null}
@@ -1011,10 +1216,24 @@ const Session = component<{
       ) : null
 
     return (
-      <SessionChrome crumb={crumb} trailing={trailing} belowBar={belowBar}>
+      <SessionChrome
+        crumb={crumb}
+        center={
+          /*
+            Dropped while a transfer runs: that branch already gives the whole
+            row to a `ProgressBar`, which answers "what is moving" better than a
+            rate does, and two answers competing for one row is how the row stops
+            being one row.
+          */
+          active ? null : <TransferStatus sample={sample} />
+        }
+        trailing={trailing}
+        belowBar={belowBar}
+      >
         {showingInfo ? (
           <TechInfo
             client={current.client}
+            tick={tick}
             fileCount={files.length}
             totalBytes={total}
             status={status}
@@ -1036,6 +1255,9 @@ const Session = component<{
             }}
             onDownload={() => void downloadSelected()}
             downloadDisabled={active !== null || redialling}
+            held={held.value}
+            onSync={() => void syncSelected()}
+            syncDisabled={seeding.value !== null || redialling}
           />
         )}
       </SessionChrome>

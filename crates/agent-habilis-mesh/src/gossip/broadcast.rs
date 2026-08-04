@@ -284,11 +284,13 @@ pub(super) async fn broadcast_peer_info(ctx: &HandlerCtx<'_>) {
 /// Announce our arrival: `joined` presence followed by `PeerInfo`.
 /// Called once at the top of the event loop; the caller bumps
 /// `last_sent_at` afterwards.
-pub(super) async fn announce_arrival(ctx: &HandlerCtx<'_>) {
-    broadcast_msg(
-        ctx.sender,
-        &Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity),
-    )
-    .await;
+///
+/// Takes `state` only to retain the `joined` locally — see
+/// [`retain_own_broadcast`](super::recv::retain_own_broadcast) for why a node
+/// that does not hold its own presence makes anti-entropy unconvergeable.
+pub(super) async fn announce_arrival(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    let joined = Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity);
+    broadcast_msg(ctx.sender, &joined).await;
+    super::recv::retain_own_broadcast(state, &joined);
     broadcast_peer_info(ctx).await;
 }

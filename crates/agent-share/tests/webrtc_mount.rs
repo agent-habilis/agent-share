@@ -100,7 +100,8 @@ async fn a_share_is_readable_over_a_webrtc_data_channel() {
                         .expect("complete answer");
                     webrtc.attach(conn.remote_id(), session).expect("attach");
                 } else {
-                    let _ = agent_share::test_support::serve_mount(conn, secret, shared_tree).await;
+                    let _ = agent_share::test_support::serve_mount(conn, secret, shared_tree, None)
+                        .await;
                 }
             });
         }

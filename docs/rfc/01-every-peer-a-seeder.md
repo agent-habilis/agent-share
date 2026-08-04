@@ -1,11 +1,23 @@
 # RFC 01: every peer a seeder
 
-Status: **draft** — design agreed with the user, no work started.
+Status: **draft** — design agreed with the user. **Phases 0–3 not started;
+Phases 4–5 are superseded in part by [RFC 03](03-fofoca-blobs/README.md).**
 Scope decided with the user: all four goals (resilience, throughput, fan-out,
 producer offload); swarm the whole-file paths first and the NFS mount last;
 verification via lazily-computed bao ranges.
 
 Self-contained: findings, design decisions, phases, edge cases, verification.
+
+**Amended after RFC 03's Stage 0.** Five load-bearing assumptions in this
+document were tested empirically; the results are in
+[`03-fofoca-blobs/findings/`](03-fofoca-blobs/findings/). Corrections are marked
+inline below rather than silently applied, because each was load-bearing
+somewhere. Facts now carry an evidence class, the convention
+[`02-performance.md`](02-performance.md) introduced:
+
+- **[measured]** — benchmarked or executed; number in `03-fofoca-blobs/data/`.
+- **[verified]** — confirmed by reading the code directly.
+- unmarked — survey-pass belief, re-check before acting on it.
 
 ## Context: what is broken and why
 
@@ -15,10 +27,26 @@ every byte from it: `crates/agent-share/src/mount/consume.rs` holds one
 
 1. **A share dies with its producer.** Close the tab or the terminal and every
    mount goes dark, even when another peer on the mesh holds a complete copy.
-2. **Throughput is capped per connection, not per link.** The WebRTC data
-   channel ceiling is SCTP's 128 KiB receive window — ~18 MB/s at 0 ms RTT
-   collapsing to <2 MB/s at 50 ms (`docs/research/iroh-webrtc/README.md`). One
-   source cannot be tuned around it; a second source is worth ~2×.
+2. **Throughput is capped per connection, not per link.** **[measured]** A
+   second source is worth **≥1.61×**
+   ([S0.4](03-fofoca-blobs/findings/s04-multi-source-throughput.md)), and that
+   is a floor: it was measured at ~0 ms RTT, where no flow-control window can
+   bind, and adding RTT can only widen the gap. If the ceiling were *shared*,
+   one source would already have reached the two-source aggregate; it does not.
+
+   > **CORRECTED.** This bullet previously read: "the WebRTC data channel
+   > ceiling is SCTP's 128 KiB receive window — ~18 MB/s at 0 ms RTT collapsing
+   > to <2 MB/s at 50 ms", citing `docs/research/iroh-webrtc/README.md`. Two
+   > problems. The citation is **dangling** — that directory was deleted as
+   > misleading, and [`02-performance.md`](02-performance.md) says it "should
+   > not be cited and should not be restored from git history as evidence".
+   > And the mechanism is wrong: **[verified]** this transport negotiates the
+   > data channel **unreliable and unordered**
+   > (`Reliability::MaxRetransmits { retransmits: 0 }`,
+   > `fofoca-iroh-webrtc-transport/src/host/jsep.rs:104-106`) precisely so QUIC
+   > above owns loss recovery, so the reliable-ordered SCTP receive-window stall
+   > does not apply. The conclusion survives on new evidence; **any figure
+   > derived from 128 KiB/RTT should be dropped.**
 3. **Fan-out is linear on the producer's uplink.** Ten consumers of one large
    file are ten full copies out of one pipe.
 4. **Peers that already hold the bytes are idle.** A browser that mirrored a
@@ -31,52 +59,91 @@ built or are the wrong shape here. See *Rejected alternatives*.
 
 ## Load-bearing facts about the existing wire and peers
 
-- **The mount protocol is already symmetric, by accident of the security
-  model.** A producer authenticates a read with one line —
+- **[measured] The mount protocol is already symmetric, by accident of the
+  security model.** A producer authenticates a read with one line —
   `if &header[..SECRET_LEN] != secret` (`mount/produce.rs:247`) — and that
   secret is the ticket secret, which every mesh member holds *by definition*:
   the mesh id is `SHA256("agent-share/mesh/v1" ‖ secret)`
   (`agent-share-proto/src/mesh_key.rs:40`). Any peer can authenticate any other
   peer's READ with **zero new code**.
-- **The consumer read path is already behind a trait.** `ByteSource`
+
+  Now a permanent regression guard rather than an inference:
+  `mount::tests::a_non_origin_peer_serves_the_origins_ticket_secret` stands up
+  two independent producers under one secret and reads from the second.
+  `serve_established` already takes the secret as a parameter
+  (`produce.rs:216`), so nothing in production moved to make this work. Its
+  sibling `::a_diverged_peer_answers_plausibly_and_wrongly` pins the danger:
+  a peer on a diverged tree **succeeds** and returns different bytes for the
+  same index — the silent-corruption class guard #1 below exists to stop. See
+  [S0.2](03-fofoca-blobs/findings/s02-protocol-symmetry.md).
+- **[verified] The consumer read path is already behind a trait.** `ByteSource`
   (`mount/nfs.rs:19`) is `async fn read(&self, index, offset, len)`, and
   `RemoteFs<S: ByteSource>` is generic over it. Multi-source is a new impl, not
   a rewrite — `nfs.rs` does not change.
-- **The availability index already exists and is replicated.** Every ticket
+- **[verified] The availability index already exists and is replicated.** Every ticket
   holder is a gossip peer (`mount/mesh.rs`, mesh derived from the ticket
   secret), and each publishes a `PeerCard` to `/peers/<nick>/card` on the
   automerge `Channel::Meta` under a `SelfWriteGate`
   (`agent-share-proto/src/client.rs:34`). No request/response protocol is
   needed.
-- **The native consumer never joins the share mesh.** `consume.rs` contains
+- **[verified] The native consumer never joins the share mesh.** `consume.rs` contains
   zero mesh references; only `produce.rs:118` calls `mesh::join`. The *browser*
   consumer does (`crates/agent-share-wasm-client/src/lib.rs:244`, role
   `"consumer"`). So on the CLI side there is currently no roster to select
   sources from.
-- **`ShareDriver::on_app_frame` returns `false`** in both `mount/mesh.rs` and
-  `wasm-client/src/mesh.rs` — the app-frame plane on the share mesh is entirely
-  unused.
-- **Index stability is the READ-address invariant.** `LiveTree`
+- **[verified] `ShareDriver::on_app_frame` returns `false`** in both
+  `mount/mesh.rs` and `wasm-client/src/mesh.rs` — the app-frame plane on the
+  share mesh is entirely unused. **It is the reserved socket for pre-connect
+  availability queries.** A directed app frame
+  (`AppFrameParams { tag, to, corr, body }`,
+  `agent-habilis-mesh/src/protocol/message/mod.rs:518-523`) routes as **unicast,
+  not gossip** when `to == Some` (`gossip/broadcast.rs:22-24`), and `corr` gives
+  request/response via a parked waiter (`gossip/app.rs:16`). That is how a peer
+  asks "which chunks do you hold?" *before* spending one of the 16 ICE slots —
+  the question `MOUNT_ALPN` structurally cannot answer, because reaching it is
+  the expensive decision being made. See
+  [RFC 03](03-fofoca-blobs/README.md#availability-which-plane-answers-which-question).
+- **[verified] Index stability is the READ-address invariant.** `LiveTree`
   (`mount/live.rs:1-19`) is append-only with tombstones; indices are a
   *per-serve* invariant, deliberately **not** re-derivable from sorted
   `rel_path` (`scan.rs:31` sorts per-directory, but the DFS `stack.pop()` walk
   means the global order is not sorted either).
-- **`answer_read` deliberately does not clamp to the manifest size**
+- **[verified] `answer_read` deliberately does not clamp to the manifest size**
   (`produce.rs:326`, rationale at `:336-339`: a growing file must read past its
   scanned length). A short read therefore means EOF today.
-- **There is no browser persistence at all.** Zero OPFS, zero IndexedDB in
-  `web/src` or `crates/agent-share-wasm-client/src`.
-- **The browser can hash.** It already reads bytes on demand
-  (`wasm-client/src/produce.rs:865`, `blob.slice()` → `array_buffer()`),
-  `blake3 1.8.5` is already in `Cargo.lock:551` (transitive), and `bao-tree`
-  minus its `fs` feature is wasm-clean — iroh-blobs' own wasm CI builds exactly
-  that feature set. The only browser-specific cost is having nowhere to cache
-  the outboard.
-- `MAX_DIRECT_PEERS = 16` (`agent-habilis-mesh/src/transport/webrtc.rs:451`),
+- **[verified] There is no browser persistence at all.** Zero OPFS, zero
+  IndexedDB in `web/src` or `crates/agent-share-wasm-client/src`. **[measured]**
+  But OPFS is viable and fast: synchronous access handles do random-access range
+  writes at ~1 GiB/s in Safari 27 and survive a reload
+  ([S0.5](03-fofoca-blobs/findings/s05-opfs-worker.md)). They exist **only
+  inside a Worker**, which is not a tax — hashing has to leave the main thread
+  anyway, so one Worker owns both.
+- **[measured] The browser can hash, and faster than assumed.** It already reads
+  bytes on demand (`wasm-client/src/produce.rs:865`, `blob.slice()` →
+  `array_buffer()`), and `blake3 1.8.5` is already in `Cargo.lock:551`
+  (transitive). Wasm hashing runs at ~1.2 GiB/s portable and ~2.2 GiB/s with
+  `+simd128` — **92% of native single-threaded**. Outboard construction tracks
+  it at 0.95×, so `bao-tree` rides blake3's wide SIMD path and the feared 4–8×
+  chunk-by-chunk penalty does not exist
+  ([S0.3](03-fofoca-blobs/findings/s03-hash-throughput.md)).
+
+  > **CORRECTED.** This bullet previously said "`bao-tree` minus its `fs`
+  > feature is wasm-clean". **[verified]** The default set is
+  > `["tokio_fsm", "validate", "serde", "fs"]`, and **`tokio_fsm` pulls
+  > `iroh-io`**, which is std/fs-bound. The recipe is
+  > `default-features = false` plus selectively re-adding — not dropping `fs`.
+  > So amended, it holds: the resulting cdylib has **zero imports at all**
+  > ([S0.1](03-fofoca-blobs/findings/s01-baotree-wasm.md)).
+- **[verified]** `MAX_DIRECT_PEERS = 16` (`agent-habilis-mesh/src/transport/webrtc.rs:451`),
   arbitrated by `SignalAdmission` and **shared with the mesh itself**. Each new
   peer costs a JSEP round (`JSEP_DEADLINE` 20 s).
-- Gossip frames cap at `MAX_MESSAGE_SIZE = 3840`; `send_app` refuses an
-  oversized signed frame and does not shard.
+- **[verified]** Gossip frames cap at `MAX_MESSAGE_SIZE = 3840`; `send_app`
+  refuses an oversized signed frame and does not shard. Nuance worth keeping:
+  the engine *does* reassemble multipart bodies (`surface_logical`,
+  `MAX_LOGICAL_BODY_BYTES`), but that path is "entangled with the application's
+  per-author hash chain" (`gossip/broadcast.rs:32-34`), so sharding is
+  **unreachable for us rather than nonexistent**. Also **[verified]** directed
+  frames ride **plaintext**, Ed25519-signed only (`broadcast.rs:37-40`).
 
 ## The one thing that is actually missing
 
@@ -107,12 +174,18 @@ Three properties follow:
   endpoint id already authenticates that. An outboard is built only for a file
   a swarm fetch is about to touch, so `serve` stays an instant `stat` walk on
   both runtimes.
-- **The ticket does not change and no issued ticket breaks.** The trust chain is
-  already intact: a consumer learns hashes from the origin over a channel
-  authenticated to the ticket's endpoint id, then accepts bytes from anyone,
-  verified against those hashes. A hostile peer can only refuse or fail
-  verification — bounded harm. A hostile *producer* can lie, but always could;
-  it owns the bytes.
+- **The trust chain is already intact.** A consumer learns hashes from the origin
+  over a channel authenticated to the ticket's endpoint id, then accepts bytes
+  from anyone, verified against those hashes. A hostile peer can only refuse or
+  fail verification — bounded harm. A hostile *producer* can lie, but always
+  could; it owns the bytes.
+
+  > **AMENDED.** This bullet used to open "The ticket does not change and no
+  > issued ticket breaks." That is no longer a constraint:
+  > [RFC 03](03-fofoca-blobs/README.md) ships as a required part of fofoca with
+  > **no backwards compatibility**, so breaking issued tickets is permitted. The
+  > argument above never depended on it — it is about who authenticates what,
+  > and stands on its own.
 - **Partial-file seeding works**, because bao verifies *ranges*. A peer serves
   the chunk ranges it holds. This is what fan-out on one big file requires and
   what a whole-file-hash design cannot give.
@@ -153,8 +226,16 @@ Two ~20-line sibling constructors carry this plus the size/mtime gate:
 ### Availability on the existing card
 
 Two optional fields on `PeerCard` (`agent-share-proto/src/client.rs:34`), both
-`skip_serializing_if`, so old peers stay parseable — `from_card_value` already
-tolerates missing fields via `unwrap_or`. Purely additive.
+`skip_serializing_if`.
+
+> **AMENDED.** The original reason given was "so old peers stay parseable",
+> which is void — there are no old peers. The fields are optional for a reason
+> that outlived it: **a peer genuinely does not know these yet.** The browser
+> joins the share mesh inside its client constructor
+> (`agent-share-wasm-client/src/lib.rs:236-250`), before it has fetched any
+> manifest, so it has no tree to publish at join and must republish once it
+> does. `from_card_value` still tolerates missing fields, now as robustness —
+> a truncated or corrupt CRDT entry must cost one peer, not the whole roster.
 
 - `tree: Option<String>` — 16 hex chars of `sha256(manifest_bytes)` over the
   exact bytes `OP_MANIFEST` returned. **The more important of the two**: it is
@@ -199,12 +280,31 @@ paying for it.
 
 Each ships alone and is independently valuable.
 
-**Phase 0 — the native consumer joins the mesh.** (~1 day)
-Port the ~30-line block from `produce.rs:118-146` into `consume.rs::attach` with
-`role: "consumer"`. Add `refresh_book()` / `known_cards()` and the
-`on_meta_applied` / `on_peer_left` hooks to `ShareDriver` in `mount/mesh.rs` — a
-near-verbatim port of `wasm-client/src/mesh.rs:200-217,429`.
-*Ships alone:* CLI mounts get the peer counts the browser already shows.
+**Phase 0 — the native consumer joins the mesh.** ✅ **Done.**
+The join half landed in `a2e76783`; `consume.rs::attach` calls
+`join_share_mesh` with `role: Consumer`. The roster half followed: `ShareDriver`
+in `mount/mesh.rs` now carries a `CardBook` refreshed from the meta document by
+`on_meta_applied` and `on_peer_left` — the latter because a departure is an
+*absence*, so nothing arrives on the meta channel to trigger a rebuild.
+
+Two departures from the sketch above, both deliberate:
+
+- **No `known_cards()` yet.** It would have had no caller until phase 5, and an
+  unused accessor is a claim the compiler cannot check. The roster is read
+  through `cards_from_book`, which the status line uses today; phase 5 adds the
+  public accessor with its consumer.
+- **Cards are keyed by endpoint id, not nickname.** Nicknames are random per
+  join, so a rejoining peer would otherwise appear twice.
+
+*Ships alone, and does:* both CLI peers now print a roster-backed line —
+`Peers 1 on mesh (1 producing) · 1 direct` on the consumer, `(1 reading)` on the
+producer. The role breakdown is the part the raw count could never give: it says
+whether the peer you can see is the one serving the bytes.
+
+Covered by `mount::mesh::tests` — four unit tests over `cards_from_meta`
+(including *an unparseable card costs only that peer*), three over the status
+line, and one end-to-end join proving two peers on one secret find each other
+and name each other's roles.
 
 **Phase 1 — manifest fingerprint.** (~half a day)
 `MountManifest::fingerprint()` in `agent-share-proto/src/manifest.rs`; `tree` +
@@ -235,17 +335,34 @@ already yields the right listing shape.
 - Publish `serving` + `tree`, debounced.
 
 **Phase 4 — bao outboards and verified ranges.**
-- `agent-share-proto`: add `bao-tree` (`default-features = false`, no `fs`) and
-  `blake3`; `OP_HASH = 5` returning root + outboard for one index, plus
-  `MAX_OUTBOARD_BYTES`; extend the `wire_constants_are_pinned` golden test.
-  **Do not touch `MountManifest::encode`** — an op an older producer doesn't
-  know costs one stream (the `OP_WATCH`/`OP_BENCH` precedent), a changed
-  manifest encoding breaks every issued ticket.
+**→ Superseded by [RFC 03](03-fofoca-blobs/README.md).** The shape below is
+right; RFC 03 retargets it in two ways. Outboards, root bindings and range
+bitfields move behind a `BlobStore` trait in a shared crate (`fofoca-blobs`),
+because the browser needs the same code and lives in a separate workspace. And
+hashes become **persisted rather than ephemeral**, which is what buys identity
+across restarts — see *What this still cannot do*.
+
+- `agent-share-proto`: add `bao-tree` (`default-features = false` — **not**
+  "no `fs`"; see the corrected fact above) and `blake3`; `OP_HASH = 5`
+  returning root + outboard for one index, plus `MAX_OUTBOARD_BYTES`; extend the
+  `wire_constants_are_pinned` golden test.
+  **Do not put hashes in `MountManifest`** — not because the encoding is frozen
+  (it no longer is), but because filling that field means hashing at scan time,
+  and `manifest.rs:18-20` refuses exactly that: bytes are fetched lazily, so
+  hashing the tree up-front defeats the point. `serve` staying a `stat` walk is
+  the property that separates this design from `iroh-blobs`. A new op is the
+  right shape regardless, and it no longer needs a degradation path for a
+  producer that does not know it — there are no such producers.
 - The origin hashes one file on demand, caching the outboard beside the file
-  (native) or in OPFS (browser — this would be the first OPFS use in the repo).
+  (native) or in OPFS (browser — this would be the first OPFS use in the repo,
+  and **[measured]** it works: [S0.5](03-fofoca-blobs/findings/s05-opfs-worker.md)).
 - Consumers verify every range from a non-origin source; a file with no hash yet
   falls back to the origin exactly as today.
-- Files under one chunk group (16 KiB) never get a hash — the detour costs more
+- **Use 64 KiB chunk groups, not 16 KiB.** **[measured]** Four times smaller
+  outboards (0.097 % vs 0.390 % of file size) at indistinguishable construction
+  speed, and better aligned with the kernel's `rsize=131072` NFS reads. The cost
+  is coarser partial-seed granularity and more bytes discarded per verification
+  failure. Files under one chunk group never get a hash — the detour costs more
   than the bytes.
 
 **Phase 5 — multi-source reads.**
@@ -265,9 +382,28 @@ can stripe. **NFS last**: the kernel issues 128 KiB reads (`rsize=131072`) in
 app-dictated order, so multi-source there needs speculative prefetch, which
 trades directly against the mount's "nothing prefetched, no disk" property.
 
-**Phase 6 — measure.** `mount/bench.rs` and `OP_BENCH` already exist. Add a
-1-origin + K-seeder scenario; plot aggregate MB/s against K. If it is not near
-linear, hedging and browser multi-source are both premature.
+**Phase 6 — measure.** **Partly done, and pulled forward.** The core question —
+does a second source add throughput at all — was answered before any of the
+above was built, because `mount/bench.rs` and `OP_BENCH` already existed:
+**[measured]** K=2 is worth 1.61×, K=4 is worth 0.61×
+([S0.4](03-fofoca-blobs/findings/s04-multi-source-throughput.md)). The scenario
+now lives in `mount::bench::tests::s04_multi_source_throughput_scaling`
+(`#[ignore]`d).
+
+Two things this phase still owes:
+
+- **K=4 must be re-measured under induced RTT before Phase 5 fixes the peer-set
+  cap at ~4.** The only measurement says four sources are *worse* than one.
+  The likely cause is CPU contention from co-locating every peer on one host,
+  which should vanish at realistic per-connection rates — but that is a
+  hypothesis, and sizing the scheduler on it untested is exactly the failure
+  this phase exists to prevent.
+- **The bench measures the wrong shape.** Per
+  [`02-performance.md`](02-performance.md) finding #1, `fill_once` is awaited
+  one at a time and opens its own bi-stream each time (`mount/bench.rs:493`), so
+  every number it reports is **single-stream serial**. A real mount does
+  concurrent reads. Read any K-seeder result alongside a real
+  `serve` → mount → `cp` of a large file.
 
 ## Edge cases and risks
 
@@ -302,20 +438,29 @@ linear, hedging and browser multi-source are both premature.
 
 ## Rejected alternatives
 
-- **`iroh-blobs` as the byte plane.** It builds and pairs cleanly with the fork
+- **`iroh-blobs` as the byte plane.** Still rejected, but **the decisive reason
+  is not the one given here.** It builds and pairs cleanly with the fork
   (0.103.0 wants `iroh ^1.0.0`, which rev `195cb98d` satisfies; the graph-wide
   `[patch.crates-io]` covers it, though `iroh-tickets`/`iroh-util` warrant a
   `cargo tree -d -i iroh-base` check). Its `Downloader` is genuinely good and
   its `ContentDiscovery` trait is a perfect socket for gossip-backed discovery.
-  But it cannot serve a blob until it has read it in full and built its tree,
-  which turns `serve` from a metadata walk into a full read of the tree —
-  exactly what `manifest.rs:18-20` refuses to do, and what makes browsing a
-  500 GB share while reading three files possible. It also re-hashes on every
-  editor save, and its wasm store is MemStore-only
-  (n0-computer/iroh-blobs#84, open). By phase 5 we have hashes, outboards,
-  discovery and multi-source; what it adds beyond that is a GC/tag system and a
-  redb store — optimisations on a working system, bought with ~15 new crates and
-  a second ALPN. Revisit only if measurement demands it.
+  The eager-hashing objection below is real — it cannot serve a blob until it
+  has read it in full, turning `serve` from a metadata walk into a full read,
+  exactly what `manifest.rs:18-20` refuses to do — but it is an argument about
+  cost, and cost arguments lose to sufficiently good libraries.
+
+  **The disqualifying fact is the store.** Its wasm backend is `MemStore`-only
+  (n0-computer/iroh-blobs#84, **verified still open**; the issue describes
+  storage abstraction as future work). Since the browser mirror *is* the seeder
+  — see *The one thing that is actually missing* — adopting it would mean
+  holding an entire share in JS heap. That is not a cost, it is a
+  contradiction. It also re-hashes on every editor save, needs ~15 new crates,
+  a second ALPN, and a `[patch.crates-io]` entry mirrored into the wasm
+  client's separate workspace.
+
+  [RFC 03](03-fofoca-blobs/README.md) takes the narrower path this rejection
+  implies: keep `bao-tree` (iroh-blobs' verification core, already wasm-clean)
+  and build only the storage seam iroh-blobs lacks. Revisit if #84 lands.
 - **Whole-file hashes instead of bao ranges.** Cheaper, but a corrupt peer costs
   the whole file's bandwidth, bytes cannot be streamed safely to disk, and
   partial-file seeding is impossible — so a share that *is* one large file has
@@ -350,10 +495,21 @@ Stated plainly so it is not discovered later:
 - **No identity across processes or restarts.** Indices are a per-serve
   invariant; restart the origin and everything may be renumbered. No "resume
   this download tomorrow", no permanent link, no cross-share dedup.
+
+  > **NARROWED by [RFC 03](03-fofoca-blobs/README.md).** Once outboards and
+  > root bindings are *persisted* rather than ephemeral, individual **files**
+  > gain durable identity: resume, and dedup keyed by root. What does **not**
+  > change is that indices remain per-serve — content addressing gives files
+  > identity, it does not make READ addresses stable.
 - **The origin stays the manifest authority.** A share can survive its origin's
   death *frozen at the last manifest every peer saw* — a coherent, useful
   snapshot — but it cannot outlive its origin and keep mutating. A
   content-addressed root would make any seeder self-sufficient; this does not.
+
+  > **Still true under RFC 03.** File-level content addressing does not lift
+  > this: the *tree* has no root, only the files in it do. A share that outlives
+  > its origin and keeps mutating needs a content-addressed manifest, which
+  > neither document proposes.
 - **Lazy mounts consume from the swarm but never join it** without an explicit
   `mirror`.
 
@@ -374,7 +530,19 @@ Stated plainly so it is not discovered later:
   verification and bans that peer. Confirm `cargo build --target
   wasm32-unknown-unknown` still succeeds with `bao-tree` in the graph and that
   no `import "env"` survives — the same assertion iroh-blobs' own wasm CI makes.
-- **Phase 5/6:** extend `mount/bench.rs` with the K-seeder scenario; compare
-  aggregate throughput at K=1 / 2 / 4 over a delayed link (`dnctl`/`pfctl` at
-  50 ms). Note `docs/research/iroh-webrtc/bench/RESULTS.md` records that a
-  lossy-link run has never been performed, so this is new ground either way.
+- **Phase 5/6:** the K-seeder scenario now exists
+  (`mount::bench::tests::s04_multi_source_throughput_scaling`, `#[ignore]`d) and
+  has been run **unshaped**: K=1 / 2 / 4 → 1.00× / 1.61× / 0.61×. What remains
+  is the same comparison **over a delayed link** (`dnctl`/`pfctl` at 50 ms);
+  the script is at
+  [`03-fofoca-blobs/harness/s04-delayed-link.sh`](03-fofoca-blobs/harness/s04-delayed-link.sh).
+  **Read the "measured median RTT" line the test prints before reading any
+  throughput number** — if it is ~0 the shaping never reached the test's
+  traffic and the numbers are just the unshaped baseline. A lossy-link run has
+  still never been performed, so that remains new ground.
+
+  > **CORRECTED.** This bullet previously cited
+  > `docs/research/iroh-webrtc/bench/RESULTS.md`. That path is **dangling** —
+  > the directory was deleted as misleading and per
+  > [`02-performance.md`](02-performance.md) must not be restored from git
+  > history as evidence.

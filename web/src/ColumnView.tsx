@@ -18,6 +18,7 @@
 import { Button, Stack, Text, MiddleTruncate, glyphs, roleVar, theme } from 'moonspace-ui'
 import { component, keyed, signal } from 'visage-dom'
 
+import { seedLabel, seedState } from './seeding.ts'
 import { humanBytes, type DirNode, type Node } from './tree.ts'
 
 const DEFAULT_WIDTH = 28
@@ -37,6 +38,11 @@ interface ColumnViewProps {
   onPathChange: (path: string[]) => void
   onDownload: () => void
   downloadDisabled?: boolean
+  /** Manifest indices this tab holds in full, and can seed. */
+  held: ReadonlySet<number>
+  /** Pull the current selection into local storage. */
+  onSync: () => void
+  syncDisabled?: boolean
 }
 
 /** The directory chain the current path selects, root first. */
@@ -213,6 +219,7 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
                 beginResize(event, widthAt(depth), (next) => setWidth(depth, next))
               }
               onFit={() => setWidth(depth, fitColumnWidth(column, 2))}
+              held={props.held}
             />
           )
         })}
@@ -229,6 +236,9 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
           onFit={(node) => {
             detailWidth.value = fitDetailWidth(node, 2)
           }}
+          held={props.held}
+          onSync={props.onSync}
+          syncDisabled={props.syncDisabled}
         />
       </div>
     )
@@ -276,6 +286,7 @@ function Column({
   onClear,
   onResizeStart,
   onFit,
+  held,
 }: {
   dir: DirNode
   selected: string | undefined
@@ -285,6 +296,7 @@ function Column({
   onClear: () => void
   onResizeStart: (event: MouseEvent) => void
   onFit: () => void
+  held: ReadonlySet<number>
 }) {
   return (
     <div
@@ -315,6 +327,7 @@ function Column({
               active={child.name === selected}
               padX={padX}
               onSelect={() => onSelect(child)}
+              held={held}
             />
           ))
         )}
@@ -329,12 +342,15 @@ function Row({
   active,
   padX,
   onSelect,
+  held,
 }: {
   node: Node
   active: boolean
   padX: number
   onSelect: () => void
+  held: ReadonlySet<number>
 }) {
+  const state = seedState(node, held)
   return (
     <div
       role="button"
@@ -367,6 +383,18 @@ function Row({
           <MiddleTruncate value={node.name} />
         </Text>
       </div>
+      {/*
+        One character wide whatever the state, so the name column never
+        reflows as a sync lands. A hollow mark for partial rather than a
+        second colour: the difference that matters is held or not, and a
+        folder mid-sync should not read as an error.
+      */}
+      <Text
+        color={state === 'full' ? 'accent' : 'fgSubtle'}
+        title={seedLabel(state, node, held)}
+      >
+        {state === 'full' ? '\u25cf' : state === 'partial' ? '\u25d0' : '\u00b7'}
+      </Text>
       {node.kind === 'dir' ? (
         <Text color={active ? 'fg' : 'fgSubtle'}>{glyphs.chevron.right}</Text>
       ) : null}
@@ -382,6 +410,9 @@ function Detail({
   downloadDisabled,
   onResizeStart,
   onFit,
+  held,
+  onSync,
+  syncDisabled,
 }: {
   node: Node | undefined
   width: number
@@ -389,8 +420,12 @@ function Detail({
   downloadDisabled?: boolean
   onResizeStart: (event: MouseEvent) => void
   onFit: (node: Node) => void
+  held: ReadonlySet<number>
+  onSync: () => void
+  syncDisabled?: boolean
 }) {
   if (!node) return null
+  const state = seedState(node, held)
   return (
     <div
       onclick={(event: MouseEvent) => event.stopPropagation()}
@@ -423,14 +458,36 @@ function Detail({
           ) : (
             <Text color="fgMuted">folder</Text>
           )}
+          {/*
+            Stated in words as well as by the row mark. "seeding" rather than
+            "downloaded": holding the bytes is not the interesting part, other
+            people being able to get them from you is.
+          */}
+          <Text color={state === 'full' ? 'accent' : 'fgSubtle'}>
+            {seedLabel(state, node, held)}
+          </Text>
           <div style={{ alignSelf: 'start' }}>
-            <Button
-              variant="secondary"
-              onclick={() => onDownload()}
-              disabled={downloadDisabled}
-            >
-              Download
-            </Button>
+            <Stack direction="row" gap={1}>
+              <Button
+                variant="secondary"
+                onclick={() => onDownload()}
+                disabled={downloadDisabled}
+              >
+                Download
+              </Button>
+              {/*
+                Disabled once everything here is held: pressing it again would
+                be a no-op the client skips anyway, and a button that does
+                nothing is worse than one that says it has nothing to do.
+              */}
+              <Button
+                variant="secondary"
+                onclick={() => onSync()}
+                disabled={syncDisabled || state === 'full'}
+              >
+                {state === 'full' ? 'Synced' : 'Sync'}
+              </Button>
+            </Stack>
           </div>
         </Stack>
       </div>

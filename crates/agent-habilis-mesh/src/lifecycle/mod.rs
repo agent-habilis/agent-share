@@ -175,12 +175,13 @@ pub(crate) async fn handle_presence(
             app.on_peer_left(&message.author, state, ctx).await;
         }
     } else if subtype == PresenceSubtype::Joined && update.joined_new {
-        // Re-announce so late joiners seed their roster.
-        gossip::broadcast_msg(
-            ctx.sender,
-            &Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity),
-        )
-        .await;
+        // Re-announce so late joiners seed their roster. Retained locally: a
+        // re-announce mints a fresh id, so without this each one becomes
+        // another message we can never acknowledge and every peer re-sends to
+        // us forever (see `gossip::recv::retain_own_broadcast`).
+        let joined = Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity);
+        gossip::broadcast_msg(ctx.sender, &joined).await;
+        gossip::retain_own_broadcast(state, &joined);
         state.last_sent_at = Instant::now();
         // Suppress "has joined" when we already printed "came back"
         // from the quiet check, or when this `joined` predates

@@ -400,11 +400,14 @@ async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let Ok(body) = crate::protocol::MessageBody::new(json) else {
         return;
     };
-    gossip::broadcast_msg(
-        ctx.sender,
-        &Message::new_link_state(ctx.mesh, ctx.author, body).signed(&state.identity),
-    )
-    .await;
+    // Retained locally for the same reason the vector is fed into our own
+    // routing table above: gossip never loops a broadcast back. Every tick
+    // mints a fresh `seq`, so an unretained vector is one more message our
+    // peers re-send to us on every anti-entropy round for as long as the log
+    // holds it (see `gossip::recv::retain_own_broadcast`).
+    let vector_msg = Message::new_link_state(ctx.mesh, ctx.author, body).signed(&state.identity);
+    gossip::broadcast_msg(ctx.sender, &vector_msg).await;
+    gossip::retain_own_broadcast(state, &vector_msg);
 }
 
 /// The sweep-tick arm: note the gap, then evict silent peers. The app's own

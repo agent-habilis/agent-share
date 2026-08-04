@@ -37,6 +37,33 @@ pub(crate) enum MountAction {
         #[arg(long, default_value = "human")]
         output: OutputFormat,
     },
+    /// Take a full copy of a share, so this machine can serve it too.
+    ///
+    /// The opposite trade from the lazy mount, on purpose: it downloads
+    /// everything rather than nothing, because a peer holding no bytes cannot
+    /// seed. Each file is hashed on arrival and cross-checked against the root
+    /// the origin publishes, so a copy that was mangled in transit is refused
+    /// rather than written. The result is an ordinary directory — hand it to
+    /// `agent-share serve` to become a second source for the tree.
+    Mirror {
+        /// Ticket for the share to copy.
+        ticket: String,
+        /// Directory to copy into. Created if it does not exist.
+        dest: PathBuf,
+        /// Copy only these paths, relative to the share root. Repeatable, and
+        /// naming a directory takes everything under it. Omit for the whole
+        /// share.
+        ///
+        /// A partial copy is still servable: it re-serves the origin's manifest
+        /// so the whole tree stays visible and its indices keep meaning what
+        /// the origin says, with the files it does not hold answered as absent.
+        #[arg(long = "only", value_name = "PATH")]
+        only: Vec<String>,
+        /// Output format: human (default) — a cargo-style progress and summary
+        /// — or json, a single `agent-share serve <dir>` line for machines.
+        #[arg(long, default_value = "human")]
+        output: OutputFormat,
+    },
     /// Synthetic throughput / latency bench (no real directory).
     ///
     /// No ticket → producer; `--transport webrtc|relay|quic` is required and is

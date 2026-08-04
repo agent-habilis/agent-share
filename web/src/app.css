@@ -13,3 +13,36 @@ html body {
   margin: 0;
   min-height: 100vh;
 }
+
+/*
+ * A file browser, not a document. Dragging the mouse across the tree should
+ * move the pointer, not paint a selection over every name it crosses.
+ *
+ * Safe to do this bluntly because the app renders no form controls at all —
+ * entering a ticket is a `window.prompt`, which is browser chrome and out of
+ * CSS's reach. If an `<input>` ever lands in this app it needs `user-select`
+ * back, or it will not be possible to select text inside it.
+ *
+ * Unlayered on purpose: author CSS outside `@layer` outranks both the `base`
+ * and `components` layers moonspace-ui declares, so this wins over any
+ * component style without reaching for `!important`.
+ */
+html {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/*
+ * …except where the text *is* the payload — an identifier destined for a bug
+ * report, a link to hand to someone else.
+ *
+ * Opted into per element rather than listed here by tag, so the reason a thing
+ * is selectable sits next to the markup that needs it. `user-select` inherits,
+ * hence the descendant selector: one class on a container covers everything
+ * rendered inside it.
+ */
+.selectable,
+.selectable * {
+  -webkit-user-select: text;
+  user-select: text;
+}

@@ -56,6 +56,10 @@ web-sys = { version = "0.3", features = [
 # Both generations that reach wasm need their browser backend switched on.
 # 0.3+ additionally needs the `getrandom_backend` rustflag — see
 # `.cargo/config.toml`, and note the feature alone is NOT enough.
+# The blob layer. Kept as a separate crate so nothing about verification,
+# outboards or storage leaks into the share protocol — see `fofoca-blobs`'s
+# isolation tests.
+fofoca-blobs = { path = "../fofoca-blobs" }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }

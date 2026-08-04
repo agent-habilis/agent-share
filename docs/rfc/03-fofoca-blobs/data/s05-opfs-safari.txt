@@ -1,0 +1,85 @@
+S0.5 — OPFS random access from a Worker
+Captured 2026-08-03.
+Safari 27 (AppleWebKit/605.1.15), macOS. Served over http://localhost (secure context).
+Harness: a Worker + plain JS; no wasm involved (see the note at the bottom).
+
+================================================================
+FEATURE PROBE — window scope vs worker scope
+================================================================
+Evaluated in the PAGE (window) scope:
+  {
+   "secure": true,
+   "hasStorage": true,
+   "hasFSFileHandle": true,
+   "hasSyncOnProto": false,          <-- expected!
+   "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15
+          (KHTML, like Gecko) Version/27.0 Safari/605.1.15"
+  }
+
+`createSyncAccessHandle` is absent on FileSystemFileHandle.prototype in window
+scope and present in a Worker. This is per spec, not a Safari quirk, and it is
+the constraint the whole OpfsStore design is shaped around.
+
+================================================================
+RESULTS — worker scope
+================================================================
+Run 1 (first ever load):
+  PASS  quota: usage 0.00 GiB of quota 76.80 GiB
+  ----  persistence: no prior marker (first run)
+  PASS  random-access 64 MiB in 64 KiB chunks, shuffled:
+        write 1561.0 MiB/s, read 9142.9 MiB/s, size=67108864, mismatches=0
+
+Run 2 (after a full page reload):
+  PASS  quota: usage 0.06 GiB of quota 76.80 GiB
+  PASS  persistence: marker from a PREVIOUS page load was found
+                     — OPFS survives reload
+  PASS  random-access 64 MiB in 64 KiB chunks, shuffled:
+        write 1454.5 MiB/s, read 8000.0 MiB/s, size=67108864, mismatches=0
+
+Additional samples across runs: write 955-1561 MiB/s, read 4267-9143 MiB/s.
+Zero mismatches in every run.
+
+The write order is deterministically shuffled, not sequential — a real seeder
+receives ranges from several peers in whatever order they arrive, and that is
+the access pattern under test.
+
+================================================================
+TWO TEST BUGS FOUND AND FIXED (recorded so they are not re-lived)
+================================================================
+Both initially looked like OPFS failures and were not:
+
+1. The persistence marker lived at offset 0 of the same file the random-access
+   test wrote to, so the shuffled writes clobbered it every run. Fixed by
+   giving the marker its own file.
+
+2. The size assertion compared against THIS run's requested size, but a prior
+   run had left the file larger. Fixed with truncate(0) before writing.
+
+The evidence that persistence worked even before the fix: run 2 reported
+size=67108864 (64 MiB, from run 1) while writing only 16 MiB, and quota usage
+went 0.00 -> 0.06 GiB across the reload.
+
+================================================================
+RUST BINDING CHECK (headless, separate from the above)
+================================================================
+web-sys 0.3.103 with features:
+  FileSystemSyncAccessHandle, FileSystemFileHandle, FileSystemDirectoryHandle,
+  FileSystemGetFileOptions, FileSystemReadWriteOptions, StorageManager,
+  Navigator, WorkerNavigator, WorkerGlobalScope, DedicatedWorkerGlobalScope
+
+  cargo check --target wasm32-unknown-unknown   ->   PASS
+
+Exercised bindings: get_directory, get_file_handle_with_options,
+create_sync_access_handle, read_with_u8_array_and_options,
+write_with_u8_array_and_options (both with `at` offset), flush, get_size, close.
+
+The browser half was written in plain JS deliberately: it answers the
+behavioural question (does OPFS random access work, persist, and how fast)
+without depending on a wasm-bindgen CLI version match. The Rust question — are
+the bindings reachable at all — is answered independently by the compile check.
+
+================================================================
+NOT YET RUN
+================================================================
+CHROME. Sync access handles are Worker-only in both engines, but quota policy
+and eviction behaviour differ. Procedure in ../README.md Verification.

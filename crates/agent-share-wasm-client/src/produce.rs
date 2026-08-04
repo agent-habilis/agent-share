@@ -16,7 +16,7 @@ use agent_share_proto::framing::{
 };
 use agent_share_proto::lookup::LookupOpts;
 use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
-use agent_share_proto::ticket::{MountTicket, TICKET_FLAG_BENCH_RELAY, TICKET_FLAG_BENCH_WEBRTC};
+use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
 use fofoca_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle,
     browser_answer, log_signal_sdps,
@@ -66,10 +66,7 @@ impl ShareProducer {
     ///
     /// # Errors
     /// Bad listing shape, bind failure, or empty tree.
-    pub async fn start(
-        listing: JsValue,
-        card: Option<JsValue>,
-    ) -> Result<ShareProducer, JsValue> {
+    pub async fn start(listing: JsValue, card: Option<JsValue>) -> Result<ShareProducer, JsValue> {
         console_error_panic_hook::set_once();
         let scanned = parse_listing(&listing)?;
         if scanned.files.is_empty() && scanned.dirs.is_empty() {
@@ -154,7 +151,7 @@ impl ShareProducer {
             addr: endpoint.addr(),
             secret,
             lookups,
-            flags: 0,
+            kind: agent_share_proto::ticket::TICKET_KIND_SHARE,
         };
         let ticket_str = ticket.encode();
 
@@ -372,10 +369,10 @@ impl BenchProducer {
     pub async fn start(transport: String) -> Result<BenchProducer, JsValue> {
         console_error_panic_hook::set_once();
         let mode = transport.trim().to_ascii_lowercase();
-        let (flags, with_webrtc) = match mode.as_str() {
-            "webrtc" | "webrtc_only" | "webrtc-only" => (TICKET_FLAG_BENCH_WEBRTC, true),
+        let (kind, with_webrtc) = match mode.as_str() {
+            "webrtc" | "webrtc_only" | "webrtc-only" => (TICKET_KIND_BENCH_WEBRTC, true),
             "relay" | "relay_only" | "relay-only" | "iroh_relay" | "iroh-relay" => {
-                (TICKET_FLAG_BENCH_RELAY, false)
+                (TICKET_KIND_BENCH_RELAY, false)
             }
             other => {
                 return Err(JsValue::from_str(&format!(
@@ -422,7 +419,7 @@ impl BenchProducer {
             addr: endpoint.addr(),
             secret,
             lookups: LookupOpts::public_preset(),
-            flags,
+            kind,
         };
 
         Ok(BenchProducer {
