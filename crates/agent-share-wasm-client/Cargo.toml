@@ -78,9 +78,12 @@ wasm-bindgen-test = "0.3"
 # Patches are not inherited across workspace boundaries, so they are duplicated
 # here and all three must move together.
 [patch.crates-io]
-iroh = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
-iroh-base = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
-iroh-dns = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
+# The `netwatch` entry that used to sit here is gone: the `iroh` fork pins the
+# net-tools fork itself now, so it arrives transitively even in this nested
+# workspace, which inherits no patches of its own.
+iroh = { git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74" }
+iroh-base = { git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74" }
+iroh-dns = { git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74" }
 
 [profile.release]
 opt-level = "s"
