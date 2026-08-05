@@ -444,14 +444,22 @@ impl MeshPeer {
         .await
     }
 
+    /// As [`Self::join_share_with`], but for a peer that may not own the
+    /// endpoint: `shared` is the mount's endpoint when there is one (the
+    /// WebRTC path), else the mesh builds its own. `protocols` ride the mesh's
+    /// Router either way — this is how a *viewer* serves the share's ALPNs
+    /// too, which is what makes a seeding tab actually answer reads instead
+    /// of only advertising them.
     pub(crate) async fn join_share(
         secret: &[u8; SECRET_LEN],
         lookups: &agent_share_proto::lookup::LookupOpts,
         shared: Option<(iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
+        protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
         card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
         let resolved = resolve_share(secret, lookups)?;
-        spawn_peer(resolved, TransportOpts::default(), shared, card).await
+        let injected = shared.map(|(endpoint, webrtc)| InjectedEndpoint { endpoint, webrtc });
+        spawn_peer_inner(resolved, TransportOpts::default(), injected, protocols, card).await
     }
 
     #[wasm_bindgen(getter)]

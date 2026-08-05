@@ -17,6 +17,12 @@ const CHUNK = 256 * 1024
 
 interface Reader {
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
+  /**
+   * Whether the mount reaches the ticket's origin. Absent reads as `true`.
+   * From a seeder, a short read is a failure (guard #2), not EOF — see
+   * `fileStream`.
+   */
+  readonly source_is_origin?: boolean
 }
 
 export interface Progress {
@@ -55,6 +61,17 @@ function fileStream(
       const want = Math.min(CHUNK, file.size - offset)
       const chunk = await reader.read(file.index, BigInt(offset), want)
       if (chunk.length === 0) {
+        if (reader.source_is_origin === false) {
+          // A seeder serves a frozen snapshot; stopping short of the size
+          // that snapshot describes is a failure, and closing here would
+          // deliver a silently truncated download.
+          controller.error(
+            new Error(
+              `${file.path}: the seeder stopped short of the size the manifest describes`,
+            ),
+          )
+          return
+        }
         controller.close()
         return
       }
@@ -134,6 +151,9 @@ function countingReader(
       onProgress?.({ done, total })
       return chunk
     },
+    // Forwarded, not defaulted: the wrapper must not launder a seeder into
+    // looking like the origin, or guard #2 silently switches off.
+    source_is_origin: reader.source_is_origin,
   }
 }
 

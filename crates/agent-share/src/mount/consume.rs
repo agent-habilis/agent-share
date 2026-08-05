@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use agent_share_proto::PeerCard;
 use agent_share_proto::framing::decode_response_header;
 use agent_share_proto::manifest::ManifestDelta;
 use anyhow::{Context, Result, bail};
@@ -33,6 +34,22 @@ use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
 /// (mDNS is instant on a LAN; the DHT fallback can take tens of seconds).
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(90);
 const RETRY_DELAY: Duration = Duration::from_secs(3);
+
+/// How long a dead-origin attach waits for a vouching card to arrive over
+/// gossip before giving up on the share entirely.
+const SEEDER_CARDS_DEADLINE: Duration = Duration::from_secs(30);
+
+/// [`DISCOVERY_DEADLINE`], overridable for tests and ops.
+///
+/// A dead origin costs a full deadline before the seeder fallback engages;
+/// an e2e that kills the producer on purpose should not pay 90 s per attempt
+/// to observe it. Hidden knob, same spirit as `--no-mount`.
+fn discovery_deadline() -> Duration {
+    std::env::var("AGENT_SHARE_DISCOVERY_DEADLINE_SECS")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .map_or(DISCOVERY_DEADLINE, Duration::from_secs)
+}
 
 /// Consumer: redeem `ticket`, expose the remote tree through a loopback `NFSv3`
 /// bridge, and mount it under `target` (read-only). Creates
@@ -83,12 +100,47 @@ pub(crate) async fn attach(
     // share derives is the one the ticket describes.
     let secret = ticket.secret;
     let lookups = ticket.lookups.clone();
+    // The template every peer client is built from, and the address half of
+    // the dead-origin bootstrap.
+    let origin_ticket = ticket.clone();
     let client = RemoteClient::new(endpoint.clone(), ticket)
         .with_webrtc(webrtc.clone())
         .webrtc_only(webrtc_only);
 
     let client = Arc::new(client);
-    let manifest = client.fetch_manifest().await?;
+    // The mesh join starts *now* but blocks nothing: on the happy path the
+    // mount must not wait out a slow relay (the mesh is additional, never a
+    // precondition), while on the dead-origin path the mesh is the only way
+    // to find who else serves the share — so it runs concurrently with the
+    // manifest fetch and is awaited only where it is needed.
+    let mut mesh_task = Some(tokio::spawn(join_share_mesh(MeshJoin {
+        secret,
+        lookups: lookups.clone(),
+        endpoint: endpoint.clone(),
+        webrtc: webrtc.clone(),
+        webrtc_only,
+    })));
+    let mut share_mesh: Option<Option<ShareMesh>> = None;
+    let manifest = match client.fetch_manifest().await {
+        Ok(manifest) => manifest,
+        // The origin is unreachable. Every holder of this link is on the mesh
+        // its secret derives; a peer whose card vouches for the tree can serve
+        // the same manifest — frozen, since the origin alone may mutate it.
+        // `--transport webrtc` is exempt: it pins the lane for tests, and the
+        // seeder path rides iroh's own transports.
+        Err(origin_error) if !webrtc_only => {
+            let mesh = match mesh_task.take() {
+                Some(task) => task.await.unwrap_or(None),
+                None => None,
+            };
+            let manifest =
+                bootstrap_from_seeders(mesh.as_ref(), &endpoint, &origin_ticket, &origin_error)
+                    .await?;
+            share_mesh = Some(mesh);
+            manifest
+        }
+        Err(error) => return Err(error),
+    };
     let file_count = manifest.files.len();
     // Taken before `manifest` moves into the watch task below. Re-encodes
     // rather than hashing the wire bytes, which `fetch_manifest` discards;
@@ -99,7 +151,18 @@ pub(crate) async fn attach(
 
     let mountpoint = prepare_mount_dir(target)?;
     let (uid, gid) = mountpoint_owner(&mountpoint)?;
-    let remote_fs = RemoteFs::new(nodes, Arc::clone(&client), uid, gid);
+    // The set the filesystem reads through: origin first, vouching mesh peers
+    // when it fails. The roster handle is wired in below, once the mesh join
+    // resolves — until then the set is origin-only, exactly the old behaviour.
+    let source_set = Arc::new(super::sources::SourceSet::new(
+        Arc::clone(&client),
+        endpoint.clone(),
+        origin_ticket,
+        tree_fingerprint.clone(),
+        file_count,
+        None,
+    ));
+    let remote_fs = RemoteFs::new(nodes, Arc::clone(&source_set), uid, gid);
     // Taken before the server consumes the filesystem: this is the watch
     // task's only way back to the tree.
     let shared_nodes = remote_fs.nodes();
@@ -115,49 +178,24 @@ pub(crate) async fn attach(
         }
     });
 
-    let command = mount_command(nfs_port, &mountpoint);
-    let mounted = !no_mount && try_mount(&command).await;
-    if mounted {
-        if !json {
-            crate::util::output::status_out(
-                "Mounted",
-                &format!(
-                    "{} ({file_count} files, read-only) — Ctrl-C unmounts",
-                    mountpoint.display()
-                ),
-            );
-        }
-    } else {
-        // The bridge keeps serving either way; hand the user the exact
-        // command (some setups need sudo for the mount step). The `Run` line
-        // stays a clean copy-pastable command; the hint rides the Bridge line.
-        let sudo_hint = if cfg!(target_os = "linux") {
-            " — run the mount command (may need sudo)"
-        } else {
-            " — run the mount command"
-        };
-        if json {
-            println!("{}", command.display);
-        } else {
-            crate::util::output::status_out(
-                "Bridge",
-                &format!("NFS ready on 127.0.0.1:{nfs_port}{sudo_hint}"),
-            );
-            crate::util::output::status_out("Run", &command.display);
-        }
-    }
+    let mounted = mount_and_report(nfs_port, &mountpoint, file_count, no_mount, json).await;
 
-    // Last, on purpose. See `join_share_mesh`.
-    let share_mesh = join_share_mesh(MeshJoin {
-        secret: &secret,
-        lookups: &lookups,
-        endpoint: &endpoint,
-        webrtc: &webrtc,
-        webrtc_only,
-        json,
-        tree: Some(tree_fingerprint),
-    })
-    .await;
+    // The join has been running since before the manifest fetch; this — after
+    // the mount is up and reported — is simply where its result is first
+    // needed. A relay the mesh cannot reach still costs the mount nothing.
+    let share_mesh = match share_mesh {
+        Some(mesh) => mesh,
+        None => match mesh_task.take() {
+            Some(task) => task.await.unwrap_or(None),
+            None => None,
+        },
+    };
+    if let Some(mesh) = &share_mesh {
+        mesh.set_tree(tree_fingerprint).await;
+        mesh.spawn_report(json);
+        // From here the filesystem can fail over to vouching peers.
+        source_set.set_cards(mesh.card_book());
+    }
 
     tokio::signal::ctrl_c()
         .await
@@ -176,34 +214,81 @@ pub(crate) async fn attach(
     Ok(())
 }
 
+/// Try the OS mount and report either outcome; `true` when it mounted.
+///
+/// The bridge keeps serving either way; on a refused mount the user gets the
+/// exact command to run by hand (some setups need sudo for the mount step).
+/// The `Run` line stays a clean copy-pastable command; the hint rides the
+/// Bridge line.
+async fn mount_and_report(
+    nfs_port: u16,
+    mountpoint: &Path,
+    file_count: usize,
+    no_mount: bool,
+    json: bool,
+) -> bool {
+    let command = mount_command(nfs_port, mountpoint);
+    let mounted = !no_mount && try_mount(&command).await;
+    if mounted {
+        if !json {
+            crate::util::output::status_out(
+                "Mounted",
+                &format!(
+                    "{} ({file_count} files, read-only) — Ctrl-C unmounts",
+                    mountpoint.display()
+                ),
+            );
+        }
+    } else {
+        let sudo_hint = if cfg!(target_os = "linux") {
+            " — run the mount command (may need sudo)"
+        } else {
+            " — run the mount command"
+        };
+        if json {
+            println!("{}", command.display);
+        } else {
+            crate::util::output::status_out(
+                "Bridge",
+                &format!("NFS ready on 127.0.0.1:{nfs_port}{sudo_hint}"),
+            );
+            crate::util::output::status_out("Run", &command.display);
+        }
+    }
+    mounted
+}
+
 /// What this consumer joins the share's mesh as. Bundled because the two
 /// booleans are adjacent and would otherwise be swappable in silence.
-struct MeshJoin<'a> {
-    secret: &'a [u8; SECRET_LEN],
-    /// Fingerprint of the manifest this consumer mounted.
-    tree: Option<String>,
-    lookups: &'a agent_share_proto::lookup::LookupOpts,
-    endpoint: &'a Endpoint,
-    webrtc: &'a WebRtcHandle,
+///
+/// Owned fields, deliberately: the join runs as a spawned task concurrent
+/// with the manifest fetch, so it cannot borrow from `attach`'s stack.
+struct MeshJoin {
+    secret: [u8; SECRET_LEN],
+    lookups: agent_share_proto::lookup::LookupOpts,
+    endpoint: Endpoint,
+    webrtc: WebRtcHandle,
     webrtc_only: bool,
-    json: bool,
 }
 
 /// Put this consumer on the share's mesh, so it is a peer of everyone else
 /// holding the link rather than a client of the producer alone.
 ///
-/// Called *after* the bridge is up and the mount reported, and that ordering is
-/// the point: the mesh is additional to the mount protocol, never a
-/// precondition for it. File bytes ride the ticket's address either way, so
-/// nothing about standing a mesh up belongs in front of the thing the user
-/// asked for — and a relay it cannot reach must cost the mount nothing.
+/// Runs concurrently with the mount coming up, and the mount only awaits it
+/// after the bridge is reported (or immediately, when the origin is dead and
+/// the mesh is the only way left to find the share). Either way the rule
+/// stands: the mesh is additional to the mount protocol, never a
+/// precondition, and a relay it cannot reach must cost the mount nothing.
+///
+/// The manifest fingerprint is published later via `set_tree` — with a dead
+/// origin it is not known at join time.
 ///
 /// Non-fatal by the same rule: failure warns and returns `None`, which reads as
 /// "no peer counts" and never as "no mount".
-async fn join_share_mesh(join: MeshJoin<'_>) -> Option<ShareMesh> {
+async fn join_share_mesh(join: MeshJoin) -> Option<ShareMesh> {
     let result = super::mesh::join(super::mesh::JoinOpts {
-        secret: join.secret,
-        lookups: join.lookups,
+        secret: &join.secret,
+        lookups: &join.lookups,
         shared: fofoca::runtime::InjectedEndpoint {
             endpoint: join.endpoint.clone(),
             webrtc: join.webrtc.clone(),
@@ -213,7 +298,7 @@ async fn join_share_mesh(join: MeshJoin<'_>) -> Option<ShareMesh> {
         // on this endpoint and everything it accepts belongs to the mesh.
         protocols: Vec::new(),
         role: super::mesh::Role::Consumer,
-        tree: join.tree,
+        tree: None,
         // A lazy mount holds no bytes, so it advertises nothing. Becoming a
         // seeder is the explicit `mirror` step, never a side effect of reading.
         serving: None,
@@ -230,7 +315,6 @@ async fn join_share_mesh(join: MeshJoin<'_>) -> Option<ShareMesh> {
     match result {
         Ok(mesh) => {
             tracing::info!(mesh = mesh.mesh_id(), "joined the share mesh");
-            mesh.spawn_report(join.json);
             Some(mesh)
         }
         Err(error) => {
@@ -238,6 +322,126 @@ async fn join_share_mesh(join: MeshJoin<'_>) -> Option<ShareMesh> {
             None
         }
     }
+}
+
+/// The origin is unreachable — recover the manifest from a peer that vouches.
+///
+/// Waits (bounded) for cards to arrive over gossip, takes the **majority
+/// tree** among vouching cards as the manifest authority — with the origin
+/// gone, agreement is the only authority left — and dials candidates until
+/// one serves bytes whose fingerprint matches. What it returns is a frozen
+/// snapshot: seeders follow the origin while it lives and never mutate on
+/// their own.
+async fn bootstrap_from_seeders(
+    mesh: Option<&ShareMesh>,
+    endpoint: &Endpoint,
+    origin_ticket: &MountTicket,
+    origin_error: &anyhow::Error,
+) -> Result<MountManifest> {
+    let Some(mesh) = mesh else {
+        bail!(
+            "the origin is unreachable ({origin_error:#}) and the share's mesh could not be \
+             joined, so there is nobody left to ask"
+        );
+    };
+    let book = mesh.card_book();
+    let local = mesh.local_endpoint().to_owned();
+
+    let deadline = Instant::now() + SEEDER_CARDS_DEADLINE;
+    let vouching: Vec<PeerCard> = loop {
+        let vouching: Vec<PeerCard> = book
+            .lock()
+            .ok()
+            .map(|cards| {
+                cards
+                    .values()
+                    .filter(|card| card.endpoint != local)
+                    .filter(|card| card.tree.is_some() && card.serving.is_some())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !vouching.is_empty() {
+            break vouching;
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "the origin is unreachable ({origin_error:#}) and no peer on the mesh vouches \
+                 for the share"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+
+    // Majority tree. Ghost cards from departed peers vote too (known roster
+    // defect); a ghost that formed a majority alone still cannot answer a
+    // dial, which falls through to the next candidate and then the error.
+    let mut votes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for card in &vouching {
+        if let Some(tree) = card.tree.as_deref() {
+            *votes.entry(tree).or_default() += 1;
+        }
+    }
+    let majority = votes
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(tree, _)| tree.to_owned())
+        .expect("vouching is non-empty");
+
+    let mut candidates: Vec<&PeerCard> = vouching
+        .iter()
+        .filter(|card| card.tree.as_deref() == Some(majority.as_str()))
+        .collect();
+    candidates.sort_by_key(|card| (card.transport != "unicast", card.endpoint.clone()));
+
+    let mut refusals = Vec::new();
+    for candidate in candidates {
+        let Ok(id) = candidate.endpoint.parse::<iroh::EndpointId>() else {
+            continue;
+        };
+        let ticket = MountTicket {
+            addr: super::sources::seeder_addr(id, &origin_ticket.lookups),
+            secret: origin_ticket.secret,
+            lookups: origin_ticket.lookups.clone(),
+            kind: origin_ticket.kind,
+        };
+        let client = RemoteClient::new(endpoint.clone(), ticket);
+        match client.fetch_manifest_bytes().await {
+            // The candidate must serve the tree its card claimed: fetched
+            // bytes, hashed here, against the majority. A mismatch is
+            // disqualifying, not retryable — it lied once.
+            Ok(bytes) if agent_share_proto::manifest::manifest_fingerprint(&bytes) == majority => {
+                match MountManifest::decode(&bytes) {
+                    Ok(manifest) => {
+                        crate::util::output::status(
+                            "Source",
+                            &format!(
+                                "origin unreachable; serving from seeder {}",
+                                &candidate.endpoint[..8.min(candidate.endpoint.len())]
+                            ),
+                        );
+                        return Ok(manifest);
+                    }
+                    Err(error) => {
+                        refusals.push(format!("{}: {error}", &candidate.endpoint[..8]));
+                    }
+                }
+            }
+            Ok(_) => {
+                refusals.push(format!(
+                    "{}: served a different tree than its card claimed",
+                    &candidate.endpoint[..8]
+                ));
+            }
+            Err(error) => {
+                refusals.push(format!("{}: {error:#}", &candidate.endpoint[..8]));
+            }
+        }
+    }
+    bail!(
+        "the origin is unreachable ({origin_error:#}) and no seeder could serve the share: {}",
+        refusals.join("; ")
+    )
 }
 
 /// Keep the mounted tree in step with the producer's, for as long as the
@@ -420,7 +624,7 @@ impl RemoteClient {
                 .await
             {
                 Ok(conn) => break conn,
-                Err(error) if start.elapsed() < DISCOVERY_DEADLINE => {
+                Err(error) if start.elapsed() < discovery_deadline() => {
                     tracing::warn!(%error, "connect failed; retrying");
                     tokio::time::sleep(RETRY_DELAY).await;
                 }

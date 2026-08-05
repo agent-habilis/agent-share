@@ -5,6 +5,7 @@
 //! answerer) and the mount ALPN (manifest / read / watch).
 
 use std::cell::{Cell, RefCell};
+use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -40,6 +41,62 @@ struct ProducerShared {
 }
 
 type Shared = Rc<RefCell<ProducerShared>>;
+
+/// What a mount-protocol server answers from.
+///
+/// One dispatch loop ([`serve_stream`]), two byte sources: the producer's
+/// live File System Access tree, and a seeding viewer's local store
+/// ([`crate::seed::SeederShared`]). The trait is the seam that keeps the
+/// `OP_MANIFEST`/`OP_READ`/`OP_WATCH` match from being copied per source —
+/// RFC 01 phase 2's warning, honoured inside this crate.
+///
+/// Futures here are `!Send` and that is fine: wasm is single-threaded and the
+/// handler spawns its work with `spawn_local`.
+///
+/// A watch registration: the opening frame, then the update stream.
+pub(crate) type WatchFeed = (Vec<u8>, mpsc::UnboundedReceiver<Rc<Vec<u8>>>);
+
+pub(crate) trait ServeSource: Clone + 'static {
+    /// The encoded manifest to answer `OP_MANIFEST` with, **verbatim** — for a
+    /// seeder these are the origin's bytes, never a re-encode, because the
+    /// fingerprint and every READ index are defined over them. `None` refuses
+    /// the request (a seeder that has not synced yet has nothing to vouch
+    /// for), which closes the stream rather than inventing an answer.
+    fn manifest_bytes(&self) -> Option<Vec<u8>>;
+    /// Register a watcher: the opening frame plus the update stream, or `None`
+    /// to refuse. A seeder's stream only carries frames when its own snapshot
+    /// moves (it follows the origin, and freezes when the origin dies) — it
+    /// never fabricates deltas of its own.
+    fn subscribe(&self) -> Option<WatchFeed>;
+    /// Answer one `OP_READ`. A source that is not sure it holds the bytes
+    /// answers `BadIndex`, never a short read — guard #3.
+    fn answer_read(
+        &self,
+        index: u32,
+        offset: u64,
+        len: u32,
+    ) -> impl Future<Output = (ReadStatus, Vec<u8>)>;
+}
+
+impl ServeSource for Shared {
+    fn manifest_bytes(&self) -> Option<Vec<u8>> {
+        Some(self.borrow().state.encoded().to_vec())
+    }
+
+    fn subscribe(&self) -> Option<WatchFeed> {
+        let (tx, rx) = mpsc::unbounded::<Rc<Vec<u8>>>();
+        let mut borrowed = self.borrow_mut();
+        borrowed.watchers.push(tx);
+        let mut frame = Vec::with_capacity(1 + borrowed.state.encoded().len());
+        frame.push(WATCH_FRAME_MANIFEST);
+        frame.extend_from_slice(borrowed.state.encoded());
+        Some((frame, rx))
+    }
+
+    async fn answer_read(&self, index: u32, offset: u64, len: u32) -> (ReadStatus, Vec<u8>) {
+        answer_read(self, index, offset, len).await
+    }
+}
 
 /// An in-browser share, serving until [`ShareProducer::stop`].
 #[wasm_bindgen]
@@ -108,17 +165,11 @@ impl ShareProducer {
         let protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> = vec![
             (
                 MOUNT_ALPN.to_vec(),
-                Box::new(MountHandler {
-                    shared: send_wrapper::SendWrapper::new(Rc::clone(&shared)),
-                    secret,
-                }),
+                Box::new(MountHandler::new(Rc::clone(&shared), secret)),
             ),
             (
                 WEBRTC_SIGNAL_ALPN.to_vec(),
-                Box::new(SignalHandler {
-                    local,
-                    hub: send_wrapper::SendWrapper::new(Arc::clone(&hub)),
-                }),
+                Box::new(SignalHandler::new(local, Arc::clone(&hub))),
             ),
         ];
         // A tab is always publicly reachable or not reachable at all — it has no
@@ -296,12 +347,21 @@ impl ShareProducer {
 /// `n0_future::task::spawn`, which is `spawn_local` here, so the `!Send` future
 /// never has to satisfy the Router's `Send` accept signature.
 #[derive(Clone)]
-pub(crate) struct MountHandler {
-    shared: send_wrapper::SendWrapper<Shared>,
+pub(crate) struct MountHandler<S> {
+    source: send_wrapper::SendWrapper<S>,
     secret: [u8; SECRET_LEN],
 }
 
-impl std::fmt::Debug for MountHandler {
+impl<S> MountHandler<S> {
+    pub(crate) fn new(source: S, secret: [u8; SECRET_LEN]) -> Self {
+        Self {
+            source: send_wrapper::SendWrapper::new(source),
+            secret,
+        }
+    }
+}
+
+impl<S> std::fmt::Debug for MountHandler<S> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("MountHandler")
@@ -309,12 +369,12 @@ impl std::fmt::Debug for MountHandler {
     }
 }
 
-impl iroh::protocol::ProtocolHandler for MountHandler {
+impl<S: ServeSource> iroh::protocol::ProtocolHandler for MountHandler<S> {
     async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
-        let shared = Rc::clone(&*self.shared);
+        let source = (*self.source).clone();
         let secret = self.secret;
         wasm_bindgen_futures::spawn_local(async move {
-            if let Err(error) = serve_mount(conn, secret, shared).await {
+            if let Err(error) = serve_mount(conn, secret, source).await {
                 web_sys::console::debug_1(&error);
             }
         });
@@ -326,6 +386,15 @@ impl iroh::protocol::ProtocolHandler for MountHandler {
 pub(crate) struct SignalHandler {
     local: iroh::EndpointId,
     hub: send_wrapper::SendWrapper<Arc<BrowserHubTransport>>,
+}
+
+impl SignalHandler {
+    pub(crate) fn new(local: iroh::EndpointId, hub: Arc<BrowserHubTransport>) -> Self {
+        Self {
+            local,
+            hub: send_wrapper::SendWrapper::new(hub),
+        }
+    }
 }
 
 impl std::fmt::Debug for SignalHandler {
@@ -720,27 +789,27 @@ async fn serve_signal(
     Ok(())
 }
 
-async fn serve_mount(
+async fn serve_mount<S: ServeSource>(
     conn: Connection,
     secret: [u8; SECRET_LEN],
-    shared: Shared,
+    source: S,
 ) -> Result<(), JsValue> {
     while let Ok((send, recv)) = conn.accept_bi().await {
         let conn = conn.clone();
-        let shared = Rc::clone(&shared);
+        let source = source.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = serve_stream(&conn, send, recv, &secret, shared).await;
+            let _ = serve_stream(&conn, send, recv, &secret, source).await;
         });
     }
     Ok(())
 }
 
-async fn serve_stream(
+async fn serve_stream<S: ServeSource>(
     conn: &Connection,
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     secret: &[u8; SECRET_LEN],
-    shared: Shared,
+    source: S,
 ) -> Result<(), JsValue> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
     if recv.read_exact(&mut header).await.is_err() {
@@ -752,21 +821,17 @@ async fn serve_stream(
     }
     match header[SECRET_LEN] {
         OP_MANIFEST => {
-            let manifest_bytes = {
-                let borrowed = shared.borrow();
-                borrowed.state.encoded().to_vec()
+            // A source with nothing to vouch for closes the stream unanswered
+            // rather than inventing a reply — the caller's read fails and it
+            // moves to its next candidate.
+            let Some(manifest_bytes) = source.manifest_bytes() else {
+                return Ok(());
             };
             write_ok_body(&mut send, &manifest_bytes).await?;
         }
         OP_WATCH => {
-            let (tx, mut rx) = mpsc::unbounded::<Rc<Vec<u8>>>();
-            let opening = {
-                let mut borrowed = shared.borrow_mut();
-                borrowed.watchers.push(tx);
-                let mut frame = Vec::with_capacity(1 + borrowed.state.encoded().len());
-                frame.push(WATCH_FRAME_MANIFEST);
-                frame.extend_from_slice(borrowed.state.encoded());
-                frame
+            let Some((opening, mut rx)) = source.subscribe() else {
+                return Ok(());
             };
             if write_watch_frame(&mut send, &opening).await.is_err() {
                 return Ok(());
@@ -786,7 +851,7 @@ async fn serve_stream(
             let index = u32::from_le_bytes(request[..4].try_into().expect("4"));
             let offset = u64::from_le_bytes(request[4..12].try_into().expect("8"));
             let len = u32::from_le_bytes(request[12..].try_into().expect("4"));
-            let (status, data) = answer_read(&shared, index, offset, len).await;
+            let (status, data) = source.answer_read(index, offset, len).await;
             send.write_all(&[status.to_byte()])
                 .await
                 .map_err(|error| err("write status", &error))?;

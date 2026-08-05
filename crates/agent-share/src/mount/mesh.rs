@@ -104,7 +104,9 @@ fn share_card_gate() -> SelfWriteGate {
 /// inside the engine's event loop and is unreachable from the outside, so a
 /// handle that outlives a borrow of it is the only way a caller can read the
 /// roster. The browser peer carries the same split for the same reason.
-type CardBook = Arc<Mutex<HashMap<String, PeerCard>>>;
+/// `pub(crate)` because [`super::sources::SourceSet`] reads it too — the
+/// roster is where read candidates come from.
+pub(crate) type CardBook = Arc<Mutex<HashMap<String, PeerCard>>>;
 
 /// The manifest fingerprint on our own card, shared with [`ShareMesh`].
 ///
@@ -394,6 +396,18 @@ impl ShareMesh {
     /// every holder of the link computes the same one.
     pub(crate) fn mesh_id(&self) -> &str {
         &self.mesh_id
+    }
+
+    /// The live roster, shared: [`super::sources::SourceSet`] picks read
+    /// candidates from it, and the dead-origin bootstrap in `consume` polls it
+    /// for a peer that vouches.
+    pub(crate) fn card_book(&self) -> CardBook {
+        Arc::clone(&self.book)
+    }
+
+    /// Our own endpoint id — a candidate filter, never a candidate.
+    pub(crate) fn local_endpoint(&self) -> &str {
+        &self.local_endpoint
     }
 
     /// Publish the manifest fingerprint we are now on.

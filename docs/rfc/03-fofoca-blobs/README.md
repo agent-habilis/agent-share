@@ -271,6 +271,28 @@ With ~4 peers that is cheap and needs zero new protocol. Chunk queries would
 earn their place only when peers hold *disjoint* chunk subsets of one large
 file.
 
+### The `HAVE?` frame, pinned (2026-08-05)
+
+Decided with dead-origin failover (which shipped on slot-level cards alone —
+seeding is whole-file today, so a chunk ask would return what the card already
+says at 1 RTT instead of 0). The wire shape is fixed **now** so the day
+chunk-granular seeding lands, both ends already agree; it ships together with
+bao-range partial-file seeding, not before.
+
+- **Ask** — directed app frame, `to: Some(peer)`, `corr: Some(n)`, tag
+  `share/have/1`. Body, JSON: `{ "tree": "<16-hex fingerprint>", "index": n }`.
+  A responder on a different tree answers `tree_mismatch` rather than ranges —
+  guard #1 applies to availability answers, not only to bytes.
+- **Answer** — same tag, same `corr`. Body:
+  `{ "tree": "…", "index": n, "ranges": "0-511,1024-2047" }` — chunk-group
+  ranges in the same sorted-RLE vocabulary `serving` uses, or `"*"` for all.
+  **Advisory and coarsenable:** if the honest answer does not fit 3840 B
+  signed, answer the largest prefix that does; the asker treats absence as
+  "unknown", never "absent".
+- Both directions ride the existing signed app-frame plane — plaintext, like
+  every directed frame (`broadcast.rs:37-40`); it carries *availability*, and
+  membership already implies the read capability.
+
 The availability **grid** below changes that: it is a v1 requirement, and it
 needs a third plane neither tier provides.
 

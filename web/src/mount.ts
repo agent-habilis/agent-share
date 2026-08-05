@@ -14,6 +14,14 @@ const CHUNK = 256 * 1024
 
 interface Reader {
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
+  /**
+   * Whether the mount reaches the ticket's origin, or a seeder standing in
+   * for it. Absent reads as `true` (origin semantics). Guard #2 hangs off
+   * this: a short read from the origin means the file shrank, but from a
+   * seeder it means "I cannot finish", and truncating on it would silently
+   * corrupt the mirror.
+   */
+  readonly source_is_origin?: boolean
 }
 
 /** What we last wrote for a path — used to skip unchanged files. */
@@ -174,7 +182,17 @@ async function writeFile(
       throwIfAborted(signal)
       const want = Math.min(CHUNK, file.size - offset)
       const chunk = await reader.read(file.index, BigInt(offset), want)
-      if (chunk.length === 0) break
+      if (chunk.length === 0) {
+        if (reader.source_is_origin === false) {
+          // A seeder that cannot finish must fail the file, not shorten it —
+          // its answer is a snapshot claim, and truncation here is exactly
+          // the silent corruption guard #2 exists to stop.
+          throw new MountError(
+            `${file.path}: the seeder stopped short of the size the manifest describes`,
+          )
+        }
+        break
+      }
       // Copy: wasm may hand back a view over SharedArrayBuffer-backed memory.
       await writable.write(new Uint8Array(chunk))
       offset += chunk.length

@@ -152,7 +152,11 @@ function clientKey(ticket: string, transport?: TransportMode): string {
   return `${transport ?? 'dynamic'} ${ticket}`
 }
 
-function connect(ticket: string, transport?: TransportMode): Promise<Client> {
+function connect(
+  ticket: string,
+  transport?: TransportMode,
+  originCapMs?: number,
+): Promise<Client> {
   const key = clientKey(ticket, transport)
   let client = clients.get(key)
   if (!client) {
@@ -163,12 +167,18 @@ function connect(ticket: string, transport?: TransportMode): Promise<Client> {
     // transport is deliberately left for wasm to fill from the *settled* data
     // path. Publishing the requested mode instead would put "dynamic" on every
     // peer's roster, which says nothing about what is actually carrying bytes.
+    //
+    // `originCapMs` shortens the origin dial before the seeder fallback takes
+    // over — the revival path passes a tight one, because it already *knows*
+    // the origin just died and its whole attempt must fit the reconnect
+    // budget. Fresh loads omit it and get the patient default.
     client = loadWasm().then(
       (wasm) =>
         wasm.ShareClient.connect(
           ticket,
           transport,
           buildPeerCard({ role: 'consumer' }),
+          originCapMs,
         ) as unknown as Promise<Client>,
     )
     // Evict on failure so a retry (a re-entered hash, say) can dial again.
@@ -199,23 +209,45 @@ function connect(ticket: string, transport?: TransportMode): Promise<Client> {
  * replaced the entry, this one is releasing something it no longer owns.
  */
 function release(ticket: string, transport: TransportMode | undefined, owned: Promise<Client>): void {
+  if (!evict(ticket, transport, owned)) return
+  retire(owned)
+}
+
+/**
+ * Drop `owned` from the cache — so a later `connect` for this ticket dials
+ * fresh — without touching the client itself. `true` when it was ours to drop.
+ *
+ * Split from [`release`] for the revival path: a *seeding* client must keep
+ * its mesh membership and mount handler alive while its replacement dials,
+ * or every seeder of a dead-origin share tears itself down at once and there
+ * is nobody left to reconnect *to*.
+ */
+function evict(ticket: string, transport: TransportMode | undefined, owned: Promise<Client>): boolean {
   const key = clientKey(ticket, transport)
-  if (clients.get(key) !== owned) return
+  if (clients.get(key) !== owned) return false
   clients.delete(key)
-  // Best-effort on *both* legs, which the two-argument form was not.
-  //
-  // A rejection handler covers `owned` failing to resolve, but a throw inside
-  // `leave_mesh` rejects the promise `.then` hands back, and nothing was
-  // watching that one. So a wasm-side fault during teardown reached the page
-  // as an unhandled rejection — a crash overlay raised by a departure
-  // announcement nobody was waiting on. Observed once as
-  // `recursive use of an object detected which would lead to unsafe aliasing`
-  // while a revival retried against a dead producer.
-  //
-  // Swallowing is right regardless of the cause: this client is already
-  // discarded, the mesh drops silent members on its own, and there is nothing
-  // the user could do about it. Logged at debug so the signal survives for
-  // whoever chases the underlying fault, which is still unexplained.
+  return true
+}
+
+/**
+ * Tear a discarded client down: leave the share's mesh, best-effort.
+ *
+ * Best-effort on *both* legs, which the two-argument form was not.
+ *
+ * A rejection handler covers `owned` failing to resolve, but a throw inside
+ * `leave_mesh` rejects the promise `.then` hands back, and nothing was
+ * watching that one. So a wasm-side fault during teardown reached the page
+ * as an unhandled rejection — a crash overlay raised by a departure
+ * announcement nobody was waiting on. Observed once as
+ * `recursive use of an object detected which would lead to unsafe aliasing`
+ * while a revival retried against a dead producer.
+ *
+ * Swallowing is right regardless of the cause: this client is already
+ * discarded, the mesh drops silent members on its own, and there is nothing
+ * the user could do about it. Logged at debug so the signal survives for
+ * whoever chases the underlying fault, which is still unexplained.
+ */
+function retire(owned: Promise<Client>): void {
   void owned
     .then((client) => client.leave_mesh())
     .catch((error: unknown) => {
@@ -810,13 +842,33 @@ const Session = component<{
       const deadline = Date.now() + RECONNECT_TIMEOUT_MS
       let backoff = RECONNECT_BACKOFF_START_MS
       let lastError: unknown = null
+      // The dying client, kept ALIVE until its replacement is up. Its mount
+      // connection is gone but its serving half is not: the mesh membership,
+      // the published card, and the store-backed mount handler all still
+      // answer. Tearing it down first — what `release` did here — meant every
+      // seeder of a dead-origin share left the mesh at the same instant, so
+      // the reconnect had nobody to fall back to. Kept, a reviving tab can
+      // bootstrap from the *other* tab's retiring client, or even its own
+      // (a different endpoint id that happens to hold the bytes).
+      //
+      // Retired only on a successful swap. On terminal failure it stays: the
+      // page shows failed, but the bytes this tab holds keep serving — for
+      // the swarm that is strictly better than a card with nothing behind it.
+      const retiring = pending
+      let evicted = false
       try {
         while (!ctx.aborted.aborted) {
           const remaining = deadline - Date.now()
           if (remaining <= 0) break
           try {
+            if (!evicted) {
+              evicted = evict(props.ticket, props.transport, retiring)
+            }
             release(props.ticket, props.transport, pending)
-            pending = connect(props.ticket, props.transport)
+            // The tight cap: this attempt already knows the origin just died,
+            // and the whole ladder — capped dial, mesh join, card wait,
+            // seeder dial — must fit inside the reconnect budget, twice.
+            pending = connect(props.ticket, props.transport, REVIVAL_ORIGIN_CAP_MS)
             // Raced against what is left of the budget, not just checked
             // between attempts: a dial to a producer that is simply gone runs
             // for far longer than the gap it was started in, so gating only
@@ -828,6 +880,9 @@ const Session = component<{
                 setTimeout(() => reject(new Error('reconnect timed out')), remaining),
               ),
             ])
+            // The swap point: the replacement is up (and re-seeding via
+            // `refresh_held`), so the old client may finally say goodbye.
+            retire(retiring)
             return
           } catch (error) {
             lastError = error
@@ -851,12 +906,16 @@ const Session = component<{
   /**
    * Give up reconnecting and show the failure page.
    *
-   * A browser re-dial was measured at about ten seconds over WebRTC, so this
-   * budget buys several honest attempts before concluding the share is gone.
-   * The native consumer's equivalent (`DISCOVERY_DEADLINE`) is 90 s; a tab is
-   * far likelier to be abandoned than a CLI process, so it waits less.
+   * Sized to fit one full dead-origin ladder — capped origin dial (8 s), a
+   * mesh join, the card wait (up to 30 s on a ghost-heavy roster), and the
+   * seeder dial — with slack for the QUIC death to be noticed at all. The
+   * old 60 s budget expired mid-ladder, flashed the failure page, and then
+   * got rescued by the attempt landing late; 90 s matches the native
+   * consumer's `DISCOVERY_DEADLINE`, which faces the same ladder.
    */
-  const RECONNECT_TIMEOUT_MS = 60_000
+  const RECONNECT_TIMEOUT_MS = 90_000
+  /** Origin-dial slice of a revival attempt — see `connect`'s cap note. */
+  const REVIVAL_ORIGIN_CAP_MS = 8_000
   const RECONNECT_BACKOFF_START_MS = 1_000
   const RECONNECT_BACKOFF_MAX_MS = 8_000
 

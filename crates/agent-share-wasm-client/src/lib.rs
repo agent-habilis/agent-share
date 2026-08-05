@@ -54,6 +54,7 @@ mod link;
 mod live_state;
 mod mesh;
 mod produce;
+mod seed;
 mod transport_mode;
 
 pub use mesh::MeshPeer;
@@ -171,6 +172,23 @@ pub struct ShareClient {
     /// accumulated, so a reload shows what actually survived instead of what
     /// this session happened to fetch.
     held: RefCell<BTreeSet<u32>>,
+    /// The serving half of seeding: the mount-protocol source registered on
+    /// the mesh Router at connect, fed by [`Self::sync`] /
+    /// [`Self::refresh_held`]. Empty until the first sync, and an empty
+    /// seeder refuses requests rather than answering for a tree it cannot
+    /// back.
+    seeder: seed::SeederShared,
+    /// Whether the mount connection reaches the ticket's **origin**, or a
+    /// seeder that vouched for its tree. Authority hangs off this: manifests
+    /// from a seeder are a frozen snapshot, and a short read from one is a
+    /// failure rather than EOF (guards #1/#2).
+    from_origin: bool,
+    /// The tree a seeder connection was vetted against at connect — the
+    /// majority tree among vouching cards. Every later manifest fetch is
+    /// checked against it, so a seeder cannot swap trees after winning the
+    /// dial. `None` on origin connections: the origin is the one peer with
+    /// the *right* to change the tree.
+    pinned_tree: Option<String>,
 }
 
 fn new_share_client(
@@ -201,6 +219,9 @@ fn new_share_client(
         mesh: RefCell::new(None),
         store: RefCell::new(None),
         held: RefCell::new(BTreeSet::new()),
+        seeder: seed::SeederShared::new(),
+        from_origin: true,
+        pinned_tree: None,
     }
 }
 
@@ -220,10 +241,15 @@ impl ShareClient {
     /// The ticket is malformed, the mode is unknown, the producer is
     /// unreachable, or (in `webrtc` mode) ICE fails with no fallback.
     #[wasm_bindgen]
+    /// `origin_cap_ms` bounds the origin dial before the seeder fallback
+    /// takes over; omit it for [`ORIGIN_DIAL_CAP_MS`]. The revival path
+    /// passes a tight one — it already knows the origin just died, and its
+    /// whole attempt has to fit the App's reconnect budget.
     pub async fn connect(
         ticket: String,
         transport: Option<String>,
         card: Option<JsValue>,
+        origin_cap_ms: Option<f64>,
     ) -> Result<ShareClient, JsValue> {
         console_error_panic_hook::set_once();
         let mode = TransportMode::parse(transport.as_deref())
@@ -234,13 +260,41 @@ impl ShareClient {
         // derived from the share's own reach, so every holder of this ticket —
         // producer included — computes the same mesh id.
         let lookups = ticket.lookups.clone();
-        let mut client = match mode {
-            TransportMode::Relay => connect_relay(ticket).await,
+        // Kept whole for the seeder fallback below — the dial consumes its copy.
+        let fallback_ticket = ticket.clone();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a dial cap in ms is far inside i32"
+        )]
+        let cap_ms = origin_cap_ms.map_or(ORIGIN_DIAL_CAP_MS, |ms| (ms as i32).max(1_000));
+        let dialed = match mode {
+            TransportMode::Relay => {
+                capped_origin_dial(Box::pin(connect_relay(ticket)), cap_ms).await
+            }
             TransportMode::WebRtc => connect_webrtc(ticket, /*allow_relay_fallback=*/ false).await,
             TransportMode::Dynamic => {
-                connect_webrtc(ticket, /*allow_relay_fallback=*/ true).await
+                capped_origin_dial(
+                    Box::pin(connect_webrtc(ticket, /*allow_relay_fallback=*/ true)),
+                    cap_ms,
+                )
+                .await
             }
-        }?;
+        };
+        let mut client = match dialed {
+            Ok(client) => client,
+            // The origin is unreachable — dead, or gone from the relay. The
+            // share does not have to be: every holder of this link is on the
+            // mesh it derives, and a peer whose card vouches for the tree can
+            // serve it. `webrtc` mode is exempt on purpose: it exists to pin
+            // the transport for tests, and the seeder lane rides the relay.
+            Err(origin_error) if !matches!(mode, TransportMode::WebRtc) => {
+                let mut client =
+                    connect_via_seeder(fallback_ticket, card.clone(), &origin_error).await?;
+                client.mount_mode = mode.as_str().to_owned();
+                return Ok(client);
+            }
+            Err(origin_error) => return Err(origin_error),
+        };
         client.mount_mode = mode.as_str().to_owned();
         client.lookups = lookups.clone();
         client.connected_at_ms = now_ms();
@@ -258,7 +312,27 @@ impl ShareClient {
             }
             None => mesh::default_card_parts(&client.data_path, Some("consumer".to_owned())),
         };
-        match mesh::MeshPeer::join_share(&secret, &lookups, shared, card).await {
+        // The serving half of seeding: this viewer answers the share's own
+        // ALPNs on the mesh Router, exactly the producer's shape. The mount
+        // handler is backed by the tab's store and refuses everything until
+        // the first sync fills it; the signal handler (WebRTC path only —
+        // the relay path has no hub) lets another peer negotiate a data
+        // channel to *us* the way we negotiate one to the producer.
+        let mut protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> =
+            vec![(
+                MOUNT_ALPN.to_vec(),
+                Box::new(produce::MountHandler::new(client.seeder.clone(), secret)),
+            )];
+        if let Some((endpoint, webrtc)) = shared.as_ref() {
+            protocols.push((
+                WEBRTC_SIGNAL_ALPN.to_vec(),
+                Box::new(produce::SignalHandler::new(
+                    endpoint.id(),
+                    webrtc.transport(),
+                )),
+            ));
+        }
+        match mesh::MeshPeer::join_share(&secret, &lookups, shared, protocols, card).await {
             Ok(peer) => *client.mesh.borrow_mut() = Some(Rc::new(peer)),
             Err(error) => {
                 web_sys::console::warn_1(&JsValue::from_str(&format!(
@@ -525,23 +599,18 @@ impl ShareClient {
     /// taken over what the producer actually served, so both sides hash the
     /// same thing rather than trusting a re-encode to be canonical.
     async fn fetch_manifest(&self) -> Result<(Vec<u8>, MountManifest), JsValue> {
-        let (mut send, mut recv) = self
-            .connection
-            .open_bi()
-            .await
-            .map_err(|error| stream_open_failed("could not fetch the listing", &error))?;
-        send.write_all(&framing::encode_manifest_request(&self.secret))
-            .await
-            .map_err(|error| err("send manifest request", &error))?;
-        send.finish().map_err(|error| err("finish", &error))?;
-
-        let len = read_header(&mut recv, MAX_MANIFEST_BYTES).await?;
-        let mut bytes = vec![0u8; len as usize];
-        recv.read_exact(&mut bytes)
-            .await
-            .map_err(|error| err("read manifest", &error))?;
-        let manifest =
-            MountManifest::decode(&bytes).map_err(|error| err("decode manifest", &error))?;
+        let (bytes, manifest) = fetch_manifest_on(&self.connection, &self.secret).await?;
+        // Origin authority, enforced rather than assumed: a seeder was vetted
+        // against one tree and answers for that tree only. Only the origin —
+        // TLS-proven by dialing the ticket's endpoint id — may change it.
+        if let Some(pinned) = self.pinned_tree.as_deref() {
+            let fingerprint = agent_share_proto::manifest::manifest_fingerprint(&bytes);
+            if fingerprint != pinned {
+                return Err(JsValue::from_str(
+                    "the seeder changed trees after being vetted; refusing its manifest",
+                ));
+            }
+        }
         // The card could not carry a tree at join — `join_share` runs from the
         // constructor, before this — so publish it now that we know one.
         //
@@ -570,6 +639,14 @@ impl ShareClient {
     /// every 3s while the connection is alive; a clean zero-frame end means
     /// the producer does not support live watch and the loop stops.
     pub async fn watch(&self, on_manifest: js_sys::Function) -> Result<(), JsValue> {
+        // `OP_WATCH` is only ever followed against the origin. A seeder serves
+        // a frozen snapshot — it has no right to move the tree, and a watch
+        // stream is exactly the channel a hostile one would use to try. The
+        // manifest this client already fetched (vetted against the pinned
+        // tree) is the share, unchanged for as long as the origin stays gone.
+        if !self.from_origin {
+            return Ok(());
+        }
         let conn = self.connection.clone();
         let secret = self.secret;
         wasm_bindgen_futures::spawn_local(async move {
@@ -693,6 +770,11 @@ impl ShareClient {
             total += body.len() as u64;
         }
 
+        // Serving before advertising: the seeder must answer for a slot by
+        // the time the card claims it, or a reader lands on `BadIndex`.
+        let held = self.held.borrow().clone();
+        self.seeder
+            .update(Rc::new(bytes.clone()), &manifest, store, &held);
         self.publish_serving(&bytes, &manifest).await;
 
         let out = serde_json::json!({
@@ -703,7 +785,7 @@ impl ShareClient {
             "skipped": skipped,
             "held": self.held.borrow().len(),
         });
-        js_sys::JSON::parse(&out.to_string()).map_err(|error| JsValue::from(error))
+        js_sys::JSON::parse(&out.to_string())
     }
 
     /// Manifest indices this tab holds in full, and can seed.
@@ -711,6 +793,15 @@ impl ShareClient {
     #[wasm_bindgen(getter)]
     pub fn held(&self) -> Vec<u32> {
         self.held.borrow().iter().copied().collect()
+    }
+
+    /// Whether the mount reaches the ticket's origin, or a seeder standing in
+    /// for it. The UI keys authority-sensitive behaviour off this: a mirror
+    /// sync from a seeder must treat a short read as a failure, never as EOF.
+    #[must_use]
+    #[wasm_bindgen(getter)]
+    pub fn source_is_origin(&self) -> bool {
+        self.from_origin
     }
 
     /// Recompute what is held from storage, and republish it.
@@ -738,7 +829,12 @@ impl ShareClient {
             }
         }
         *self.held.borrow_mut() = held;
-        *self.store.borrow_mut() = Some(Rc::new(store));
+        let store = Rc::new(store);
+        *self.store.borrow_mut() = Some(Rc::clone(&store));
+        // Same order as `sync`: serve first, then advertise.
+        let held = self.held.borrow().clone();
+        self.seeder
+            .update(Rc::new(bytes.clone()), &manifest, store, &held);
         self.publish_serving(&bytes, &manifest).await;
         Ok(())
     }
@@ -827,9 +923,12 @@ impl ShareClient {
         send.finish().map_err(|error| err("finish", &error))?;
 
         let mut status = [0u8; 1];
-        recv.read_exact(&mut status)
-            .await
-            .map_err(|error| err("read hash status", &error))?;
+        if recv.read_exact(&mut status).await.is_err() {
+            // A stream closed unanswered: a seeder, or a producer from before
+            // the op. Both read as "cannot vouch" — which sync treats as
+            // ordinary — not as a failure that would abort the whole sync.
+            return Ok(None);
+        }
         // Anything but Ok means "cannot vouch", which is ordinary — the origin
         // hashes lazily. Only a protocol failure is an error.
         if status[0] != agent_share_proto::manifest::ReadStatus::Ok.to_byte() {
@@ -1370,6 +1469,257 @@ fn percentile(sorted: &[f64], fraction: f64) -> f64 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
+/// One manifest round on `conn`: the exact bytes served, and their decoding.
+///
+/// Free of `ShareClient` so the seeder fallback can vet a candidate *before*
+/// any client exists; the method wraps this and adds the card publish.
+async fn fetch_manifest_on(
+    conn: &Connection,
+    secret: &[u8; SECRET_LEN],
+) -> Result<(Vec<u8>, MountManifest), JsValue> {
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|error| stream_open_failed("could not fetch the listing", &error))?;
+    send.write_all(&framing::encode_manifest_request(secret))
+        .await
+        .map_err(|error| err("send manifest request", &error))?;
+    send.finish().map_err(|error| err("finish", &error))?;
+
+    let len = read_header(&mut recv, MAX_MANIFEST_BYTES).await?;
+    let mut bytes = vec![0u8; len as usize];
+    recv.read_exact(&mut bytes)
+        .await
+        .map_err(|error| err("read manifest", &error))?;
+    let manifest = MountManifest::decode(&bytes).map_err(|error| err("decode manifest", &error))?;
+    Ok((bytes, manifest))
+}
+
+/// How long a dead-origin connect waits for peer cards to arrive over gossip.
+///
+/// Rendezvous plus a gossip round is a few seconds when the roster is small,
+/// but convergence was *measured* taking longer than 15 s on a mesh carrying
+/// a night's worth of ghost cards — and a fresh load has nothing better to
+/// spend the time on than the one wait that can save the share. Bounded so a
+/// share that truly has nobody left still fails in finite time.
+const SEEDER_CARDS_DEADLINE_MS: f64 = 30_000.0;
+
+/// How long the origin dial may run before the seeder fallback takes over.
+///
+/// A dial to a producer that is simply *gone* runs far longer than any
+/// reconnect budget — the App measured 126 s against its 60 s window — so
+/// without a cap the fallback below it is unreachable from a revival: the
+/// caller's race kills the whole attempt while it is still inside the dial.
+/// 30 s clears an honest slow connect — a live local dial was *measured*
+/// taking ~20 s (JSEP + STUN + a cold relay handshake), and a 15 s cap cut
+/// it off mid-handshake, sending a healthy share down the seeder path —
+/// while still fitting the App's 60 s revival budget with the fallback's
+/// own joins and dials behind it.
+///
+/// Applies only where a fallback exists (`dynamic`/`relay`); `webrtc` mode
+/// pins the lane for tests and keeps failing at its own pace.
+const ORIGIN_DIAL_CAP_MS: i32 = 30_000;
+
+/// Race an origin dial against [`ORIGIN_DIAL_CAP_MS`].
+///
+/// On timeout the dial future is dropped — its endpoints abort un-`close()`d,
+/// which is acceptable for a producer we are about to give up on — and the
+/// synthesized error routes the caller into the seeder fallback.
+async fn capped_origin_dial(
+    dial: std::pin::Pin<Box<dyn std::future::Future<Output = Result<ShareClient, JsValue>>>>,
+    cap_ms: i32,
+) -> Result<ShareClient, JsValue> {
+    match futures::future::select(dial, Box::pin(wait_ms(cap_ms))).await {
+        futures::future::Either::Left((dialed, _)) => dialed,
+        futures::future::Either::Right(((), _)) => Err(JsValue::from_str(&format!(
+            "origin dial timed out after {} s",
+            cap_ms / 1000
+        ))),
+    }
+}
+
+/// The origin is unreachable — stand the share up from its mesh instead.
+///
+/// Every holder of this link is on the mesh the ticket's secret derives, so
+/// join it first, then pick a peer whose card **vouches**: its `tree` matches
+/// the majority tree among vouching cards (with the origin gone, agreement is
+/// the only manifest authority left — guard #1 applied at selection), and it
+/// advertises `serving`. Candidates are dialled over the relay lane — the
+/// fallback that reaches a browser peer without an ICE round — native
+/// (`unicast`) peers first, since they answer at line rate.
+///
+/// The manifest the winner serves is verified against the tree it advertised
+/// before the client is handed to anyone; its answers stay a **frozen
+/// snapshot** — seeders follow the origin while it lives and never mutate on
+/// their own.
+async fn connect_via_seeder(
+    ticket: MountTicket,
+    card: Option<JsValue>,
+    origin_error: &JsValue,
+) -> Result<ShareClient, JsValue> {
+    let secret = ticket.secret;
+    let lookups = ticket.lookups.clone();
+
+    // Minted before any client exists so the mesh join can register the mount
+    // handler now; it replaces the client's fresh one below, keeping serving
+    // and advertising on the same handle.
+    let seeder = seed::SeederShared::new();
+    let protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> = vec![(
+        MOUNT_ALPN.to_vec(),
+        Box::new(produce::MountHandler::new(seeder.clone(), secret)),
+    )];
+    let card_parts = match card.as_ref() {
+        Some(value) => mesh::parse_card_parts(value, "relay", Some("consumer".to_owned()))?,
+        None => mesh::default_card_parts("relay", Some("consumer".to_owned())),
+    };
+    let mesh_peer = mesh::MeshPeer::join_share(&secret, &lookups, None, protocols, card_parts)
+        .await
+        .map_err(|mesh_error| {
+            JsValue::from_str(&format!(
+                "the origin is unreachable ({}) and the share's mesh could not be joined ({})",
+                describe(origin_error),
+                describe(&mesh_error),
+            ))
+        })?;
+
+    // Cards arrive over gossip; poll until somebody vouches or the deadline.
+    let started = now_ms();
+    let vouching = loop {
+        let vouching: Vec<agent_share_proto::PeerCard> = mesh_peer
+            .known_cards()
+            .into_iter()
+            .filter(|card| {
+                card.tree.is_some()
+                    && card.serving.is_some()
+                    && card.endpoint != mesh_peer.hub().local_id().to_string()
+            })
+            .collect();
+        if !vouching.is_empty() {
+            break vouching;
+        }
+        if now_ms() - started > SEEDER_CARDS_DEADLINE_MS {
+            return Err(JsValue::from_str(&format!(
+                "the origin is unreachable ({}) and no peer on the mesh vouches for the share",
+                describe(origin_error),
+            )));
+        }
+        wait_ms(500).await;
+    };
+
+    // The majority tree is the manifest authority. Ghost cards from departed
+    // peers vote too — a known defect of the roster — but a ghost that voted
+    // *for* the majority costs nothing, and one that formed a majority alone
+    // still cannot answer a dial, which fails over to the next candidate.
+    let mut votes: HashMap<&str, usize> = HashMap::new();
+    for card in &vouching {
+        if let Some(tree) = card.tree.as_deref() {
+            *votes.entry(tree).or_default() += 1;
+        }
+    }
+    let majority = votes
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(tree, _)| tree.to_owned())
+        .expect("vouching is non-empty");
+
+    let mut candidates: Vec<&agent_share_proto::PeerCard> = vouching
+        .iter()
+        .filter(|card| card.tree.as_deref() == Some(majority.as_str()))
+        .collect();
+    // Native peers first: they serve at line rate and are reachable without
+    // any browser in the path.
+    candidates.sort_by_key(|card| (card.transport != "unicast", card.endpoint.clone()));
+
+    let relays: Vec<TransportAddr> = seeder_relays(&ticket)
+        .into_iter()
+        .map(TransportAddr::Relay)
+        .collect();
+    if relays.is_empty() {
+        return Err(JsValue::from_str(
+            "this ticket names no relay, and a tab has no other way to reach a seeder",
+        ));
+    }
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .secret_key(SecretKey::generate())
+        .relay_mode(relay_mode(&ticket))
+        .bind()
+        .await
+        .map_err(|error| err("bind seeder-dial endpoint", &error))?;
+
+    let mut refusals = Vec::new();
+    for candidate in candidates {
+        let Ok(id) = candidate.endpoint.parse::<iroh_base::EndpointId>() else {
+            continue;
+        };
+        let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
+        let connection = match endpoint.connect(addr, MOUNT_ALPN).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                refusals.push(format!("{}: {error}", &candidate.endpoint[..8]));
+                continue;
+            }
+        };
+        // The candidate must serve the tree its card claimed — fetched bytes,
+        // hashed here, against the card. A mismatch is disqualifying, not
+        // retryable: it lied once.
+        match fetch_manifest_on(&connection, &secret).await {
+            Ok((bytes, _))
+                if agent_share_proto::manifest::manifest_fingerprint(&bytes) == majority =>
+            {
+                let mut client = new_share_client(
+                    connection,
+                    secret,
+                    "relay".to_owned(),
+                    None,
+                    None,
+                    None,
+                    endpoint,
+                );
+                client.lookups = lookups;
+                client.connected_at_ms = now_ms();
+                client.from_origin = false;
+                client.pinned_tree = Some(majority.clone());
+                client.fallback_reason = Some(format!(
+                    "origin unreachable ({}); reading from seeder {}",
+                    describe(origin_error),
+                    &candidate.endpoint[..8.min(candidate.endpoint.len())],
+                ));
+                client.seeder = seeder;
+                *client.mesh.borrow_mut() = Some(Rc::new(mesh_peer));
+                return Ok(client);
+            }
+            Ok(_) => {
+                refusals.push(format!(
+                    "{}: served a different tree than its card claimed",
+                    &candidate.endpoint[..8]
+                ));
+            }
+            Err(error) => {
+                refusals.push(format!("{}: {}", &candidate.endpoint[..8], describe(&error)));
+            }
+        }
+    }
+    Err(JsValue::from_str(&format!(
+        "the origin is unreachable ({}) and no seeder could serve the share: {}",
+        describe(origin_error),
+        refusals.join("; "),
+    )))
+}
+
+/// The relay rungs a seeder of this share can be dialled at.
+///
+/// Every peer of a share homes on the ladder the ticket names — the same
+/// rungs the mesh rendezvous uses — so the ladder, not any one URL, is the
+/// address half of "dial by endpoint id".
+fn seeder_relays(ticket: &MountTicket) -> Vec<iroh::RelayUrl> {
+    use agent_share_proto::lookup::RelayChoice;
+    match &ticket.lookups.relay {
+        RelayChoice::Disabled => Vec::new(),
+        RelayChoice::Pinned => pinned_ladder(),
+        RelayChoice::Custom(ladder) => ladder.clone(),
+    }
+}
+
 /// Dial mount over the ticket address (IP and/or iroh relay). No WebRTC.
 async fn connect_relay(ticket: MountTicket) -> Result<ShareClient, JsValue> {
     ensure_reachable_addr(&ticket.addr)?;
@@ -1620,7 +1970,7 @@ fn wanted(only: &[String], rel_path: &str) -> bool {
 /// Size and mtime come from the manifest rather than from anything local,
 /// because they are what the *origin* says this version is. That is the
 /// comparison the store's version gate makes on every read.
-fn file_id(entry: &agent_share_proto::manifest::FileEntry) -> FileId {
+pub(crate) fn file_id(entry: &agent_share_proto::manifest::FileEntry) -> FileId {
     FileId {
         key: entry.rel_path.clone(),
         size: entry.size,

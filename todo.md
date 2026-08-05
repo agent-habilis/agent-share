@@ -3,6 +3,30 @@
 Things found but not yet fixed. Each entry says what breaks and how it was
 found, so the next person does not have to rediscover it.
 
+## Dead-origin fallback: card sync to a fresh joiner is flaky
+
+The seeder fallback works end-to-end — measured in real Chrome: a newcomer
+against a dead origin rendered the tree and zipped all bytes out of two
+seeding tabs — but not reliably. Across ~7 dead-origin connects, ~a third
+failed with "no peer on the mesh vouches" after the full 30 s card wait,
+while a live seeding tab sat on the same mesh with `tree` + `serving`
+published. Same round, same mesh: one revival recovered fully, one expired.
+
+Mechanism hypothesis: the joiner's mesh membership comes up, but no *live*
+gossip link forms inside the wait — the rendezvous set is dominated by dead
+identities (the killed producer plus every discarded revival client; each
+reconnect mints a fresh endpoint), and dialing corpses eats the window. That
+is the ghost-peer defect (`mesh.rs`) biting a third time: ghosts don't just
+mislead the availability grid, they slow a fresh joiner's link formation.
+Fixing it likely lives in fofoca (prune dead rendezvous entrants, or
+prioritize recently-alive peers) rather than here; reusing one endpoint
+identity across reconnect attempts (already on this list) would shrink the
+corpse pool at the source.
+
+Found by driving the full scenario in Chrome via agent-browse: seed two tabs,
+kill the producer, reconnect + newcomer. `AGENT_SHARE_DISCOVERY_DEADLINE_SECS`
+and the web's `origin_cap_ms` connect param exist for exactly this loop.
+
 ## Overnight `serve` at 100% CPU — the workspace shipped a leaky iroh-gossip
 
 The 2026-08-04→05 overnight serve (debug build, quiet 3-file share) was at

@@ -8,6 +8,7 @@ mod mirror;
 mod nfs;
 mod produce;
 mod scan;
+mod sources;
 mod webrtc;
 
 /// Re-exports for the integration tests; see `crate::test_support`.
