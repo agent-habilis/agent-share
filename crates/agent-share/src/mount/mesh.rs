@@ -463,21 +463,40 @@ impl ShareMesh {
     /// precedent. Quiet until the first peer arrives, so a solo share prints
     /// nothing extra.
     ///
-    /// **Silent in `--output json`.** That stream is exactly one line — the
-    /// mount command — and `tests/e2e_cli_webrtc.rs` and `tests/mount.rs`
-    /// scrape it. Adding to it would break them, and rightly so.
+    /// **Stdout is silent in `--output json`.** That stream is exactly one
+    /// line — the mount command — and `tests/e2e_cli_webrtc.rs` and
+    /// `tests/mount.rs` scrape it. Adding to it would break them, and rightly
+    /// so. The tracing line below is not stdout and rides along either way.
+    ///
+    /// Besides the status line, this loop emits a **self-stats line every ten
+    /// minutes** at INFO. The 2026-08-05 overnight incident (100% CPU by
+    /// morning) was undiagnosable from its own log because nothing in it said
+    /// what had accumulated; a counter snapshot per ten minutes — 144 lines a
+    /// night — is what a post-mortem needs to say "the roster grew all night"
+    /// or "it did not". Run long-lived serves with `RUST_LOG=info` and stderr
+    /// captured, or the line has nowhere to land.
     pub(crate) fn spawn_report(&self, json: bool) {
-        if json {
-            return;
-        }
         let live = Arc::clone(&self.live);
         let webrtc = self.webrtc.clone();
         let book = Arc::clone(&self.book);
         let local = self.local_endpoint.clone();
         tokio::spawn(async move {
             let mut last = None;
+            let mut ticks: u32 = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                ticks = ticks.wrapping_add(1);
+                if ticks.is_multiple_of(600) {
+                    tracing::info!(
+                        gossip = live.load(Ordering::Relaxed).saturating_sub(1),
+                        direct = webrtc.transport().session_count(),
+                        roster = cards_from_book(&book).len(),
+                        "serve self-stats"
+                    );
+                }
+                if json {
+                    continue;
+                }
                 // `live` counts self; the header elsewhere says "on gossip", so
                 // report other peers to match what a user would count.
                 let gossip = live.load(Ordering::Relaxed).saturating_sub(1);

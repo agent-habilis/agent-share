@@ -3,6 +3,31 @@
 Things found but not yet fixed. Each entry says what breaks and how it was
 found, so the next person does not have to rediscover it.
 
+## Overnight `serve` at 100% CPU — the workspace shipped a leaky iroh-gossip
+
+The 2026-08-04→05 overnight serve (debug build, quiet 3-file share) was at
+100%+ CPU by morning; its recovered stderr shows 8 h of `unknown
+NodeIdMappedAddr, dropped transmit` to **343 dead endpoint identities** — all
+minted by one hidden browser tab whose failed reconnects create a fresh
+identity per attempt (~84 s cadence).
+
+Root cause (high confidence, A/B verification staged): the workspace resolved
+the **unpatched** iroh-gossip — the connection-churn leak fix (upstream PR
+n0-computer/iroh-gossip#147) is pinned by `fofoca` but `[patch]` sections are
+not inherited across workspaces, so this graph never got it. Amplified by
+netwatch's RTM_MISS storm (net-tools#203; each failed transmit's route miss
+triggered a full interface rebuild + CoreWLAN XPC). Both pins were added to
+`Cargo.toml` at 01:54 that night — two hours *after* the sick binary was
+built, which is why the incident kept recurring: every long-lived serve
+predated its fix. Repro on the pinned build stays at 1–2% CPU under 350-peer
+churn; the unpatched-vs-pinned overnight A/B lives in
+`~/Notes/projects/agent-share/runbooks/overnight-cpu/`.
+
+Still open even with the pins: the web client should reuse one endpoint
+identity across reconnect attempts instead of minting ghosts, and the CRDT
+ghost-card defect (below the fold in `mesh.rs`) keeps every dead identity on
+the roster forever — 100 churned consumers read as "(100 reading)".
+
 ## Nothing observably breaks when the zip entries are built eagerly
 
 `web/src/download.ts` builds its ZIP entries from a generator, and the comment
