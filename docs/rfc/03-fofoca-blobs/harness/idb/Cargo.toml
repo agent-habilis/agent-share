@@ -12,7 +12,7 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 anyhow = "1"
-fofoca-blobs = { path = "../../../../../crates/fofoca-blobs" }
+fofoca-blobs = { path = "../../../../../../../fofoca-network/fofoca/crates/fofoca-blobs" }
 
 # Excluded from the repo workspace: a spike, not a product.
 [workspace]

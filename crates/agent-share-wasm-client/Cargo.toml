@@ -58,8 +58,9 @@ web-sys = { version = "0.3", features = [
 # `.cargo/config.toml`, and note the feature alone is NOT enough.
 # The blob layer. Kept as a separate crate so nothing about verification,
 # outboards or storage leaks into the share protocol — see `fofoca-blobs`'s
-# isolation tests.
-fofoca-blobs = { path = "../fofoca-blobs" }
+# isolation tests. It lives in the `fofoca-network/fofoca` workspace; the
+# sibling-checkout path is interim, pending a rev-pinned git dependency.
+fofoca-blobs = { path = "../../../../fofoca-network/fofoca/crates/fofoca-blobs" }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }

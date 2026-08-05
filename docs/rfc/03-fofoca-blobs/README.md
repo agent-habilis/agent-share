@@ -1,7 +1,16 @@
 # RFC 03: `fofoca-blobs`, a storage-agnostic verified byte store
 
-Status: **draft** — design agreed with the user; **Stage 0 executed**, all five
-assumptions tested. No crate code written.
+Status: **shipped, and the crate has moved.** Stage 0 executed, all five
+assumptions tested; the crate was then written, and now lives in the
+[`fofoca-network/fofoca`](https://github.com/fofoca-network/fofoca) workspace as
+`crates/fofoca-blobs` — the network layer's other consumers want it too.
+`agent-share` takes it as an ordinary dependency.
+
+This document and its `findings/`, `data/` and `harness/` stayed here: they are
+the share-side design record and the measurements behind it. The crate itself no
+longer cites them — every constraint they justify is stated inline in its own
+source, so it stands on its own away from this repo. Paths below that point into
+`crates/fofoca-blobs/` refer to the upstream checkout.
 
 Scope decided with the user: chunk/range serving *and* content-addressed
 identity are both in scope; **browser seeding is a hard requirement**. Those two
@@ -194,10 +203,16 @@ length-prefixing it means the *next* change does not cost another break.
 
 ### Placement and dependencies
 
-`crates/fofoca-blobs/`, a normal workspace member, consumed by the standalone
-`crates/agent-share-wasm-client` workspace **by path** — the pattern
+Originally `crates/fofoca-blobs/`, a normal workspace member, consumed by the
+standalone `crates/agent-share-wasm-client` workspace **by path** — the pattern
 `agent-share-proto`, `agent-habilis-mesh` and `fofoca-iroh-webrtc-transport`
 already use (`agent-share-wasm-client/Cargo.toml:26-32`).
+
+It has since moved to the `fofoca-network/fofoca` workspace. Both consumers
+still take it by path, now across checkouts; that becomes a rev-pinned git
+dependency once the move is pushed. Nothing about the seam changed — the crate
+still knows nothing about a share, and its `tests/isolation.rs` now enforces
+that against the network layer rather than against this repo.
 
 The `fofoca-` prefix follows `fofoca-iroh-webrtc-transport` and marks the crate
 ours-and-publishable. Note the tension it carries: **"blobs" inherits
@@ -382,7 +397,7 @@ is 24× slower than a Worker's sync handles and 5–50× faster than a realistic
 WebRTC data channel, so on the seeding path it is not the bottleneck. Where the
 Worker would win is local work — hashing a whole file, exporting one.
 
-So [`IdbStore`](../../../crates/fofoca-blobs/src/idb.rs) is the browser backend,
+So [`IdbStore`](../../../../../fofoca-network/fofoca/crates/fofoca-blobs/src/idb.rs) is the browser backend,
 `OpfsStore` stays unused until the Worker lands, and the trait makes that a swap.
 
 **What was nearly built instead, and why not.** Main-thread OPFS looks viable
@@ -393,7 +408,7 @@ Sequential writes in a single session are linear at 566 `MiB`/s and random reads
 are flat at 2.45 ms regardless of file size. Only random-access writing is
 ruinous.
 
-That distinction is what produced [`sparse`](../../../crates/fofoca-blobs/src/sparse.rs):
+That distinction is what produced [`sparse`](../../../../../fofoca-network/fofoca/crates/fofoca-blobs/src/sparse.rs):
 `decode_ranges` writes through `WriteAt` and `encode_ranges` reads through
 `ReadAt`, so a store that keeps pieces rather than files pays the file once
 rather than once per piece. It was built for `IndexedDB` and is not specific to

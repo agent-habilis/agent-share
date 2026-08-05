@@ -41,7 +41,11 @@ agent-share-proto = { path = "../agent-share-proto" }
 # The verified byte store. The dependency runs one way only: `agent-share` knows
 # about `fofoca-blobs`, and `fofoca-blobs` knows nothing about shares — enforced
 # on its side by `tests/isolation.rs`.
-fofoca-blobs = { path = "../fofoca-blobs" }
+#
+# It lives in the `fofoca-network/fofoca` workspace, not here, because the
+# network layer's other consumers want it too. A sibling-checkout path dep is
+# the interim: swap it for a rev-pinned git dependency once the move is pushed.
+fofoca-blobs = { path = "../../../../fofoca-network/fofoca/crates/fofoca-blobs" }
 # The gossip engine. A share joins a mesh derived from its own ticket secret, so
 # everyone holding the link becomes a peer of everyone else rather than only of
 # the producer. Note this pulls the vendored mesh into `default-members`, which
