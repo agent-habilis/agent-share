@@ -44,40 +44,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-habilis-mesh"
-version = "0.5.0"
-dependencies = [
- "anstream",
- "anstyle",
- "anyhow",
- "argon2",
- "async-trait",
- "automerge",
- "bs58",
- "bytes",
- "chacha20poly1305",
- "fofoca-iroh-webrtc-transport",
- "futures-util",
- "getrandom 0.2.17",
- "getrandom 0.3.4",
- "getrandom 0.4.3",
- "iroh",
- "iroh-gossip",
- "n0-future",
- "rand 0.9.5",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tracing",
- "uuid",
- "vergen-gitcl 1.0.8",
- "web-time",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
 name = "agent-share-proto"
 version = "0.1.0"
 dependencies = [
@@ -93,10 +59,10 @@ dependencies = [
 name = "agent-share-wasm-client"
 version = "0.1.0"
 dependencies = [
- "agent-habilis-mesh",
  "agent-share-proto",
  "anyhow",
  "console_error_panic_hook",
+ "fofoca",
  "fofoca-blobs",
  "fofoca-iroh-webrtc-transport",
  "futures",
@@ -137,56 +103,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "anstream"
-version = "0.6.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43d5b281e737544384e969a5ccad3f1cdd24b48086a0fc1b2a5262a26b8f4f4a"
-dependencies = [
- "anstyle",
- "anstyle-parse",
- "anstyle-query",
- "anstyle-wincon",
- "colorchoice",
- "is_terminal_polyfill",
- "utf8parse",
-]
-
-[[package]]
-name = "anstyle"
-version = "1.0.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
-
-[[package]]
-name = "anstyle-parse"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e7644824f0aa2c7b9384579234ef10eb7efb6a0deb83f9630a49594dd9c15c2"
-dependencies = [
- "utf8parse",
-]
-
-[[package]]
-name = "anstyle-query"
-version = "1.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
-dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "anstyle-wincon"
-version = "3.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
-dependencies = [
- "anstyle",
- "once_cell_polyfill",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -645,12 +561,6 @@ checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
  "thiserror 2.0.19",
 ]
-
-[[package]]
-name = "colorchoice"
-version = "1.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combine"
@@ -1277,6 +1187,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "fofoca"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "bs58",
+ "bytes",
+ "chacha20poly1305",
+ "fofoca-directory",
+ "fofoca-doc",
+ "fofoca-iroh-webrtc-transport",
+ "fofoca-logging",
+ "fofoca-protocol",
+ "fofoca-reassembly",
+ "fofoca-util",
+ "futures-util",
+ "iroh",
+ "iroh-gossip",
+ "n0-future",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "uuid",
+ "web-time",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "fofoca-blobs"
 version = "0.5.0"
 dependencies = [
@@ -1288,6 +1231,34 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "fofoca-directory"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "fofoca-protocol",
+ "fofoca-util",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "fofoca-doc"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "bs58",
+ "chacha20poly1305",
+ "fofoca-protocol",
+ "fofoca-util",
+ "serde",
+ "serde_json",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -1313,6 +1284,64 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "fofoca-logging"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "fofoca-protocol",
+ "fofoca-util",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "fofoca-protocol"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "bs58",
+ "bytes",
+ "chacha20poly1305",
+ "fofoca-util",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "iroh-base",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "fofoca-reassembly"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "fofoca-protocol",
+ "fofoca-util",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "fofoca-util"
+version = "0.5.0"
+dependencies = [
+ "tokio",
+ "tracing",
+ "vergen-gitcl 1.0.8",
+ "web-time",
 ]
 
 [[package]]
@@ -2046,8 +2075,8 @@ dependencies = [
 
 [[package]]
 name = "iroh"
-version = "1.0.1"
-source = "git+https://github.com/agent-habilis/iroh?rev=195cb98d16969da48743e88a0dbb395d118316ed#195cb98d16969da48743e88a0dbb395d118316ed"
+version = "1.0.2"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "backon",
  "blake3",
@@ -2096,8 +2125,8 @@ dependencies = [
 
 [[package]]
 name = "iroh-base"
-version = "1.0.1"
-source = "git+https://github.com/agent-habilis/iroh?rev=195cb98d16969da48743e88a0dbb395d118316ed#195cb98d16969da48743e88a0dbb395d118316ed"
+version = "1.0.2"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "curve25519-dalek 5.0.0-rc.0",
  "data-encoding",
@@ -2114,8 +2143,8 @@ dependencies = [
 
 [[package]]
 name = "iroh-dns"
-version = "1.0.1"
-source = "git+https://github.com/agent-habilis/iroh?rev=195cb98d16969da48743e88a0dbb395d118316ed#195cb98d16969da48743e88a0dbb395d118316ed"
+version = "1.0.2"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2191,8 +2220,8 @@ dependencies = [
 
 [[package]]
 name = "iroh-relay"
-version = "1.0.1"
-source = "git+https://github.com/agent-habilis/iroh?rev=195cb98d16969da48743e88a0dbb395d118316ed#195cb98d16969da48743e88a0dbb395d118316ed"
+version = "1.0.2"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "blake3",
  "bytes",
@@ -2273,12 +2302,6 @@ dependencies = [
  "subtle",
  "tracing",
 ]
-
-[[package]]
-name = "is_terminal_polyfill"
-version = "1.70.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "itertools"
@@ -2975,12 +2998,6 @@ dependencies = [
  "critical-section",
  "portable-atomic",
 ]
-
-[[package]]
-name = "once_cell_polyfill"
-version = "1.70.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oorandom"
@@ -4588,12 +4605,6 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
-
-[[package]]
-name = "utf8parse"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"

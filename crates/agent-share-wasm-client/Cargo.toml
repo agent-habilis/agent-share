@@ -28,10 +28,10 @@ agent-share-proto = { path = "../agent-share-proto" }
 # socket, the filesystem and multihop, none of which exist in a tab. What
 # remains is the whole node runtime — `setup_mesh` → `Node::spawn` → the event
 # loop — so a browser peer is the same peer a CLI runs, not a reduced stand-in.
-agent-habilis-mesh = { path = "../agent-habilis-mesh", default-features = false }
+fofoca = { path = "../../../../fofoca-network/fofoca/crates/fofoca", default-features = false }
 fofoca-iroh-webrtc-transport = { path = "../../../../fofoca-network/fofoca/crates/fofoca-iroh-webrtc-transport", features = ["web"] }
-iroh = { version = "1.0.1", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
-iroh-base = { version = "1.0.1", default-features = false, features = ["key"] }
+iroh = { version = "1.0.2", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
+iroh-base = { version = "1.0.2", default-features = false, features = ["key"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -66,7 +66,7 @@ getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 # The unit tests run on wasm32, because that is the only target this crate
-# builds for at all: `agent-habilis-mesh` turns on
+# builds for at all: `fofoca` turns on
 # `fofoca-iroh-webrtc-transport/native` off wasm32, and with both backends
 # enabled `WebRtcHandle` resolves to the host one — so a host build of this
 # crate cannot type-check by construction. Each `mod tests` renames the
@@ -74,12 +74,13 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
 
-# Same fork/rev pins as the root workspace. Patches are not inherited across
-# workspace boundaries, so they are duplicated here and must move together.
+# Same fork/rev pins as the root workspace *and* as `fofoca-network/fofoca`.
+# Patches are not inherited across workspace boundaries, so they are duplicated
+# here and all three must move together.
 [patch.crates-io]
-iroh = { git = "https://github.com/agent-habilis/iroh", rev = "195cb98d16969da48743e88a0dbb395d118316ed" }
-iroh-base = { git = "https://github.com/agent-habilis/iroh", rev = "195cb98d16969da48743e88a0dbb395d118316ed" }
-iroh-dns = { git = "https://github.com/agent-habilis/iroh", rev = "195cb98d16969da48743e88a0dbb395d118316ed" }
+iroh = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
+iroh-base = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
+iroh-dns = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
 
 [profile.release]
 opt-level = "s"

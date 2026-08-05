@@ -41,7 +41,7 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
 /// with nothing to say why they never met. The mesh derived from a share homes
 /// on the same rungs for the same reason.
 fn pinned_ladder() -> Vec<iroh::RelayUrl> {
-    agent_habilis_mesh::RENDEZVOUS_RELAY_LADDER
+    fofoca::RENDEZVOUS_RELAY_LADDER
         .iter()
         .map(|raw| {
             raw.parse()

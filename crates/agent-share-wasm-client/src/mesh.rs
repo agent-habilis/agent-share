@@ -23,22 +23,22 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use agent_habilis_mesh::embed::{
-    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
-    SilentSink,
-};
-use agent_habilis_mesh::net::TransportOpts;
-use agent_habilis_mesh::ops::{StateMergeParams, broadcast_state_merge};
-use agent_habilis_mesh::protocol::{
-    Channel, DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message, Nickname,
-};
-use agent_habilis_mesh::runtime::{
-    CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams,
-    derive_topic_mesh_with, setup_mesh,
-};
 use agent_share_proto::PeerCard;
 use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
+use fofoca::embed::{
+    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
+    SilentSink,
+};
+use fofoca::net::TransportOpts;
+use fofoca::ops::{StateMergeParams, broadcast_state_merge};
+use fofoca::protocol::{
+    Channel, DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message, Nickname,
+};
+use fofoca::runtime::{
+    CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams,
+    derive_topic_mesh_with, setup_mesh,
+};
 use wasm_bindgen::prelude::*;
 
 /// Parts of a meta peer card known before the endpoint id exists.
@@ -136,7 +136,7 @@ pub(crate) fn parse_card_parts(
 /// The engine's own constant, not a copy: this is both the number the tab
 /// enforces and the denominator its header renders, and when they were separate
 /// literals the header could show `18/16`.
-use agent_habilis_mesh::net::MAX_DIRECT_PEERS;
+use fofoca::net::MAX_DIRECT_PEERS;
 
 /// Meta per-peer gate: only `<nick>` may write `/peers/<nick>/card`.
 /// Must match on every share-mesh replica (genesis identity).
@@ -153,12 +153,10 @@ fn share_card_gate() -> SelfWriteGate {
 /// crates that see both. `agent-share-proto` stays wasm-clean and
 /// `iroh-base`-only, so it must not depend on the engine just to spare these
 /// ten lines; the CLI carries the same ones.
-fn mesh_lookups(
-    share: &agent_share_proto::lookup::LookupOpts,
-) -> agent_habilis_mesh::protocol::LookupOpts {
-    use agent_habilis_mesh::protocol::RelayChoice as MeshRelay;
+fn mesh_lookups(share: &agent_share_proto::lookup::LookupOpts) -> fofoca::protocol::LookupOpts {
     use agent_share_proto::lookup::RelayChoice as ShareRelay;
-    agent_habilis_mesh::protocol::LookupOpts {
+    use fofoca::protocol::RelayChoice as MeshRelay;
+    fofoca::protocol::LookupOpts {
         mdns: share.mdns,
         dht: share.dht,
         relay: match &share.relay {
@@ -197,12 +195,7 @@ impl ShareMeshDriver {
             .clone()
             .into_card(ctx.endpoint.id().to_string())
             .with_tree(self.tree.lock().ok().and_then(|tree| tree.clone()))
-            .with_serving(
-                self.serving
-                    .lock()
-                    .ok()
-                    .and_then(|serving| serving.clone()),
-            );
+            .with_serving(self.serving.lock().ok().and_then(|serving| serving.clone()));
         let merge = serde_json::json!({
             "peers": {
                 ctx.author.as_str(): {
@@ -258,7 +251,7 @@ impl ShareMeshDriver {
     }
 }
 
-#[agent_habilis_mesh::async_trait]
+#[fofoca::async_trait]
 impl NodeApp for ShareMeshDriver {
     fn classify(&self, _message: &Message) -> AppClass {
         AppClass {
@@ -288,8 +281,6 @@ impl NodeApp for ShareMeshDriver {
         self.refresh_book(state);
     }
 
-
-
     async fn on_meshed(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         self.publish_card(state, ctx).await;
     }
@@ -304,7 +295,7 @@ impl NodeApp for ShareMeshDriver {
     }
 }
 
-#[agent_habilis_mesh::async_trait]
+#[fofoca::async_trait]
 impl NodeDriver for ShareMeshDriver {
     type Session = ShareRequest;
     type Http = ();
@@ -327,7 +318,6 @@ impl NodeDriver for ShareMeshDriver {
     async fn on_startup(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         self.publish_card(state, ctx).await;
     }
-
 }
 
 /// A live mesh membership held by this tab.

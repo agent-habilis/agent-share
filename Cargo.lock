@@ -59,54 +59,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-habilis-mesh"
-version = "0.5.0"
-dependencies = [
- "anstream 0.6.21",
- "anstyle",
- "anyhow",
- "argon2",
- "async-trait",
- "automerge",
- "bs58",
- "bytes",
- "chacha20poly1305",
- "divan",
- "fofoca-iroh-webrtc-transport",
- "futures-util",
- "getrandom 0.2.17",
- "getrandom 0.3.4",
- "getrandom 0.4.3",
- "insta",
- "interprocess",
- "iroh",
- "iroh-gossip",
- "iroh-mainline-address-lookup",
- "iroh-mdns-address-lookup",
- "iroh-multihop-transport",
- "libc",
- "n0-future",
- "proptest",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "vergen-gitcl 1.0.8",
- "wasm-bindgen-test",
- "web-time",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
 name = "agent-share"
 version = "0.1.0"
 dependencies = [
- "agent-habilis-mesh",
  "agent-share-proto",
  "anstream 0.6.21",
  "anstyle",
@@ -115,6 +70,7 @@ dependencies = [
  "bs58",
  "chrono",
  "clap",
+ "fofoca",
  "fofoca-blobs",
  "fofoca-iroh-webrtc-transport",
  "iroh",
@@ -531,21 +487,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "597bb81c80a54b6a4381b23faba8d7774b144c94cbd1d6fe3f1329bd776554ab"
 
 [[package]]
-name = "bit-set"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
-dependencies = [
- "bit-vec 0.8.0",
-]
-
-[[package]]
-name = "bit-vec"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
-
-[[package]]
 name = "bit-vec"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -731,12 +672,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
 ]
-
-[[package]]
-name = "cast"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
@@ -927,23 +862,6 @@ checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
  "bytes",
  "memchr",
-]
-
-[[package]]
-name = "condtype"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baf0a07a401f374238ab8e2f11a104d2851bf9ce711ec69804834de8af45c7af"
-
-[[package]]
-name = "console"
-version = "0.16.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fe5f465a4f6fee88fad41b85d990f84c835335e85b5d9e6e63e0d06d28cba7c"
-dependencies = [
- "encode_unicode",
- "libc",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1445,31 +1363,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "divan"
-version = "0.1.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a405457ec78b8fe08b0e32b4a3570ab5dff6dd16eb9e76a5ee0a9d9cbd898933"
-dependencies = [
- "cfg-if",
- "clap",
- "condtype",
- "divan-macros",
- "libc",
- "regex-lite",
-]
-
-[[package]]
-name = "divan-macros"
-version = "0.1.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9556bc800956545d6420a640173e5ba7dfa82f38d3ea5a167eb555bc69ac3323"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
-]
-
-[[package]]
 name = "dlopen2"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1542,12 +1435,6 @@ name = "embedded-io"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
-
-[[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "enum-assoc"
@@ -1648,6 +1535,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "fofoca"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "bs58",
+ "bytes",
+ "chacha20poly1305",
+ "fofoca-directory",
+ "fofoca-doc",
+ "fofoca-iroh-webrtc-transport",
+ "fofoca-logging",
+ "fofoca-protocol",
+ "fofoca-reassembly",
+ "fofoca-util",
+ "futures-util",
+ "interprocess",
+ "iroh",
+ "iroh-gossip",
+ "iroh-mainline-address-lookup",
+ "iroh-mdns-address-lookup",
+ "iroh-multihop-transport",
+ "libc",
+ "n0-future",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "uuid",
+ "web-time",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "fofoca-blobs"
 version = "0.5.0"
 dependencies = [
@@ -1659,6 +1584,34 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "fofoca-directory"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "fofoca-protocol",
+ "fofoca-util",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "fofoca-doc"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "bs58",
+ "chacha20poly1305",
+ "fofoca-protocol",
+ "fofoca-util",
+ "serde",
+ "serde_json",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -1684,6 +1637,66 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "fofoca-logging"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "fofoca-protocol",
+ "fofoca-util",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fofoca-protocol"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "bs58",
+ "bytes",
+ "chacha20poly1305",
+ "fofoca-util",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "iroh-base",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "fofoca-reassembly"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "fofoca-protocol",
+ "fofoca-util",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "fofoca-util"
+version = "0.5.0"
+dependencies = [
+ "libc",
+ "tokio",
+ "tracing",
+ "vergen-gitcl 1.0.8",
+ "web-time",
 ]
 
 [[package]]
@@ -2472,18 +2485,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "insta"
-version = "1.48.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
-dependencies = [
- "console",
- "once_cell",
- "similar",
- "tempfile",
-]
-
-[[package]]
 name = "interprocess"
 version = "2.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2522,8 +2523,8 @@ dependencies = [
 
 [[package]]
 name = "iroh"
-version = "1.0.1"
-source = "git+https://github.com/agent-habilis/iroh?rev=195cb98d16969da48743e88a0dbb395d118316ed#195cb98d16969da48743e88a0dbb395d118316ed"
+version = "1.0.2"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "axum",
  "backon",
@@ -2573,8 +2574,8 @@ dependencies = [
 
 [[package]]
 name = "iroh-base"
-version = "1.0.1"
-source = "git+https://github.com/agent-habilis/iroh?rev=195cb98d16969da48743e88a0dbb395d118316ed#195cb98d16969da48743e88a0dbb395d118316ed"
+version = "1.0.2"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "curve25519-dalek 5.0.0-rc.0",
  "data-encoding",
@@ -2591,8 +2592,8 @@ dependencies = [
 
 [[package]]
 name = "iroh-dns"
-version = "1.0.1"
-source = "git+https://github.com/agent-habilis/iroh?rev=195cb98d16969da48743e88a0dbb395d118316ed#195cb98d16969da48743e88a0dbb395d118316ed"
+version = "1.0.2"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2731,8 +2732,8 @@ dependencies = [
 
 [[package]]
 name = "iroh-relay"
-version = "1.0.1"
-source = "git+https://github.com/agent-habilis/iroh?rev=195cb98d16969da48743e88a0dbb395d118316ed#195cb98d16969da48743e88a0dbb395d118316ed"
+version = "1.0.2"
+source = "git+https://github.com/fofoca-network/iroh?rev=f9cb1f4fd1b69e904770516029fa0afac0fd3ce4#f9cb1f4fd1b69e904770516029fa0afac0fd3ce4"
 dependencies = [
  "blake3",
  "bytes",
@@ -2982,12 +2983,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
-name = "libm"
-version = "0.2.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
-
-[[package]]
 name = "libredox"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3083,16 +3078,6 @@ name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
-
-[[package]]
-name = "minicov"
-version = "0.3.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4869b6a491569605d66d3952bcdf03df789e5b536e5f0cf7758a7f08a55ae24d"
-dependencies = [
- "cc",
- "walkdir",
-]
 
 [[package]]
 name = "minimal-lexical"
@@ -3510,7 +3495,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
- "libm",
 ]
 
 [[package]]
@@ -3658,12 +3642,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "oorandom"
-version = "11.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "opaque-debug"
@@ -4042,31 +4020,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "proptest"
-version = "1.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
-dependencies = [
- "bit-set",
- "bit-vec 0.8.0",
- "bitflags",
- "num-traits",
- "rand 0.9.4",
- "rand_chacha",
- "rand_xorshift",
- "regex-syntax",
- "rusty-fork",
- "tempfile",
- "unarray",
-]
-
-[[package]]
-name = "quick-error"
-version = "1.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
-
-[[package]]
 name = "quick-xml"
 version = "0.39.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4161,15 +4114,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rand_xorshift"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
-dependencies = [
- "rand_core 0.9.5",
-]
-
-[[package]]
 name = "range-collections"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4252,12 +4196,6 @@ dependencies = [
  "memchr",
  "regex-syntax",
 ]
-
-[[package]]
-name = "regex-lite"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"
@@ -4504,18 +4442,6 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
-
-[[package]]
-name = "rusty-fork"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc6bf79ff24e648f6da1f8d1f011e9cac26491b619e6b9280f2b47f1774e6ee2"
-dependencies = [
- "fnv",
- "quick-error",
- "tempfile",
- "wait-timeout",
-]
 
 [[package]]
 name = "ryu"
@@ -4865,12 +4791,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
-name = "similar"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
-
-[[package]]
 name = "simple-dns"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5180,19 +5100,6 @@ dependencies = [
  "serde",
  "serde_json",
  "xshell",
-]
-
-[[package]]
-name = "tempfile"
-version = "3.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
-dependencies = [
- "fastrand",
- "getrandom 0.4.3",
- "once_cell",
- "rustix",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5598,12 +5505,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
-name = "unarray"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
-
-[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5754,15 +5655,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "wait-timeout"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5850,45 +5742,6 @@ checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
 ]
-
-[[package]]
-name = "wasm-bindgen-test"
-version = "0.3.76"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a0d555ca874445df8d314f94f5c948a4e74e5418f332c89f660a3d8310a96f4"
-dependencies = [
- "async-trait",
- "cast",
- "js-sys",
- "libm",
- "minicov",
- "nu-ansi-term",
- "num-traits",
- "oorandom",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test-macro",
- "wasm-bindgen-test-shared",
-]
-
-[[package]]
-name = "wasm-bindgen-test-macro"
-version = "0.3.76"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94eb68555b95bcea5e8cf4abe280b529049479fa995bfc23734af96a6aedc120"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
-]
-
-[[package]]
-name = "wasm-bindgen-test-shared"
-version = "0.2.126"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c31d56021e873866c968588ed85ccdf56db5c426e44afdb4618c39895104b920"
 
 [[package]]
 name = "wasm-streams"
@@ -6472,7 +6325,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5f6765e852b9b4dc8e2a76843e4d64d1cea8e79bcde0b6901aea8e7c7f08282"
 dependencies = [
- "bit-vec 0.9.1",
+ "bit-vec",
  "time",
 ]
 

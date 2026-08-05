@@ -127,7 +127,7 @@ pub(crate) async fn serve(
         // consumed. Same value, but this way the invariant — every peer of this
         // share derives the mesh from what the ticket says — is literal.
         lookups: &ticket.lookups,
-        shared: agent_habilis_mesh::runtime::InjectedEndpoint {
+        shared: fofoca::runtime::InjectedEndpoint {
             endpoint: endpoint.clone(),
             webrtc: webrtc.clone(),
         },
@@ -144,7 +144,7 @@ pub(crate) async fn serve(
         // letting readers discover the gaps by asking.
         serving: tree.serving(),
         // The producer never clears IP: it is the peer everyone else dials.
-        transports: agent_habilis_mesh::net::TransportOpts::default(),
+        transports: fofoca::net::TransportOpts::default(),
     })
     .await
     {

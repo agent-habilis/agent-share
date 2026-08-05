@@ -46,7 +46,7 @@
 //! the network. Two things enforce it — [`super::consume::RemoteClient`] reaches
 //! this lane only through its `webrtc_only` flag, and the mesh negotiates a
 //! data channel only with peers advertising no IP transport
-//! (`agent_habilis_mesh::transport::webrtc::needs_webrtc_lane`).
+//! (`fofoca::transport::webrtc::needs_webrtc_lane`).
 //!
 //! The browser client is the other half of the table and behaves differently on
 //! purpose: its default mode tries the data channel first and **does** fall back

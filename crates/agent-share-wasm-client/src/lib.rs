@@ -371,14 +371,22 @@ impl ShareClient {
                 clippy::cast_precision_loss,
                 reason = "wire byte counts stay far below 2^53; see link::Meter"
             )]
-            let meter = previous.meter.sample(sent as f64, received as f64, rtt_ms, now);
+            let meter = previous
+                .meter
+                .sample(sent as f64, received as f64, rtt_ms, now);
             cache.insert(key.to_owned(), link::LaneMeter { meter, selected });
         };
 
         let (sent, received) = link::read_quic_total(&self.connection);
         fold(TOTAL_LANE, sent, received, None, false);
         for lane in link::read_quic(&self.connection) {
-            fold(&lane.label, lane.sent, lane.received, lane.rtt_ms, lane.selected);
+            fold(
+                &lane.label,
+                lane.sent,
+                lane.received,
+                lane.rtt_ms,
+                lane.selected,
+            );
         }
 
         // Rendered through the same function `info` uses, so a sampled reading
@@ -391,7 +399,10 @@ impl ShareClient {
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn peers_gossip(&self) -> u32 {
-        self.mesh.borrow().as_ref().map_or(0, |peer| peer.peers_gossip())
+        self.mesh
+            .borrow()
+            .as_ref()
+            .map_or(0, |peer| peer.peers_gossip())
     }
 
     /// Peers we hold a direct `WebRTC` data channel with.
@@ -412,7 +423,10 @@ impl ShareClient {
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn max_direct(&self) -> u32 {
-        self.mesh.borrow().as_ref().map_or(0, |peer| peer.max_direct())
+        self.mesh
+            .borrow()
+            .as_ref()
+            .map_or(0, |peer| peer.max_direct())
     }
 
     /// Leave the share's mesh, announcing departure so peers drop us now.
@@ -489,7 +503,8 @@ impl ShareClient {
     /// testing. Nothing here re-dials: that is left to the ordinary triggers,
     /// because a button that healed itself would bypass them.
     pub fn close_connection(&self) {
-        self.connection.close(0u32.into(), b"dev: closed from the info pane");
+        self.connection
+            .close(0u32.into(), b"dev: closed from the info pane");
     }
 
     /// The whole tree, in one shot: `{ dirs: [...], files: [...] }`.
@@ -603,7 +618,6 @@ impl ShareClient {
             .map_err(|error| err("read body", &error))?;
         Ok(data)
     }
-
 
     /// Fetch bytes into local storage so this tab can seed them.
     ///
@@ -1588,7 +1602,6 @@ async fn follow_watch(
     }
 }
 
-
 /// Whether `only` selects `rel_path`. An empty filter takes everything.
 ///
 /// A prefix match only at a path boundary, so `--only docs` cannot quietly take
@@ -1983,7 +1996,7 @@ fn serde_wasm<T: serde::Serialize>(value: &T) -> Result<JsValue, JsValue> {
 
 /// The `Pinned` ladder, from `agent-habilis-mesh` — see [`relay_mode`].
 fn pinned_ladder() -> Vec<iroh::RelayUrl> {
-    agent_habilis_mesh::RENDEZVOUS_RELAY_LADDER
+    fofoca::RENDEZVOUS_RELAY_LADDER
         .iter()
         .map(|raw| {
             raw.parse()
@@ -1991,4 +2004,3 @@ fn pinned_ladder() -> Vec<iroh::RelayUrl> {
         })
         .collect()
 }
-

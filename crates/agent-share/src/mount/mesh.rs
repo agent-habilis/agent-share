@@ -21,20 +21,20 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use agent_habilis_mesh::embed::{
-    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
-    SilentSink,
-};
-use agent_habilis_mesh::net::TransportOpts;
-use agent_habilis_mesh::ops::{StateMergeParams, broadcast_state_merge};
-use agent_habilis_mesh::protocol::{Channel, Message, Nickname};
-use agent_habilis_mesh::runtime::{
-    InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh_with,
-};
 use agent_share_proto::PeerCard;
 use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
 use anyhow::{Context, Result};
+use fofoca::embed::{
+    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
+    SilentSink,
+};
+use fofoca::net::TransportOpts;
+use fofoca::ops::{StateMergeParams, broadcast_state_merge};
+use fofoca::protocol::{Channel, Message, Nickname};
+use fofoca::runtime::{
+    InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh_with,
+};
 
 /// A share's lookups, as the engine spells them.
 ///
@@ -45,10 +45,10 @@ use anyhow::{Context, Result};
 /// function. The browser peer carries the same ten lines for the same reason.
 pub(crate) fn mesh_lookups(
     share: &agent_share_proto::lookup::LookupOpts,
-) -> agent_habilis_mesh::protocol::LookupOpts {
-    use agent_habilis_mesh::protocol::RelayChoice as MeshRelay;
+) -> fofoca::protocol::LookupOpts {
     use agent_share_proto::lookup::RelayChoice as ShareRelay;
-    agent_habilis_mesh::protocol::LookupOpts {
+    use fofoca::protocol::RelayChoice as MeshRelay;
+    fofoca::protocol::LookupOpts {
         mdns: share.mdns,
         dht: share.dht,
         relay: match &share.relay {
@@ -65,7 +65,7 @@ pub(crate) fn mesh_lookups(
 /// here, another in the browser peer, and the real one in the engine — so the
 /// number a UI rendered and the number the engine enforced could drift apart,
 /// and did.
-use agent_habilis_mesh::net::MAX_DIRECT_PEERS;
+use fofoca::net::MAX_DIRECT_PEERS;
 
 /// Which side of the share a peer is on, as its meta card spells it.
 ///
@@ -296,7 +296,7 @@ impl ShareDriver {
     }
 }
 
-#[agent_habilis_mesh::async_trait]
+#[fofoca::async_trait]
 impl NodeApp for ShareDriver {
     fn classify(&self, _message: &Message) -> AppClass {
         AppClass {
@@ -344,7 +344,7 @@ impl NodeApp for ShareDriver {
     }
 }
 
-#[agent_habilis_mesh::async_trait]
+#[fofoca::async_trait]
 impl NodeDriver for ShareDriver {
     type Session = ShareRequest;
     type Http = ();
@@ -599,7 +599,7 @@ pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
     // Read before `shared` is moved into the setup params below.
     let local_endpoint = shared.endpoint.id().to_string();
     let live = Arc::new(AtomicUsize::new(0));
-    let config = agent_habilis_mesh::runtime::setup_mesh(
+    let config = fofoca::runtime::setup_mesh(
         kind,
         SetupParams {
             author,
@@ -851,7 +851,7 @@ mod tests {
         role: Role,
         tree: Option<String>,
     ) -> super::ShareMesh {
-        use agent_habilis_mesh::runtime::InjectedEndpoint;
+        use fofoca::runtime::InjectedEndpoint;
         use fofoca_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
         use rand::RngCore;
 
@@ -877,7 +877,7 @@ mod tests {
             role,
             tree,
             serving: None,
-            transports: agent_habilis_mesh::net::TransportOpts::default(),
+            transports: fofoca::net::TransportOpts::default(),
         })
         .await
         .expect("join the share mesh")

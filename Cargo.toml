@@ -7,11 +7,9 @@ members = ["crates/*", "tasks"]
 # unification across the whole graph — surfacing as a mysterious build failure
 # with nothing pointing back at the move.
 resolver = "3"
-# Also load-bearing on a virtual manifest: with no root package, an unscoped
-# `cargo build`/`test`/`clippy`/`run` defaults to *every* member — which now
-# includes the 25k-line vendored mesh. This pins the pre-split meaning.
-# Widening coverage to the whole workspace is a deliberate follow-up (drop this
-# key), not a side effect of a move.
+# With no root package, an unscoped `cargo build`/`test`/`clippy`/`run` defaults
+# to *every* member. The vendored mesh that made that expensive is gone, so this
+# now only pins the historical meaning; dropping it is a small, separate change.
 default-members = ["crates/agent-share"]
 # A member by glob, but it must not be one in fact: this is a wasm32-only
 # cdylib (`web_sys::window()` does not exist off wasm32), so a `--workspace`
@@ -27,10 +25,11 @@ exclude = ["crates/agent-share-wasm-client"]
 edition = "2024"
 rust-version = "1.93"
 
-# Declared for the vendored `agent-habilis-mesh`, which takes most of its
-# dependencies as `workspace = true`. Kept byte-compatible with the manifest it
-# was copied from so re-syncing is a diff rather than a reconciliation — see
-# `crates/agent-habilis-mesh/README.md` for the provenance.
+# Shared by the crates here, pinned once so versions stay in lockstep. This
+# block was originally sized for the vendored mesh, which took most of its
+# dependencies as `workspace = true`; the mesh now lives in
+# `fofoca-network/fofoca` and brings its own, so entries here that nothing
+# names any more can be pruned.
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
@@ -109,22 +108,22 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 
-# Same fork pins as agent-habilis/swarm (behavior parity with the `ahsw` this
-# binary must interoperate with). Pinned by `rev`, not `branch`: a branch ref
-# is mutable, so a force-push on the fork would silently change what the next
-# `cargo update` builds.
+# Pinned by `rev`, not `branch`: a branch ref is mutable, so a force-push on the
+# fork would silently change what the next `cargo update` builds.
 [patch.crates-io]
-# iroh#4294 mapped_addrs eviction, from the agent-habilis fork (branch
-# fix/mapped-addrs-eviction-1.0.1, rebased onto v1.0.1). Same rev as
-# agent-habilis/agent-gossip: the WebRTC lane implements iroh's
-# `CustomTransport`, so a rev skew would put two `iroh` crates in one graph
-# and the impl would not satisfy the trait. Bump both repos together.
+# The `fofoca-network` fork, carrying iroh#4294 (mapped_addrs eviction) and a
+# relay-teardown fix. Same repo and rev as `fofoca-network/fofoca` pins, and
+# that is load-bearing rather than tidy: the engine and the WebRTC lane live
+# there and implement iroh's `CustomTransport`, so a rev skew would put two
+# `iroh` crates in one graph and the impls would stop satisfying the trait.
+# Bump both repos together.
+#
 # iroh-base/iroh-dns are patched to the SAME repo+rev as `iroh` because the
 # forked `iroh` pulls its workspace-local copies of them — without these the
 # graph carries two `iroh_base`/`iroh_dns` versions and types clash (E0308).
-iroh = { git = "https://github.com/agent-habilis/iroh", rev = "195cb98d16969da48743e88a0dbb395d118316ed" }
-iroh-base = { git = "https://github.com/agent-habilis/iroh", rev = "195cb98d16969da48743e88a0dbb395d118316ed" }
-iroh-dns = { git = "https://github.com/agent-habilis/iroh", rev = "195cb98d16969da48743e88a0dbb395d118316ed" }
+iroh = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
+iroh-base = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
+iroh-dns = { git = "https://github.com/fofoca-network/iroh", rev = "f9cb1f4fd1b69e904770516029fa0afac0fd3ce4" }
 # The former `noq` patch (abandoned_paths bound, #683) is gone: noq v1.0.1
 # bounds the set upstream via ArrayRangeSet (noq#691). The former `netdev`
 # patch (macOS CoreWLAN autorelease leak) merged upstream as netdev#165,

@@ -84,39 +84,15 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         )
         .quiet()
         .run()?;
-        // `ring`'s C core needs a wasm-capable clang; Apple clang cannot
-        // target wasm32. Skip rather than fail on a host without one — the
-        // proto check above still guards the wire format.
-        match wasm_clang(sh) {
-            Some(clang) => {
-                for args in [
-                    // The engine itself must reach the browser, not merely be
-                    // avoidable from it. Without this gate the wasm target rots
-                    // on the next edit that reaches for a file or a socket.
-                    "check --target wasm32-unknown-unknown -p agent-habilis-mesh --no-default-features",
-                    // …and must *run* there. Every wasm break this crate has had
-                    // compiled cleanly and then panicked: `Instant::now` is
-                    // unimplemented on wasm32, `tokio::time` has no driver,
-                    // `tokio::spawn` has no reactor. The check above cannot see
-                    // any of them — one shipped and killed the browser peer on
-                    // load. This suite executes those primitives under node.
-                    "test --target wasm32-unknown-unknown -p agent-habilis-mesh --no-default-features --test wasm_runtime",
-                ] {
-                    let args = args.split(' ');
-                    cmd!(sh, "cargo {args...}")
-                        .env("CC", &clang)
-                        .env("CC_wasm32_unknown_unknown", &clang)
-                        .quiet()
-                        .run()?;
-                }
-            }
-            None => output::status("Skipping", "wasm32 crate checks (no wasm-capable clang)"),
-        }
+        // The engine's own wasm32 legs — a portable check and the
+        // `wasm_runtime` suite — moved with it to `fofoca-network/fofoca` and
+        // run in that repo's CI. What is left here is this repo's own code.
+        //
         // The wasm client is excluded from the workspace, so nothing above
         // reaches it — and its tests run *here*, on wasm32, rather than with
         // the other `cargo test` lines above.
         //
-        // Not a preference. Off wasm32 `agent-habilis-mesh` turns on
+        // Not a preference. Off wasm32 `fofoca` turns on
         // `fofoca-iroh-webrtc-transport/native`, and with both backends enabled
         // `WebRtcHandle` resolves to the host one while this crate hands it a
         // `BrowserHubTransport` — so a host build cannot type-check by

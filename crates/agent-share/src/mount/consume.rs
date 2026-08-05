@@ -204,7 +204,7 @@ async fn join_share_mesh(join: MeshJoin<'_>) -> Option<ShareMesh> {
     let result = super::mesh::join(super::mesh::JoinOpts {
         secret: join.secret,
         lookups: join.lookups,
-        shared: agent_habilis_mesh::runtime::InjectedEndpoint {
+        shared: fofoca::runtime::InjectedEndpoint {
             endpoint: join.endpoint.clone(),
             webrtc: join.webrtc.clone(),
         },
@@ -221,9 +221,9 @@ async fn join_share_mesh(join: MeshJoin<'_>) -> Option<ShareMesh> {
         // and a mesh advertising paths its endpoint does not have is a mesh
         // whose peers dial nowhere.
         transports: if join.webrtc_only {
-            agent_habilis_mesh::net::TransportOpts::webrtc_only()
+            fofoca::net::TransportOpts::webrtc_only()
         } else {
-            agent_habilis_mesh::net::TransportOpts::default()
+            fofoca::net::TransportOpts::default()
         },
     })
     .await;
