@@ -52,18 +52,30 @@ function pad2(n: number): string {
 }
 
 /**
- * Folder-name candidates for local `date`, in collision-retry order.
- * Matches the CLI: `agent-share-YYYY-MM-DDTHHMM`, then with seconds, then `-N`.
+ * `agent-share-YYYY-MM-DDTHHMM` for local `date`, optionally with seconds.
+ *
+ * The shared name stem: the CLI's mount folder
+ * (`crates/agent-share/src/mount/consume.rs`), this app's mount folder, and the
+ * download-all zip all wear it, so a share's artifacts sort together wherever
+ * they land. Local time, like the CLI's `chrono::Local`.
  */
-export function mountFolderCandidates(date: Date = new Date()): string[] {
+export function shareStamp(date: Date = new Date(), seconds = false): string {
   const y = date.getFullYear()
   const mo = pad2(date.getMonth() + 1)
   const d = pad2(date.getDate())
   const h = pad2(date.getHours())
   const mi = pad2(date.getMinutes())
-  const s = pad2(date.getSeconds())
-  const minute = `agent-share-${y}-${mo}-${d}T${h}${mi}`
-  const second = `agent-share-${y}-${mo}-${d}T${h}${mi}${s}`
+  const s = seconds ? pad2(date.getSeconds()) : ''
+  return `agent-share-${y}-${mo}-${d}T${h}${mi}${s}`
+}
+
+/**
+ * Folder-name candidates for local `date`, in collision-retry order.
+ * Matches the CLI: `agent-share-YYYY-MM-DDTHHMM`, then with seconds, then `-N`.
+ */
+export function mountFolderCandidates(date: Date = new Date()): string[] {
+  const minute = shareStamp(date)
+  const second = shareStamp(date, true)
   const names = [minute, second]
   for (let n = 2; n <= 99; n++) names.push(`${second}-${n}`)
   return names

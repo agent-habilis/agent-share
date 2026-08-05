@@ -36,6 +36,7 @@ import {
   emptySyncedState,
   MountError,
   pickMountRoot,
+  shareStamp,
   syncMount,
   type MountSession,
   type SyncedState,
@@ -1009,7 +1010,10 @@ const Session = component<{
   async function downloadAll(): Promise<void> {
     const built = tree.peek()
     if (!built) return
-    await downloadFiles(filesUnder(built.root), 'share')
+    // Named for when it was taken, in the same shape as the mount folder the
+    // CLI and this app both create — so a share's artifacts sort together, and
+    // two downloads are told apart without opening either.
+    await downloadFiles(filesUnder(built.root), shareStamp())
   }
 
   async function mount(): Promise<void> {
