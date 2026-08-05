@@ -7,8 +7,8 @@
     "dev": "bun --hot dev.ts",
     "build": "bun build.ts",
     "preview": "bun preview.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p vendor/visage-dom && tsc --noEmit -p vendor/visage-style && tsc --noEmit -p vendor/visage-router && tsc --noEmit -p vendor/moonspace-ui",
-    "test": "bun test"
+    "typecheck": "bun scripts/gen-wasm-path.ts && tsc --noEmit -p tsconfig.json && tsc --noEmit -p vendor/visage-dom && tsc --noEmit -p vendor/visage-style && tsc --noEmit -p vendor/visage-router && tsc --noEmit -p vendor/moonspace-ui",
+    "test": "bun scripts/gen-wasm-path.ts && bun test"
   },
   "dependencies": {
     "client-zip": "^2.4.5",

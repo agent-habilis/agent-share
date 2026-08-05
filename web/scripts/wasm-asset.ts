@@ -22,6 +22,16 @@
  * The old path is *not* kept as an alias. A stale reference now 404s, which is
  * loud and immediate, rather than quietly resolving to whatever was there
  * before. Given the failure this replaces, a missing file is the better bug.
+ *
+ * # Why the URL has a `/wasm/` prefix
+ *
+ * "404s" is a promise the server has to be able to keep, and at the URL root it
+ * could not. The app's SPA catch-all matches every unclaimed path, so a request
+ * for a hash the server does not have was answered with `index.html` — which
+ * the browser dutifully fed to `WebAssembly.instantiate`, producing `expected
+ * magic word 00 61 73 6d, found 3c 21 64 6f` (`3c 21 64 6f` is `<!do`). The
+ * prefix gives the binary a route of its own that outranks the catch-all, so a
+ * miss can answer for itself.
  */
 
 /** The `web/` directory, so paths below read as they do from a shell there. */
@@ -34,6 +44,9 @@ export const WASM_SOURCE =
 /** Module holding the generated path, imported by `src/wasm.ts`. */
 const GENERATED = new URL('src/wasm-path.ts', WEB_ROOT)
 
+/** URL directory the binary is served from. See the header. */
+export const WASM_DIR = '/wasm'
+
 export interface WasmAsset {
   bytes: Uint8Array
   /** Short content hash. */
@@ -45,18 +58,23 @@ export interface WasmAsset {
 }
 
 /**
- * Read the wasm and derive its content-addressed name.
+ * Read the wasm and derive its content-addressed name, or `null` if it is not
+ * readable right now.
  *
- * Exits rather than throwing when the binary is missing: every caller is a
- * top-level script, and the actionable part is the instruction, not a stack.
+ * The nullable case is not just missing-file pedantry: `cargo task web-wasm`
+ * replaces this binary while the dev server is watching it, and for part of
+ * that window the path does not resolve. A watcher built on {@link wasmAsset}
+ * would take the whole server down on every rebuild.
  */
-export async function wasmAsset(): Promise<WasmAsset> {
+export async function tryWasmAsset(): Promise<WasmAsset | null> {
   const file = Bun.file(new URL(WASM_SOURCE, WEB_ROOT))
-  if (!(await file.exists())) {
-    console.error('wasm missing — run `cargo task web-wasm` first')
-    process.exit(1)
+  let bytes: Uint8Array
+  try {
+    if (!(await file.exists())) return null
+    bytes = new Uint8Array(await file.arrayBuffer())
+  } catch {
+    return null
   }
-  const bytes = new Uint8Array(await file.arrayBuffer())
   // SHA-256 truncated to 12 hex. Not a security boundary — the binary is
   // served from our own origin — just enough that two different builds cannot
   // collide onto one URL.
@@ -65,7 +83,39 @@ export async function wasmAsset(): Promise<WasmAsset> {
     .digest('hex')
     .slice(0, 12)
   const name = `agent_share_wasm_client_bg.${hash}.wasm`
-  return { bytes, hash, name, path: `/${name}` }
+  return { bytes, hash, name, path: `${WASM_DIR}/${name}` }
+}
+
+/**
+ * Read the wasm and derive its content-addressed name.
+ *
+ * Exits rather than throwing when the binary is missing: every caller is a
+ * top-level script, and the actionable part is the instruction, not a stack.
+ */
+export async function wasmAsset(): Promise<WasmAsset> {
+  const asset = await tryWasmAsset()
+  if (!asset) {
+    console.error('wasm missing — run `cargo task web-wasm` first')
+    process.exit(1)
+  }
+  return asset
+}
+
+/**
+ * The binary as an HTTP response.
+ *
+ * Shared so the headers are stated once. The cache directive is only safe
+ * because of the hash in the URL, and that pairing is easier to keep true in
+ * one place than in every server that serves the file.
+ */
+export function wasmResponse(asset: WasmAsset): Response {
+  return new Response(asset.bytes, {
+    headers: {
+      'content-type': 'application/wasm',
+      // Safe to cache hard: the URL changes when the bytes do.
+      'cache-control': 'public, max-age=31536000, immutable',
+    },
+  })
 }
 
 /**

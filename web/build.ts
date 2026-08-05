@@ -31,9 +31,12 @@ if (!result.success) {
   process.exit(1)
 }
 
-await Bun.write(`./dist/${asset.name}`, asset.bytes)
+// `asset.path` rather than `asset.name`: the URL carries a `/wasm/` directory,
+// and `dist/` has to mirror it or a static host answers the app's fetch with
+// whatever its own not-found rule says — for an SPA, `index.html`.
+await Bun.write(`./dist${asset.path}`, asset.bytes)
 
 for (const output of result.outputs) {
   console.log(`  ${output.path}`)
 }
-console.log(`  dist/${asset.name}`)
+console.log(`  dist${asset.path}`)

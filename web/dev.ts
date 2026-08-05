@@ -3,12 +3,24 @@
  * content-addressed HTTP path. The crate's glue defaults to `file://` for that
  * binary; callers pass the hashed path instead (see `src/wasm.ts`).
  *
- * The hash is what stops a rebuilt binary being shadowed by a cached one —
- * Bun's route table captures the file at server start, so a fixed path would
- * keep serving the copy this process began with. See `scripts/wasm-asset.ts`.
+ * The hash is what stops a rebuilt binary being shadowed by a cached one — see
+ * `scripts/wasm-asset.ts`.
+ *
+ * # The binary is read per request, not captured at start
+ *
+ * Bun's route table would capture a `Bun.file` at server start, and this server
+ * outlives the builds it serves: `cargo task web-wasm` mid-session used to be
+ * invisible to it forever, so it went on answering for a build that no longer
+ * existed. `/wasm/:name` re-reads the current binary instead (cheaply — the
+ * bytes are memoised against the file's `stat`), and the watcher below
+ * regenerates `src/wasm-path.ts` so `--hot` rebundles the app onto the new
+ * hash. A rebuild now heals itself; nobody has to remember to restart.
  *
  * `/*` is the SPA catch-all so `/files/<ticket>` and `/info/<ticket>` hit the
- * app; `/lab` and the wasm path are more specific and win first.
+ * app; `/lab` and `/wasm/:name` are more specific and win first. That
+ * specificity is the point of the `/wasm/` prefix — at the URL root the
+ * catch-all answered a stale hash with `index.html`, which reached the browser
+ * as a wasm "expected magic word" error naming the wrong problem entirely.
  *
  * `PORT` picks the port, so two of these can run at once — one per checkout, or
  * one beside `bun run preview`. Bun reads `PORT` on its own when `port` is
@@ -16,12 +28,72 @@
  * discoverable from here.
  */
 
+import { watch } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { basename, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import index from './index.html'
 import lab from './lab/index.html'
-import { wasmAsset, writeWasmPath } from './scripts/wasm-asset.ts'
+import {
+  tryWasmAsset,
+  wasmResponse,
+  writeWasmPath,
+  WASM_SOURCE,
+  type WasmAsset,
+} from './scripts/wasm-asset.ts'
 
-const asset = await wasmAsset()
-await writeWasmPath(asset)
+const WASM_FILE = fileURLToPath(new URL(WASM_SOURCE, import.meta.url))
+const WASM_NAME = basename(WASM_FILE)
+
+/**
+ * The binary as it is on disk *now*, re-hashed only when the file changes.
+ *
+ * Keyed on `mtimeMs:size` so the steady state is one `stat` per page load
+ * rather than a 7 MB read and SHA-256, while a rebuild still invalidates on the
+ * very next request.
+ */
+let cached: { key: string; asset: WasmAsset } | null = null
+
+async function currentAsset(): Promise<WasmAsset | null> {
+  let key: string
+  try {
+    const info = await stat(WASM_FILE)
+    key = `${info.mtimeMs}:${info.size}`
+  } catch {
+    cached = null
+    return null
+  }
+  if (cached?.key === key) return cached.asset
+  const asset = await tryWasmAsset()
+  cached = asset ? { key, asset } : null
+  return asset
+}
+
+/**
+ * Point `src/wasm.ts` at the current build, so `--hot` rebundles onto it.
+ * Returns the build it published, if there was one.
+ */
+async function writeCurrentPath(): Promise<WasmAsset | null> {
+  const asset = await currentAsset()
+  // `writeWasmPath` is content-guarded, so this is a no-op unless the hash
+  // actually moved — which matters, because writing into `src/` is what `--hot`
+  // watches, and an unconditional write would rebuild in a loop.
+  if (asset) await writeWasmPath(asset)
+  return asset
+}
+
+// Before binding: `tasks/src/bench/browser.rs` reads the generated path back
+// out the moment this server reports a URL, and `src/wasm.ts` imports it.
+// Going through `writeCurrentPath` rather than a bare read leaves the cache
+// warm, so the first page load does not hash 7 MB a second time.
+const initial = await writeCurrentPath()
+if (!initial) {
+  // The same bail `wasmAsset()` makes, taken here because this is the one
+  // caller that has already looked and wants the answer memoised.
+  console.error('wasm missing — run `cargo task web-wasm` first')
+  process.exit(1)
+}
 
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 3000),
@@ -35,13 +107,19 @@ const server = Bun.serve({
       'this build serves the wasm under a content-addressed name; rebuild the app bundle',
       { status: 404 },
     ),
-    [asset.path]: new Response(asset.bytes, {
-      headers: {
-        'content-type': 'application/wasm',
-        // Safe to cache hard: the URL changes when the bytes do.
-        'cache-control': 'public, max-age=31536000, immutable',
-      },
-    }),
+    '/wasm/:name': async (req) => {
+      const current = await currentAsset()
+      if (current && req.params.name === current.name) return wasmResponse(current)
+      // Never fall through to the SPA shell here. A page asking for a hash we
+      // do not have is stale, and saying so is worth more than 7 MB of the
+      // wrong answer or 750 bytes of HTML.
+      return new Response(
+        `no such wasm build: ${req.params.name}\n` +
+          `current: ${current?.name ?? 'none — run `cargo task web-wasm`'}\n` +
+          `this page predates the current build; hard-refresh it\n`,
+        { status: 404, headers: { 'content-type': 'text/plain;charset=utf-8' } },
+      )
+    },
     '/*': index,
   },
   development: {
@@ -50,5 +128,29 @@ const server = Bun.serve({
   },
 })
 
+// `cargo task web-wasm` replaces the binary, so watch its directory rather than
+// the file — a watch on the path itself follows the old inode into the bin.
+// Debounced because wasm-bindgen writes in stages, and hashing a half-written
+// file would publish a path for a build that never existed.
+try {
+  let pending: ReturnType<typeof setTimeout> | null = null
+  watch(dirname(WASM_FILE), (_event, filename) => {
+    // `null` filename (some platforms report only that *something* changed) is
+    // taken as a maybe and re-checked; the sibling `.js` glue is not.
+    if (filename && filename !== WASM_NAME) return
+    if (pending) clearTimeout(pending)
+    pending = setTimeout(() => {
+      pending = null
+      void writeCurrentPath().then((asset) => {
+        console.log(asset ? `  wasm ${asset.name}` : '  wasm missing')
+      })
+    }, 150)
+  }).unref()
+} catch {
+  // No watch (missing directory, platform limit): the per-request read above
+  // still serves the right bytes, a restart still picks up the new path.
+  console.warn('  wasm rebuilds will not hot-reload — could not watch the build directory')
+}
+
 console.log(`dev ${server.url}`)
-console.log(`  wasm ${asset.name}`)
+console.log(`  wasm ${initial.name}`)
