@@ -21,7 +21,7 @@ import type { Child, Ctx } from 'visage-dom'
 import { ColumnView } from './ColumnView.tsx'
 import { seedState, shareSeedSummary } from './seeding.ts'
 import { TechInfo } from './TechInfo.tsx'
-import { TransferStatus } from './TransferStatus.tsx'
+import { ReconnectingStatus, TransferStatus } from './TransferStatus.tsx'
 import type { LinkSample, TransferSnapshot } from './transferStats.ts'
 import {
   pickSaveTarget,
@@ -1091,18 +1091,25 @@ const Session = component<{
         : mounted
           ? 'mounted'
           : 'ready'
-    // `reconnecting` outranks the transfer label: the transfer is what is
-    // *waiting*, and naming it here would say "downloading" while nothing is
-    // moving. `status` alone was not enough — it renders only in the Info
-    // pane, so a revival on the file browser had no visible sign at all beyond
-    // a briefly disabled button.
+    /*
+      Only while a transfer runs, because that is the one case the centre slot
+      cannot speak: it is `null` there so the `ProgressBar` keeps the row, and
+      the actions have collapsed to Cancel, so nothing else on screen would say
+      a word. (`status` is no help — it renders only in the Info pane.) Off the
+      transfer path the centre carries a spinner saying exactly this, and having
+      the crumb repeat it puts "reconnecting" twice in one row.
+
+      It outranks the transfer label rather than sitting beside it: the transfer
+      is what is *waiting*, and naming it here would say "downloading" while
+      nothing is moving.
+    */
     const crumb = showingInfo
       ? 'info'
-      : redialling
-        ? 'reconnecting'
-        : active
-          ? transferLabel(active.kind)
-          : 'files'
+      : active
+        ? redialling
+          ? 'reconnecting'
+          : transferLabel(active.kind)
+        : 'files'
     const infoButton = (
       <Button variant="ghost" onclick={openInfo}>
         Info
@@ -1117,7 +1124,7 @@ const Session = component<{
     const syncing = seeding.value
     const syncButton = (
       <Button
-        variant="secondary"
+        variant="ghost"
         onclick={() => void syncSeed(undefined, 'share')}
         disabled={syncing !== null || summary.state === 'full'}
       >
@@ -1223,9 +1230,19 @@ const Session = component<{
             Dropped while a transfer runs: that branch already gives the whole
             row to a `ProgressBar`, which answers "what is moving" better than a
             rate does, and two answers competing for one row is how the row stops
-            being one row.
+            being one row. That holds while re-dialling too — hence `active`
+            first — and the breadcrumb covers that case instead.
+
+            Otherwise a revival takes the slot from the readout rather than
+            sharing it. The four numbers are sampled off the connection that just
+            died, so leaving them up draws a page that looks perfectly healthy
+            and cannot move a byte.
           */
-          active ? null : <TransferStatus sample={sample} />
+          active ? null : redialling ? (
+            <ReconnectingStatus />
+          ) : (
+            <TransferStatus sample={sample} />
+          )
         }
         trailing={trailing}
         belowBar={belowBar}

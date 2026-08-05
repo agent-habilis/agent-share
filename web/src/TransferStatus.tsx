@@ -1,11 +1,11 @@
 /**
- * The transfer readout in the middle of the top bar.
+ * The middle of the top bar, in both the states it has.
  *
- * `↓ rate · ↑ rate · ⇅ ratio · ⧉ connected/known`, refreshed once a second from
- * the single sampler `Session` owns. It takes the sample as a *signal* and reads
- * it inside its own render closure on purpose: if the session's render read it
- * instead, the file list would repaint every second along with these four
- * numbers.
+ * `TransferStatus` is the readout — `↓ rate · ↑ rate · ⇅ ratio · ⧉
+ * connected/known`, refreshed once a second from the single sampler `Session`
+ * owns. It takes the sample as a *signal* and reads it inside its own render
+ * closure on purpose: if the session's render read it instead, the file list
+ * would repaint every second along with these four numbers.
  *
  * Every field is exactly as wide as its formatter's output, and every gap is
  * one cell, so the separators sit centred and nothing moves as the numbers
@@ -13,9 +13,14 @@
  *
  * The numbers are wire bytes on the mount connection, from the QUIC state
  * machine — see `transferStats.ts` for what that includes and excludes.
+ *
+ * `ReconnectingStatus` is what stands there instead while the session is
+ * re-dialling. The two live in one file because they are one slot: whatever
+ * occupies it must be exactly `oneRow` tall, and keeping both here is what
+ * keeps that invariant in one place.
  */
 
-import { Text, oneRow } from 'moonspace-ui'
+import { Spinner, Text, oneRow } from 'moonspace-ui'
 import { component } from 'visage-dom'
 import type { ReadonlySignal } from 'visage-dom'
 import { Style, css, raw } from 'visage-style'
@@ -70,12 +75,19 @@ function Field({
 }: {
   glyph: string
   /**
-   * Cells the glyph actually occupies.
+   * Cells reserved for the glyph.
    *
    * Not always one. `⧉` (U+29C9) is absent from the monospace font in use and
    * comes from a fallback that draws it at ~1.33 cells — measured, not assumed.
    * The box would then clip its own value, so it gets the extra cell here
    * rather than everyone paying for the widest possible glyph.
+   *
+   * Reserved, and then *centred* in what it reserved. Left to sit at the start
+   * of its slot the unused third of a cell collects at the far end of the row
+   * instead, and since that end is the row's last ink it drags the whole
+   * readout 3px off the centre the grid works to put it on — measured at both
+   * 1440px and 1920px, where the offset was identical and therefore structural
+   * rather than a rounding artefact.
    */
   glyphCells?: number
   /** Spoken form, since the glyph alone says nothing to a screen reader. */
@@ -98,9 +110,12 @@ function Field({
         whiteSpace: 'pre',
       }}
     >
-      <Text color="fgSubtle" aria-hidden="true">
-        {glyph}
-      </Text>
+      <span
+        aria-hidden="true"
+        style={{ flex: 'none', width: `${glyphCells}ch`, textAlign: 'center' }}
+      >
+        <Text color="fgSubtle">{glyph}</Text>
+      </span>
       <Text color="fgMuted" aria-label={`${label} ${value.trim()}`}>
         {fit(value, cells)}
       </Text>
@@ -273,3 +288,48 @@ export const TransferStatus = component<TransferStatusProps>(function* (props) {
     )
   }
 })
+
+/**
+ * No media query, unlike `READOUT`.
+ *
+ * The readout withdraws below 1200px because it wants ~62 cells and there is
+ * not room for it, the brand and the actions at once. This wants ~15 and is the
+ * more important thing to say, so it stays at every width; the grid's
+ * `minmax(0, auto)` middle track and its `overflow: hidden` wrapper handle the
+ * extreme case on their own.
+ *
+ * No fixed width either. `Field` works hard for one because its value changes
+ * every second; this string never changes, so the invariant is free.
+ */
+const RECONNECTING = css({
+  ...oneRow,
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: raw('1ch'),
+  whiteSpace: 'nowrap',
+})
+
+/**
+ * The centre slot while the session is re-dialling.
+ *
+ * It stands in for the readout rather than joining it. The four numbers are
+ * sampled off the connection that just died, so leaving them up shows a healthy
+ * page that cannot move a byte — which is the exact shape of the bug the
+ * revival loop exists to fix, arriving as a rendering choice.
+ *
+ * The word is `aria-hidden` and the spinner carries it instead: `Spinner`
+ * already renders a `role="status"` region with its label inside, so a screen
+ * reader given both hears "reconnecting" twice. Same split as `Field`, where
+ * the glyph is hidden and the value is labelled.
+ */
+export function ReconnectingStatus() {
+  return (
+    <span title="Reconnecting — the connection dropped, most often a backgrounded tab hitting the transport's idle timeout. The listing is local, so browsing still works; anything that needs the peer waits until it is back.">
+      {Style(RECONNECTING)}
+      <Spinner label="reconnecting" />
+      <Text color="fgMuted" aria-hidden="true">
+        reconnecting
+      </Text>
+    </span>
+  )
+}

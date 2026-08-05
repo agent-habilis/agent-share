@@ -23,8 +23,14 @@ import { humanBytes, type DirNode, type Node } from './tree.ts'
 
 const DEFAULT_WIDTH = 28
 const MIN_WIDTH = 12
-/** Trailing chrome inside a row: chevron + nbsp. */
+/** Trailing chrome inside a row: the seed dot slot + the chevron slot. */
 const ROW_CHROME = 2
+/**
+ * One trailing cell. Fixed width so the column holds whether or not the row
+ * fills it; centred so a glyph wider than a cell overflows either side and its
+ * centre, which is what the eye tracks down the column, stays put.
+ */
+const SLOT = { flex: 'none', width: '1ch', textAlign: 'center' } as const
 /**
  * Darker than the raised surface so rules stay quiet. Semantic `border` reads
  * too bright against `bg`.
@@ -384,20 +390,29 @@ function Row({
         </Text>
       </div>
       {/*
-        One character wide whatever the state, so the name column never
-        reflows as a sync lands. A hollow mark for partial rather than a
-        second colour: the difference that matters is held or not, and a
-        folder mid-sync should not read as an error.
+        A fixed one-character slot, not a bare glyph: the geometric marks are
+        outside the monospace face's core and their advance is not guaranteed,
+        so the width is pinned here and the glyph centred in it. The dot then
+        holds its place as a sync lands, and the name column never reflows. A
+        hollow mark for partial rather than a second colour: the difference
+        that matters is held or not, and a folder mid-sync should not read as
+        an error.
       */}
-      <Text
-        color={state === 'full' ? 'accent' : 'fgSubtle'}
-        title={seedLabel(state, node, held)}
-      >
-        {state === 'full' ? '\u25cf' : state === 'partial' ? '\u25d0' : '\u00b7'}
-      </Text>
-      {node.kind === 'dir' ? (
-        <Text color={active ? 'fg' : 'fgSubtle'}>{glyphs.chevron.right}</Text>
-      ) : null}
+      <div style={SLOT}>
+        <Text
+          color={state === 'full' ? 'accent' : 'fgSubtle'}
+          title={seedLabel(state, node, held)}
+        >
+          {state === 'full' ? '\u25cf' : state === 'partial' ? '\u25d0' : '\u00b7'}
+        </Text>
+      </div>
+      {/* Files keep the empty slot so their dot lands in the same column as a
+          folder's, rather than jogging right into the vacated chevron cell. */}
+      <div style={SLOT}>
+        {node.kind === 'dir' ? (
+          <Text color={active ? 'fg' : 'fgSubtle'}>{glyphs.chevron.right}</Text>
+        ) : null}
+      </div>
     </div>
   )
 }
