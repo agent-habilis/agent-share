@@ -10,7 +10,7 @@
 //! means loopback-only; any lookup means reachable across machines.
 
 use anyhow::{Context, Result, bail};
-use iroh_base::RelayUrl;
+use fofoca_protocol::iroh_base::RelayUrl;
 
 /// The connectivity relay. `Disabled` ⇒ no relay at all
 /// (`RelayMode::Disabled`); `Pinned` ⇒ the lookup-layer pinned default

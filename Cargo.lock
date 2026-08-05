@@ -73,9 +73,6 @@ dependencies = [
  "fofoca",
  "fofoca-blobs",
  "fofoca-iroh-webrtc-transport",
- "iroh",
- "iroh-mainline-address-lookup",
- "iroh-mdns-address-lookup",
  "nfsserve",
  "notify",
  "rand 0.9.4",
@@ -93,7 +90,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bs58",
- "iroh-base",
+ "fofoca-protocol",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2633,7 +2630,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/fofoca-network/iroh-gossip?rev=c779c0661fc9429e86852570be9bdc00fb47fdd9#c779c0661fc9429e86852570be9bdc00fb47fdd9"
+source = "git+https://github.com/fofoca-network/iroh-gossip?rev=46efd641d55ebe3a606e11c6d6800519ea643be5#46efd641d55ebe3a606e11c6d6800519ea643be5"
 dependencies = [
  "blake3",
  "bytes",
@@ -2659,8 +2656,7 @@ dependencies = [
 [[package]]
 name = "iroh-mainline-address-lookup"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1fd07cb8b4af54ccf367fe79516484c544ea3e4b1984cdd2b9aaf3bacaa80f2"
+source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=890b65407594f55105e438154ce4a41a62431c09#890b65407594f55105e438154ce4a41a62431c09"
 dependencies = [
  "derive_more",
  "iroh",
@@ -2677,8 +2673,7 @@ dependencies = [
 [[package]]
 name = "iroh-mdns-address-lookup"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c1f941695731bc3999d8c13d7e94d50e229427da81ac957eec3818264f17559"
+source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=890b65407594f55105e438154ce4a41a62431c09#890b65407594f55105e438154ce4a41a62431c09"
 dependencies = [
  "data-encoding",
  "derive_more",

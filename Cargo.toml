@@ -42,7 +42,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 async-trait = "0.1.89"
 uuid = { version = "1", features = ["v4"] }
-iroh = { version = "1.0.1", features = ["tls-ring", "unstable-net-report", "unstable-custom-transports"] }
+# NOTE: no `iroh` entry, and no `[patch.crates-io]` anywhere in this repo. The
+# iroh family is reached through `fofoca::iroh` / `fofoca_protocol::iroh_base`,
+# and `fofoca` owns which fork and revision that is. Declaring iroh here would
+# resolve the published crate alongside the engine's fork -- two `iroh` crates
+# in one graph, surfacing later as an E0308 on types that look identical. This
+# entry used to say 1.0.1 while every other manifest said 1.0.2; deleting the
+# declaration is the only fix for that class of drift that cannot regress.
 bs58 = "0.5"
 automerge = "0.10"
 sha2 = "0.10"
@@ -107,34 +113,3 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 
-# Pinned by `rev`, not `branch`: a branch ref is mutable, so a force-push on the
-# fork would silently change what the next `cargo update` builds.
-[patch.crates-io]
-# The `fofoca-network` fork, carrying iroh#4294 (mapped_addrs eviction) and a
-# relay-teardown fix. Same repo and rev as `fofoca-network/fofoca` pins, and
-# that is load-bearing rather than tidy: the engine and the WebRTC lane live
-# there and implement iroh's `CustomTransport`, so a rev skew would put two
-# `iroh` crates in one graph and the impls would stop satisfying the trait.
-# Bump both repos together.
-#
-# iroh-base/iroh-dns are patched to the SAME repo+rev as `iroh` because the
-# forked `iroh` pulls its workspace-local copies of them — without these the
-# graph carries two `iroh_base`/`iroh_dns` versions and types clash (E0308).
-#
-# Branch fix/netwatch-fork-pin: the fork names the net-tools fork for its own
-# `netwatch`/`portmapper` deps, so that pin arrives transitively rather than
-# being restated here. Keep this rev in lockstep with `fofoca`'s.
-iroh = { git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74" }
-iroh-base = { git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74" }
-iroh-dns = { git = "https://github.com/fofoca-network/iroh", rev = "a1c166834f5c16fd266089bb8516a5a577b48c74" }
-# No `iroh-gossip` entry: nothing here names it, and `fofoca` takes the fork as
-# a direct git dependency of its own, so we inherit it. A pin belongs in this
-# table only when a crate we do not control names it from crates.io.
-# The former `noq` patch (abandoned_paths bound, #683) is gone: noq v1.0.1
-# bounds the set upstream via ArrayRangeSet (noq#691). The former `netdev`
-# patch (macOS CoreWLAN autorelease leak) merged upstream as netdev#165,
-# shipped in 0.44.0 and pulled as 0.45.x via netwatch 0.19.1.
-#
-# No `netwatch` entry: the `iroh` fork names the net-tools fork directly now
-# (both `netwatch` and `portmapper`, which have to move together), so the
-# RTM_MISS fix arrives transitively rather than being restated here.

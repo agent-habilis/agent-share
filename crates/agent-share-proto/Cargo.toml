@@ -27,7 +27,20 @@ workspace = true
 # `iroh-base` rather than `iroh`: the ticket carries an `EndpointAddr` and the
 # lookup allowlist carries `RelayUrl`s, but nothing here opens a connection.
 # iroh-base is wasm-clean; the full `iroh` crate would drag in the endpoint.
-iroh-base = { version = "1.0.2", default-features = false, features = ["key", "relay"] }
+#
+# Taken through `fofoca-protocol`'s re-export rather than declared directly.
+# The engine needs a forked iroh, and this crate's `EndpointAddr` values flow
+# straight into `agent-share`, which uses the engine — so a published
+# `iroh-base` here would be a *second* one, and the two would stop unifying at
+# that boundary (an E0308 between types with the same name and version). The
+# only alternative is a `[patch.crates-io]` in this workspace root, which cargo
+# never inherits and which every consumer would have to restate by hand.
+#
+# `fofoca-protocol` is the cheap door on purpose: wire vocabulary over
+# `iroh-base` alone — no QUIC, no TLS, no DNS, no tokio — so this crate stays
+# wasm-clean, which CI checks with
+# `cargo check --target wasm32-unknown-unknown -p agent-share-proto`.
+fofoca-protocol = { path = "../../../../fofoca-network/fofoca/crates/fofoca-protocol", default-features = false }
 anyhow = "1"
 sha2 = "0.10"
 bs58 = "0.5"

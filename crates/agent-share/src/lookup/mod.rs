@@ -8,8 +8,8 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use anyhow::{Context, Result};
-use iroh::address_lookup::memory::MemoryLookup;
-use iroh::{
+use fofoca::iroh::address_lookup::memory::MemoryLookup;
+use fofoca::iroh::{
     Endpoint, EndpointAddr, RelayMode, SecretKey,
     endpoint::{PortmapperConfig, presets},
 };

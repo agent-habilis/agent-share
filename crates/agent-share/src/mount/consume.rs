@@ -7,8 +7,8 @@ use agent_share_proto::framing::decode_response_header;
 use agent_share_proto::manifest::ManifestDelta;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use iroh::Endpoint;
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use fofoca::iroh::Endpoint;
+use fofoca::iroh::endpoint::{Connection, RecvStream, SendStream};
 use nfsserve::tcp::{NFSTcp, NFSTcpListener};
 use tokio::sync::Mutex;
 
@@ -73,7 +73,7 @@ pub(crate) async fn attach(
     // binds — the producer does the same, for the same reason.
     let mut key_bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
-    let key = iroh::SecretKey::from_bytes(&key_bytes);
+    let key = fofoca::iroh::SecretKey::from_bytes(&key_bytes);
     let webrtc = WebRtcHandle::new(fofoca_iroh_webrtc_transport::WebRtcTransport::new(
         key.public(),
     ));
@@ -396,7 +396,7 @@ async fn bootstrap_from_seeders(
 
     let mut refusals = Vec::new();
     for candidate in candidates {
-        let Ok(id) = candidate.endpoint.parse::<iroh::EndpointId>() else {
+        let Ok(id) = candidate.endpoint.parse::<fofoca::iroh::EndpointId>() else {
             continue;
         };
         let ticket = MountTicket {
@@ -595,7 +595,7 @@ impl RemoteClient {
     }
 
     #[cfg(test)]
-    pub(super) fn producer_addr(&self) -> iroh::EndpointAddr {
+    pub(super) fn producer_addr(&self) -> fofoca::iroh::EndpointAddr {
         self.ticket.addr.clone()
     }
 

@@ -49,7 +49,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bs58",
- "iroh-base",
+ "fofoca-protocol",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -69,8 +69,6 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
- "iroh",
- "iroh-base",
  "js-sys",
  "send_wrapper",
  "serde",
@@ -2167,7 +2165,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/fofoca-network/iroh-gossip?rev=c779c0661fc9429e86852570be9bdc00fb47fdd9#c779c0661fc9429e86852570be9bdc00fb47fdd9"
+source = "git+https://github.com/fofoca-network/iroh-gossip?rev=46efd641d55ebe3a606e11c6d6800519ea643be5#46efd641d55ebe3a606e11c6d6800519ea643be5"
 dependencies = [
  "blake3",
  "bytes",

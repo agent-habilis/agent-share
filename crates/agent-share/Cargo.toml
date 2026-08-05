@@ -58,14 +58,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 clap = { version = "4", features = ["derive"] }
 anstyle = "1"
 anstream = "0.6"
-# `unstable-custom-transports` gates the CustomTransport/CustomEndpoint/
-# CustomSender traits the WebRTC lane implements. Unstable by iroh's own
-# labelling and expected to stay that way past 1.0.
-iroh = { version = "1.0.2", features = ["tls-ring", "unstable-custom-transports"] }
-# mDNS + mainline-DHT address-lookup providers were extracted from iroh core
-# in the 1.0 line; these companion crates restore the `--mdns` / `--dht` legs.
-iroh-mdns-address-lookup = "0.4"
-iroh-mainline-address-lookup = "0.4"
+# NOTE: no `iroh` and no address-lookup entries. All three are reached through
+# `fofoca` -- `fofoca::iroh`, `fofoca::iroh_mdns_address_lookup`,
+# `fofoca::iroh_mainline_address_lookup` -- because the engine needs a forked
+# iroh and a second declaration here would resolve the published crate beside
+# it. The `unstable-custom-transports` feature the WebRTC lane needs is enabled
+# by fofoca's own iroh entry, so it arrives with the re-export.
 anyhow = "1"
 sha2 = "0.10"
 bs58 = "0.5"
@@ -88,6 +86,12 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # selection regression test needs: reproducing "the warm relay wins the mount
 # dial and is pinned forever" requires a real relay path in the address book,
 # and every other test here runs with `RelayMode::Disabled` precisely to stay
-# off the network. A dev-dependency, so the feature is not unified into the
-# shipped binary (resolver 3 keeps dev-only features out of a plain build).
-iroh = { version = "1.0.2", features = ["tls-ring", "unstable-custom-transports", "test-utils"] }
+# off the network.
+#
+# Enabled through fofoca rather than by naming iroh: this crate declares no iroh
+# of its own, so `fofoca/iroh-test-utils` is how an optional iroh feature is
+# turned on without putting a second iroh in the graph. A dev-dependency, so
+# resolver 3 keeps the feature out of a plain build.
+fofoca = { path = "../../../../fofoca-network/fofoca/crates/fofoca", features = [
+    "iroh-test-utils",
+] }

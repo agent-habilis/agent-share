@@ -379,7 +379,7 @@ pub(crate) struct ShareMesh {
     mesh_id: String,
     /// Held, not used: dropping every clone aborts the accept task, and this
     /// Router is now the only thing accepting the share's own ALPNs.
-    _router: iroh::protocol::Router,
+    _router: fofoca::iroh::protocol::Router,
     live: Arc<AtomicUsize>,
     webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
     node: Option<Node<ShareDriver>>,
@@ -573,7 +573,7 @@ pub(crate) struct JoinOpts<'a> {
     /// ALPNs to serve on the mesh's Router. The producer's two ride here
     /// because iroh permits one accept loop per endpoint; a consumer serves
     /// none and passes an empty vec.
-    pub(crate) protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    pub(crate) protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
     pub(crate) role: Role,
     /// Fingerprint of the manifest this peer is on, when it knows one.
     ///
@@ -890,7 +890,7 @@ mod tests {
 
         let mut key_bytes = [0u8; 32];
         rand::rng().fill_bytes(&mut key_bytes);
-        let key = iroh::SecretKey::from_bytes(&key_bytes);
+        let key = fofoca::iroh::SecretKey::from_bytes(&key_bytes);
         let webrtc = WebRtcHandle::new(WebRtcTransport::new(key.public()));
         let endpoint = crate::lookup::build_endpoint(
             lookups,

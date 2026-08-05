@@ -22,12 +22,12 @@ use std::time::Duration;
 use agent_share_proto::framing::{self, MAX_MANIFEST_BYTES, MOUNT_ALPN, WEBRTC_SIGNAL_ALPN};
 use agent_share_proto::manifest::MountManifest;
 use agent_share_proto::ticket::MountTicket;
+use fofoca::iroh::endpoint::{Connection, presets};
+use fofoca::iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 use fofoca_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, WebRtcTransport, custom_addr,
     offer_with,
 };
-use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 
 /// Kills the child on drop, so a failing assert does not leave a daemon behind.
 struct Serving(Child);
@@ -98,7 +98,7 @@ async fn the_real_cli_serves_over_webrtc() {
     let handle = WebRtcHandle::new(WebRtcTransport::new(local));
     let consumer = Endpoint::builder(presets::Minimal)
         .secret_key(key)
-        .relay_mode(iroh::RelayMode::Disabled)
+        .relay_mode(fofoca::iroh::RelayMode::Disabled)
         .add_custom_transport(handle.transport())
         .bind()
         .await

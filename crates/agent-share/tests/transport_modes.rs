@@ -10,12 +10,12 @@ use std::time::Duration;
 
 use agent_share_proto::framing::{MOUNT_ALPN, SECRET_LEN, WEBRTC_SIGNAL_ALPN};
 use agent_share_proto::manifest::MountManifest;
+use fofoca::iroh::endpoint::presets;
+use fofoca::iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 use fofoca_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, WebRtcTransport, answer_with,
     custom_addr, offer_with,
 };
-use iroh::endpoint::presets;
-use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 
 fn ice() -> IceConfig {
     IceConfig::host_only()
@@ -36,7 +36,7 @@ async fn bind_plain(alpns: Vec<Vec<u8>>) -> Endpoint {
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
     Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&key_bytes))
-        .relay_mode(iroh::RelayMode::Disabled)
+        .relay_mode(fofoca::iroh::RelayMode::Disabled)
         .clear_address_lookup()
         .alpns(alpns)
         .bind()
@@ -51,7 +51,7 @@ async fn bind_webrtc(alpns: Vec<Vec<u8>>) -> (Endpoint, WebRtcHandle) {
     let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(key)
-        .relay_mode(iroh::RelayMode::Disabled)
+        .relay_mode(fofoca::iroh::RelayMode::Disabled)
         .clear_address_lookup()
         .alpns(alpns)
         .add_custom_transport(handle.transport())
@@ -85,7 +85,7 @@ fn spawn_mount_server(
 fn spawn_signal_and_mount_server(
     endpoint: Endpoint,
     webrtc: WebRtcHandle,
-    producer_id: iroh::EndpointId,
+    producer_id: fofoca::iroh::EndpointId,
     secret: [u8; SECRET_LEN],
     tree: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<()> {
@@ -125,7 +125,7 @@ fn spawn_signal_and_mount_server(
 }
 
 async fn fetch_manifest(
-    conn: &iroh::endpoint::Connection,
+    conn: &fofoca::iroh::endpoint::Connection,
     secret: &[u8; SECRET_LEN],
 ) -> MountManifest {
     let (mut send, mut recv) = conn.open_bi().await.expect("open manifest stream");
@@ -146,7 +146,7 @@ async fn fetch_manifest(
 }
 
 async fn read_range(
-    conn: &iroh::endpoint::Connection,
+    conn: &fofoca::iroh::endpoint::Connection,
     secret: &[u8; SECRET_LEN],
     index: u32,
     offset: u64,
@@ -168,7 +168,10 @@ async fn read_range(
     data
 }
 
-async fn assert_hello_readable(conn: &iroh::endpoint::Connection, secret: &[u8; SECRET_LEN]) {
+async fn assert_hello_readable(
+    conn: &fofoca::iroh::endpoint::Connection,
+    secret: &[u8; SECRET_LEN],
+) {
     let listing = fetch_manifest(conn, secret).await;
     assert_eq!(listing.files.len(), 1);
     let hello = listing

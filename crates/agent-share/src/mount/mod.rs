@@ -142,7 +142,11 @@ mod tests {
     /// it. The producer task accepts connections until its endpoint closes.
     async fn producer_and_client(
         root: &std::path::Path,
-    ) -> (iroh::Endpoint, RemoteClient, tokio::task::JoinHandle<()>) {
+    ) -> (
+        fofoca::iroh::Endpoint,
+        RemoteClient,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (manifest, paths) = super::scan::scan(root).expect("scan");
         let tree = Arc::new(super::live::LiveTree::new(
             root.to_path_buf(),
@@ -177,7 +181,11 @@ mod tests {
     async fn producer_with_hashes(
         root: &std::path::Path,
         hashes: Option<Arc<super::hash::HashCache>>,
-    ) -> (iroh::Endpoint, RemoteClient, tokio::task::JoinHandle<()>) {
+    ) -> (
+        fofoca::iroh::Endpoint,
+        RemoteClient,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (manifest, paths) = super::scan::scan(root).expect("scan");
         let tree = Arc::new(super::live::LiveTree::new(
             root.to_path_buf(),
@@ -218,7 +226,11 @@ mod tests {
     async fn producer_under_secret(
         root: &std::path::Path,
         secret: [u8; SECRET_LEN],
-    ) -> (iroh::Endpoint, MountTicket, tokio::task::JoinHandle<()>) {
+    ) -> (
+        fofoca::iroh::Endpoint,
+        MountTicket,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (manifest, paths) = super::scan::scan(root).expect("scan");
         let tree = Arc::new(super::live::LiveTree::new(
             root.to_path_buf(),

@@ -25,8 +25,8 @@ use fofoca_iroh_webrtc_transport::{
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
-use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, SecretKey};
+use fofoca::iroh::endpoint::{Connection, presets};
+use fofoca::iroh::{Endpoint, SecretKey};
 use js_sys::{Array, Reflect, Uint8Array};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
@@ -147,7 +147,7 @@ impl ShareProducer {
 
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
-            .relay_mode(iroh::endpoint::default_relay_mode())
+            .relay_mode(fofoca::iroh::endpoint::default_relay_mode())
             .alpns(vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()])
             .add_custom_transport(handle.transport())
             .path_selector(handle.path_selector())
@@ -162,7 +162,7 @@ impl ShareProducer {
         // ticket exists — so a fast joiner still is not raced. Injecting the
         // endpoint keeps `setup_mesh` cheap: no key to mint, no second bind,
         // and no second relay registration.
-        let protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> = vec![
+        let protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> = vec![
             (
                 MOUNT_ALPN.to_vec(),
                 Box::new(MountHandler::new(Rc::clone(&shared), secret)),
@@ -369,8 +369,8 @@ impl<S> std::fmt::Debug for MountHandler<S> {
     }
 }
 
-impl<S: ServeSource> iroh::protocol::ProtocolHandler for MountHandler<S> {
-    async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
+impl<S: ServeSource> fofoca::iroh::protocol::ProtocolHandler for MountHandler<S> {
+    async fn accept(&self, conn: Connection) -> Result<(), fofoca::iroh::protocol::AcceptError> {
         let source = (*self.source).clone();
         let secret = self.secret;
         wasm_bindgen_futures::spawn_local(async move {
@@ -384,12 +384,12 @@ impl<S: ServeSource> iroh::protocol::ProtocolHandler for MountHandler<S> {
 
 #[derive(Clone)]
 pub(crate) struct SignalHandler {
-    local: iroh::EndpointId,
+    local: fofoca::iroh::EndpointId,
     hub: send_wrapper::SendWrapper<Arc<BrowserHubTransport>>,
 }
 
 impl SignalHandler {
-    pub(crate) fn new(local: iroh::EndpointId, hub: Arc<BrowserHubTransport>) -> Self {
+    pub(crate) fn new(local: fofoca::iroh::EndpointId, hub: Arc<BrowserHubTransport>) -> Self {
         Self {
             local,
             hub: send_wrapper::SendWrapper::new(hub),
@@ -405,8 +405,8 @@ impl std::fmt::Debug for SignalHandler {
     }
 }
 
-impl iroh::protocol::ProtocolHandler for SignalHandler {
-    async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
+impl fofoca::iroh::protocol::ProtocolHandler for SignalHandler {
+    async fn accept(&self, conn: Connection) -> Result<(), fofoca::iroh::protocol::AcceptError> {
         let local = self.local;
         let hub = Arc::clone(&*self.hub);
         wasm_bindgen_futures::spawn_local(async move {
@@ -457,7 +457,7 @@ impl BenchProducer {
 
         let mut builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
-            .relay_mode(iroh::endpoint::default_relay_mode());
+            .relay_mode(fofoca::iroh::endpoint::default_relay_mode());
         builder = if with_webrtc {
             builder
                 .alpns(vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()])
@@ -550,8 +550,8 @@ async fn accept_bench_loop(
 }
 
 async fn accept_bench_one(
-    incoming: iroh::endpoint::Incoming,
-    local: iroh::EndpointId,
+    incoming: fofoca::iroh::endpoint::Incoming,
+    local: fofoca::iroh::EndpointId,
     hub: &BrowserHubTransport,
     secret: [u8; SECRET_LEN],
     with_webrtc: bool,
@@ -582,8 +582,8 @@ async fn serve_bench(conn: Connection, secret: [u8; SECRET_LEN]) -> Result<(), J
 
 async fn serve_bench_stream(
     conn: &Connection,
-    mut send: iroh::endpoint::SendStream,
-    mut recv: iroh::endpoint::RecvStream,
+    mut send: fofoca::iroh::endpoint::SendStream,
+    mut recv: fofoca::iroh::endpoint::RecvStream,
     secret: &[u8; SECRET_LEN],
 ) -> Result<(), JsValue> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
@@ -735,7 +735,7 @@ fn safe_rel_path(path: &str) -> bool {
 }
 async fn serve_signal(
     conn: &Connection,
-    local: iroh::EndpointId,
+    local: fofoca::iroh::EndpointId,
     hub: &BrowserHubTransport,
 ) -> Result<(), JsValue> {
     let remote = conn.remote_id();
@@ -806,8 +806,8 @@ async fn serve_mount<S: ServeSource>(
 
 async fn serve_stream<S: ServeSource>(
     conn: &Connection,
-    mut send: iroh::endpoint::SendStream,
-    mut recv: iroh::endpoint::RecvStream,
+    mut send: fofoca::iroh::endpoint::SendStream,
+    mut recv: fofoca::iroh::endpoint::RecvStream,
     secret: &[u8; SECRET_LEN],
     source: S,
 ) -> Result<(), JsValue> {
@@ -869,7 +869,7 @@ async fn serve_stream<S: ServeSource>(
     Ok(())
 }
 
-async fn write_ok_body(send: &mut iroh::endpoint::SendStream, body: &[u8]) -> Result<(), JsValue> {
+async fn write_ok_body(send: &mut fofoca::iroh::endpoint::SendStream, body: &[u8]) -> Result<(), JsValue> {
     send.write_all(&[ReadStatus::Ok.to_byte()])
         .await
         .map_err(|error| err("write status", &error))?;
@@ -885,7 +885,7 @@ async fn write_ok_body(send: &mut iroh::endpoint::SendStream, body: &[u8]) -> Re
 
 /// Every watch frame: `status(Ok) ‖ len(u32 LE) ‖ frame`, matching native.
 async fn write_watch_frame(
-    send: &mut iroh::endpoint::SendStream,
+    send: &mut fofoca::iroh::endpoint::SendStream,
     frame: &[u8],
 ) -> Result<(), JsValue> {
     write_ok_body(send, frame).await

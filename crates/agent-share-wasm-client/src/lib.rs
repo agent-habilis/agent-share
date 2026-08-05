@@ -45,8 +45,8 @@ use agent_share_proto::lookup::{LookupOpts, RelayChoice};
 use agent_share_proto::manifest::{ManifestDelta, MountManifest};
 use agent_share_proto::mesh_key::share_mesh_key;
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
-use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
+use fofoca::iroh::endpoint::{Connection, presets};
+use fofoca::iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -318,7 +318,7 @@ impl ShareClient {
         // the first sync fills it; the signal handler (WebRTC path only —
         // the relay path has no hub) lets another peer negotiate a data
         // channel to *us* the way we negotiate one to the producer.
-        let mut protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> =
+        let mut protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> =
             vec![(
                 MOUNT_ALPN.to_vec(),
                 Box::new(produce::MountHandler::new(client.seeder.clone(), secret)),
@@ -1564,7 +1564,7 @@ async fn connect_via_seeder(
     // handler now; it replaces the client's fresh one below, keeping serving
     // and advertising on the same handle.
     let seeder = seed::SeederShared::new();
-    let protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> = vec![(
+    let protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> = vec![(
         MOUNT_ALPN.to_vec(),
         Box::new(produce::MountHandler::new(seeder.clone(), secret)),
     )];
@@ -1648,7 +1648,7 @@ async fn connect_via_seeder(
 
     let mut refusals = Vec::new();
     for candidate in candidates {
-        let Ok(id) = candidate.endpoint.parse::<iroh_base::EndpointId>() else {
+        let Ok(id) = candidate.endpoint.parse::<fofoca::protocol::iroh_base::EndpointId>() else {
             continue;
         };
         let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
@@ -1711,7 +1711,7 @@ async fn connect_via_seeder(
 /// Every peer of a share homes on the ladder the ticket names — the same
 /// rungs the mesh rendezvous uses — so the ladder, not any one URL, is the
 /// address half of "dial by endpoint id".
-fn seeder_relays(ticket: &MountTicket) -> Vec<iroh::RelayUrl> {
+fn seeder_relays(ticket: &MountTicket) -> Vec<fofoca::iroh::RelayUrl> {
     use agent_share_proto::lookup::RelayChoice;
     match &ticket.lookups.relay {
         RelayChoice::Disabled => Vec::new(),
@@ -2201,7 +2201,7 @@ fn ensure_reachable_addr(addr: &EndpointAddr) -> Result<(), JsValue> {
 async fn negotiate(
     endpoint: &Endpoint,
     producer: EndpointAddr,
-    local: iroh_base::EndpointId,
+    local: fofoca::protocol::iroh_base::EndpointId,
     hub: &BrowserHubTransport,
 ) -> Result<BrowserSession, JsValue> {
     let producer_id = producer.id;
@@ -2287,7 +2287,7 @@ fn js_stage(context: &str, error: JsValue) -> JsValue {
 }
 
 /// Read the `status(1) ‖ len(u32)` prefix every response carries.
-async fn read_header(recv: &mut iroh::endpoint::RecvStream, cap: u32) -> Result<u32, JsValue> {
+async fn read_header(recv: &mut fofoca::iroh::endpoint::RecvStream, cap: u32) -> Result<u32, JsValue> {
     let mut prefix = [0u8; 5];
     recv.read_exact(&mut prefix)
         .await
@@ -2328,8 +2328,8 @@ fn err(context: &str, error: &impl std::fmt::Display) -> JsValue {
 /// QUIC's keep-alive interval, so the connection goes quiet and expires. The
 /// message says so, because "timed out" alone sends the reader looking at the
 /// network.
-fn stream_open_failed(what: &str, error: &iroh::endpoint::ConnectionError) -> JsValue {
-    if matches!(error, iroh::endpoint::ConnectionError::TimedOut) {
+fn stream_open_failed(what: &str, error: &fofoca::iroh::endpoint::ConnectionError) -> JsValue {
+    if matches!(error, fofoca::iroh::endpoint::ConnectionError::TimedOut) {
         return JsValue::from_str(&format!(
             "{what}: the connection to the producer expired while idle. \
              A backgrounded tab throttles timers below the keep-alive interval, \
@@ -2345,7 +2345,7 @@ fn serde_wasm<T: serde::Serialize>(value: &T) -> Result<JsValue, JsValue> {
 }
 
 /// The `Pinned` ladder, from `agent-habilis-mesh` — see [`relay_mode`].
-fn pinned_ladder() -> Vec<iroh::RelayUrl> {
+fn pinned_ladder() -> Vec<fofoca::iroh::RelayUrl> {
     fofoca::RENDEZVOUS_RELAY_LADDER
         .iter()
         .map(|raw| {

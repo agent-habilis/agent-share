@@ -15,8 +15,8 @@ use agent_share_proto::ticket::{
     TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC,
 };
 use anyhow::{Context, Result, bail};
-use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
-use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr};
+use fofoca::iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
+use fofoca::iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr};
 use rand::RngCore;
 use serde::Serialize;
 

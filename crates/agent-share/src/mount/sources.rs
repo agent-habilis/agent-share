@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use iroh::{Endpoint, EndpointAddr, TransportAddr};
+use fofoca::iroh::{Endpoint, EndpointAddr, TransportAddr};
 
 use agent_share_proto::PeerCard;
 
@@ -143,7 +143,7 @@ impl SourceSet {
     fn peer_client(&self, card: &PeerCard) -> Result<Arc<RemoteClient>> {
         let id = card
             .endpoint
-            .parse::<iroh::EndpointId>()
+            .parse::<fofoca::iroh::EndpointId>()
             .context("parsing a peer card's endpoint id")?;
         let ticket = MountTicket {
             addr: seeder_addr(id, &self.ticket.lookups),
@@ -266,11 +266,11 @@ fn vouches(card: &PeerCard, tree: &str, index: u32, total_slots: usize) -> bool 
 /// ladder (the mesh rendezvous uses the same rungs), and for a loopback share
 /// the empty list leaves resolution to mDNS/DHT discovery on the endpoint.
 pub(super) fn seeder_addr(
-    id: iroh::EndpointId,
+    id: fofoca::iroh::EndpointId,
     lookups: &agent_share_proto::lookup::LookupOpts,
 ) -> EndpointAddr {
     use agent_share_proto::lookup::RelayChoice;
-    let relays: Vec<iroh::RelayUrl> = match &lookups.relay {
+    let relays: Vec<fofoca::iroh::RelayUrl> = match &lookups.relay {
         RelayChoice::Disabled => Vec::new(),
         RelayChoice::Pinned => fofoca::RENDEZVOUS_RELAY_LADDER
             .iter()

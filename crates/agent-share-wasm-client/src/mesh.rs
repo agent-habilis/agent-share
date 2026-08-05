@@ -428,9 +428,9 @@ impl MeshPeer {
     pub(crate) async fn join_share_with(
         secret: &[u8; SECRET_LEN],
         lookups: &agent_share_proto::lookup::LookupOpts,
-        endpoint: iroh::Endpoint,
+        endpoint: fofoca::iroh::Endpoint,
         webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
-        protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+        protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
         card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
         let resolved = resolve_share(secret, lookups)?;
@@ -453,8 +453,8 @@ impl MeshPeer {
     pub(crate) async fn join_share(
         secret: &[u8; SECRET_LEN],
         lookups: &agent_share_proto::lookup::LookupOpts,
-        shared: Option<(iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
-        protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+        shared: Option<(fofoca::iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
+        protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
         card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
         let resolved = resolve_share(secret, lookups)?;
@@ -643,7 +643,7 @@ fn parse_transport(mode: Option<&str>) -> Result<TransportOpts, JsValue> {
 async fn spawn_peer(
     resolved: Resolved,
     transports: TransportOpts,
-    shared: Option<(iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
+    shared: Option<(fofoca::iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
     card: CardParts,
 ) -> Result<MeshPeer, JsValue> {
     let injected = shared.map(|(endpoint, webrtc)| InjectedEndpoint { endpoint, webrtc });
@@ -654,7 +654,7 @@ async fn spawn_peer_inner(
     resolved: Resolved,
     transports: TransportOpts,
     injected: Option<InjectedEndpoint>,
-    protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
     card: CardParts,
 ) -> Result<MeshPeer, JsValue> {
     let Resolved { kind, author, .. } = resolved;

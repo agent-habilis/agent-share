@@ -10,7 +10,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
-use iroh::RelayUrl;
+use fofoca::iroh::RelayUrl;
 
 pub(crate) use agent_share_proto::lookup::{LookupOpts, RelayChoice, read_u16};
 
@@ -255,8 +255,8 @@ mod lookup_tests {
 
     #[test]
     fn valued_relay_preserves_ladder_order() {
-        let rung0: iroh::RelayUrl = "https://a.example".parse().unwrap();
-        let rung1: iroh::RelayUrl = "https://b.example".parse().unwrap();
+        let rung0: fofoca::iroh::RelayUrl = "https://a.example".parse().unwrap();
+        let rung1: fofoca::iroh::RelayUrl = "https://b.example".parse().unwrap();
         let ladder: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
         let opts = resolve_lookups(false, lookups(false, false, RelaySelection::Custom(ladder)));
         assert_eq!(opts.relay, RelayChoice::Custom(vec![rung0, rung1]));

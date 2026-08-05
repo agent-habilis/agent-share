@@ -3,7 +3,7 @@
 //! [`RelayChoice`] to an iroh [`RelayMode`]. The rung-selection/failover
 //! machinery (beacon-only) is not needed by mount.
 
-use iroh::RelayMode;
+use fofoca::iroh::RelayMode;
 
 use crate::protocol::swarm::RelayChoice;
 
@@ -40,7 +40,7 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
 /// two copies of this list that drifted would put two peers on different relays
 /// with nothing to say why they never met. The mesh derived from a share homes
 /// on the same rungs for the same reason.
-fn pinned_ladder() -> Vec<iroh::RelayUrl> {
+fn pinned_ladder() -> Vec<fofoca::iroh::RelayUrl> {
     fofoca::RENDEZVOUS_RELAY_LADDER
         .iter()
         .map(|raw| {

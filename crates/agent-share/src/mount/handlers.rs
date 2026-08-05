@@ -21,10 +21,10 @@
 use std::sync::Arc;
 
 use agent_share_proto::framing::SECRET_LEN;
+use fofoca::iroh::EndpointId;
+use fofoca::iroh::endpoint::Connection;
+use fofoca::iroh::protocol::{AcceptError, ProtocolHandler};
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
-use iroh::EndpointId;
-use iroh::endpoint::Connection;
-use iroh::protocol::{AcceptError, ProtocolHandler};
 
 use super::live::LiveTree;
 

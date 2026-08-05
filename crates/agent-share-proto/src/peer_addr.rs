@@ -9,7 +9,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use iroh_base::{EndpointAddr, EndpointId, RelayUrl};
+use fofoca_protocol::iroh_base::{EndpointAddr, EndpointId, RelayUrl};
 
 /// Serialize an `EndpointAddr` to a JSON value for `PeerInfo` messages.
 pub fn endpoint_addr_to_json(addr: &EndpointAddr) -> serde_json::Value {

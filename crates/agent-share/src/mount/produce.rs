@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use iroh::endpoint::{Connection, RecvStream, SendStream};
-use iroh::{Endpoint, SecretKey};
+use fofoca::iroh::endpoint::{Connection, RecvStream, SendStream};
+use fofoca::iroh::{Endpoint, SecretKey};
 use rand::RngCore;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::broadcast;
@@ -155,7 +155,7 @@ pub(crate) async fn serve(
         }
         Err(error) => {
             tracing::warn!(%error, "share mesh unavailable; serving without peer discovery");
-            let mut builder = iroh::protocol::Router::builder(endpoint.clone());
+            let mut builder = fofoca::iroh::protocol::Router::builder(endpoint.clone());
             for (alpn, handler) in protocols() {
                 builder = builder.accept(alpn, handler);
             }
@@ -226,7 +226,7 @@ fn share_protocols(
     endpoint: &Endpoint,
     webrtc: &WebRtcHandle,
     ice: &IceConfig,
-) -> Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> {
+) -> Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> {
     vec![
         (
             MOUNT_ALPN.to_vec(),

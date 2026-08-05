@@ -1,7 +1,7 @@
 //! The mount ticket — the whole capability to read a share, in one string.
 
 use anyhow::{Context, Result, bail};
-use iroh_base::EndpointAddr;
+use fofoca_protocol::iroh_base::EndpointAddr;
 
 use crate::framing::SECRET_LEN;
 use crate::lookup::LookupOpts;
@@ -134,7 +134,7 @@ mod tests {
     use crate::lookup::LookupOpts;
     use crate::peer_addr::endpoint_addr_to_json;
     use crate::token::{self, TokenType};
-    use iroh_base::{EndpointAddr, SecretKey};
+    use fofoca_protocol::iroh_base::{EndpointAddr, SecretKey};
 
     fn sample() -> MountTicket {
         let id = SecretKey::from_bytes(&[7u8; 32]).public();
