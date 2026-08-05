@@ -32,6 +32,11 @@ const ROW_CHROME = 2
  */
 const SLOT = { flex: 'none', width: '1ch', textAlign: 'center' } as const
 /**
+ * The chevron rides the row's trailing edge, and the gutter it vacated becomes
+ * the gap that keeps it from reading as one compound glyph with the seed dot.
+ */
+const CHEVRON_SLOT = { ...SLOT, marginLeft: '1ch' } as const
+/**
  * Darker than the raised surface so rules stay quiet. Semantic `border` reads
  * too bright against `bg`.
  */
@@ -380,7 +385,7 @@ function Row({
         // Full-bleed highlight; name keeps the left gutter. Chevron sits on the
         // trailing edge like Finder column view.
         paddingLeft: `${padX}ch`,
-        paddingRight: '1ch',
+        paddingRight: 0,
         background: active ? theme.color.bgSelected : 'transparent',
       }}
     >
@@ -408,7 +413,7 @@ function Row({
       </div>
       {/* Files keep the empty slot so their dot lands in the same column as a
           folder's, rather than jogging right into the vacated chevron cell. */}
-      <div style={SLOT}>
+      <div style={CHEVRON_SLOT}>
         {node.kind === 'dir' ? (
           <Text color={active ? 'fg' : 'fgSubtle'}>{glyphs.chevron.right}</Text>
         ) : null}
