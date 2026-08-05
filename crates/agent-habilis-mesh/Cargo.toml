@@ -74,7 +74,13 @@ uuid.workspace = true
 # The multi-hop iroh custom transport: reach a peer with no direct path by
 # relaying its QUIC packets through intermediate peers. Registered on the
 # peer endpoint (the `--multihop` flag).
-iroh-multihop-transport = { path = "../iroh-multihop-transport", optional = true }
+#
+# Lives in the `fofoca-network/fofoca` workspace. It was vendored here until
+# there were three copies of it in circulation; the sibling-checkout path is
+# interim, pending a rev-pinned git dependency. Its manifest holds `iroh` at a
+# `1.0.1` floor so the fork pinned in this repo's `[patch.crates-io]` still
+# applies — do not raise it there without raising the pin here.
+iroh-multihop-transport = { path = "../../../../fofoca-network/fofoca/crates/iroh-multihop-transport", optional = true }
 bs58.workspace = true
 automerge.workspace = true
 sha2.workspace = true
