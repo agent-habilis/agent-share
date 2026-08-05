@@ -1,12 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import {
-  dirSeedState,
-  fileSeedState,
-  missingUnder,
-  seedLabel,
-  shareSeedSummary,
-} from './seeding.ts'
+import { dirSeedState, fileSeedState, missingUnder, seedLabel } from './seeding.ts'
 import type { DirNode, FileNode } from './tree.ts'
 
 function file(name: string, index: number): FileNode {
@@ -46,7 +40,7 @@ describe('dirSeedState', () => {
   })
 
   // Rounding either way misleads: down hides real progress, up claims files
-  // that were never fetched. Neither helps someone decide whether to sync.
+  // that were never fetched. Neither helps someone decide whether to seed.
   test('some files held is its own state', () => {
     expect(dirSeedState(tree, new Set([0, 2]))).toBe('partial')
   })
@@ -75,21 +69,5 @@ describe('seedLabel', () => {
   test('a partial folder counts', () => {
     const tree = dir('docs', [file('a', 0), file('b', 1), file('c', 2)])
     expect(seedLabel('partial', tree, new Set([0, 2]))).toBe('seeding 2 of 3')
-  })
-})
-
-describe('shareSeedSummary', () => {
-  test('counts across the whole tree', () => {
-    const root = dir('', [file('a', 0), dir('d', [file('b', 1), file('c', 2)])])
-    expect(shareSeedSummary(root, new Set([0, 1]))).toEqual({
-      held: 2,
-      total: 3,
-      state: 'partial',
-    })
-  })
-
-  test('a share holding nothing is none', () => {
-    const root = dir('', [file('a', 0)])
-    expect(shareSeedSummary(root, new Set()).state).toBe('none')
   })
 })

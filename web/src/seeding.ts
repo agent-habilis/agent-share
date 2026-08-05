@@ -34,7 +34,7 @@ export function fileSeedState(node: FileNode, held: ReadonlySet<number>): SeedSt
  * `partial` is its own state rather than being rounded to one of the others.
  * Rounding down hides real progress on a large folder; rounding up claims files
  * that were never fetched. Neither is something the user can act on, and the
- * whole point of the indicator is deciding whether to press Sync.
+ * whole point of the indicator is deciding whether to press Seed.
  */
 export function dirSeedState(node: DirNode, held: ReadonlySet<number>): SeedState {
   const files = filesUnder(node)
@@ -74,16 +74,4 @@ export function seedLabel(state: SeedState, node: Node, held: ReadonlySet<number
   if (state === 'full') return `seeding all ${files.length}`
   if (state === 'none') return 'not held'
   return `seeding ${count} of ${files.length}`
-}
-
-/** Progress across the whole share, for the top bar. */
-export function shareSeedSummary(
-  root: DirNode,
-  held: ReadonlySet<number>,
-): { held: number; total: number; state: SeedState } {
-  const files = filesUnder(root)
-  const count = files.filter((file) => held.has(file.index)).length
-  const state: SeedState =
-    count === 0 ? 'none' : count === files.length ? 'full' : 'partial'
-  return { held: count, total: files.length, state }
 }

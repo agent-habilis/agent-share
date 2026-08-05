@@ -19,7 +19,7 @@ import { component, computed, interval, signal } from 'visage-dom'
 import type { Child, Ctx } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
-import { seedState, shareSeedSummary } from './seeding.ts'
+import { seedState } from './seeding.ts'
 import { TechInfo } from './TechInfo.tsx'
 import { ReconnectingStatus, TransferStatus } from './TransferStatus.tsx'
 import type { LinkSample, TransferSnapshot } from './transferStats.ts'
@@ -273,9 +273,10 @@ function SessionChrome({
 
           Centring the status in the *slack* between the two ends ties its
           position to their widths, and both ends change width on their own
-          schedule — the Sync button alone relabels through `Sync` /
-          `Syncing share…` / `Seeding 6`. Measured, that dragged the whole
-          readout 23px sideways mid-transfer, which is precisely the jitter the
+          schedule — the trailing end swaps its whole button row for a progress
+          bar and `Cancel` mid-transfer, and relabels `Seed` / `Seeding` and
+          `Mount` / `Unmount` besides. Measured, that dragged the whole readout
+          23px sideways mid-transfer, which is precisely the jitter the
           readout's own fixed-width fields exist to prevent, arriving one level
           up.
 
@@ -602,8 +603,8 @@ const Session = component<{
    * would drift from it on every reload.
    */
   const held = signal<ReadonlySet<number>>(new Set())
-  /** In-flight sync, so the button can say what it is doing. */
-  const seeding = signal<{ label: string } | null>(null)
+  /** Whether a seed is in flight, so the button can say it is busy. */
+  const seeding = signal(false)
   const seedError = signal<string | null>(null)
   /**
    * The latest transfer reading, from the one sampler below.
@@ -964,15 +965,15 @@ const Session = component<{
    * share. Already-held files are skipped by the client, so pressing this
    * twice is cheap rather than a re-download.
    */
-  async function syncSeed(only: string[] | undefined, label: string): Promise<void> {
+  async function seedShare(only?: string[]): Promise<void> {
     if (seeding.peek()) return
-    // Re-dial first, for the same reason `downloadFiles` does: sync pulls the
-    // bytes over the mount connection, so a tab that was backgrounded long
+    // Re-dial first, for the same reason `downloadFiles` does: seeding pulls
+    // the bytes over the mount connection, so a tab that was backgrounded long
     // enough to lose it would fail here and blame storage.
     await ensureLive()
     const current = state.peek()
     if (current.phase !== 'ready') return
-    seeding.value = { label }
+    seeding.value = true
     seedError.value = null
     try {
       await current.client.sync(only)
@@ -980,21 +981,21 @@ const Session = component<{
     } catch (error) {
       // Storage can be refused outright — private mode, or a full quota — and
       // that must cost seeding rather than the share. Surfaced rather than
-      // logged: a Sync button that silently does nothing is worse than one
+      // logged: a Seed button that silently does nothing is worse than one
       // that says why.
       seedError.value = String(error)
       console.warn('[share] sync failed', error)
     } finally {
-      seeding.value = null
+      seeding.value = false
     }
   }
 
-  async function syncSelected(): Promise<void> {
+  async function seedSelected(): Promise<void> {
     const built = tree.peek()
     if (!built) return
     const selected = nodeAtPath(built.root, path.peek())
     if (!selected) return
-    await syncSeed([selected.path], selected.name || 'share')
+    await seedShare([selected.path])
   }
 
   async function downloadSelected(): Promise<void> {
@@ -1116,25 +1117,19 @@ const Session = component<{
       </Button>
     )
     /*
-      Whole-share sync. The label carries the state rather than a separate
+      Whole-share seeding. The label carries the state rather than a separate
       line, because this row is exactly `oneRow` tall and anything taller
       would move every pixel of content under it.
+
+      Pressable exactly when pressing it would do something — so the label is
+      that same predicate rather than a state of its own. Counts stay out of
+      it: once everything is held there is nothing to act on, and the number
+      of files still missing is already in the detail column.
     */
-    const summary = shareSeedSummary(built.root, held.value)
-    const syncing = seeding.value
-    const syncButton = (
-      <Button
-        variant="ghost"
-        onclick={() => void syncSeed(undefined, 'share')}
-        disabled={syncing !== null || summary.state === 'full'}
-      >
-        {syncing
-          ? `Syncing ${syncing.label}…`
-          : summary.state === 'full'
-            ? `Seeding ${summary.total}`
-            : summary.state === 'partial'
-              ? `Sync ${summary.total - summary.held} more`
-              : 'Sync'}
+    const idle = !seeding.value && seedState(built.root, held.value) !== 'full'
+    const seedButton = (
+      <Button variant="ghost" onclick={() => void seedShare()} disabled={!idle}>
+        {idle ? 'Seed' : 'Seeding'}
       </Button>
     )
 
@@ -1169,7 +1164,7 @@ const Session = component<{
     } else {
       trailing = (
         <Stack direction="row" gap={1}>
-          {syncButton}
+          {seedButton}
           {infoButton}
           {mountable ? (
             mountButton()
@@ -1273,8 +1268,8 @@ const Session = component<{
             onDownload={() => void downloadSelected()}
             downloadDisabled={active !== null || redialling}
             held={held.value}
-            onSync={() => void syncSelected()}
-            syncDisabled={seeding.value !== null || redialling}
+            onSeed={() => void seedSelected()}
+            seedDisabled={seeding.value || redialling}
           />
         )}
       </SessionChrome>

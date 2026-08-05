@@ -46,9 +46,9 @@ interface ColumnViewProps {
   downloadDisabled?: boolean
   /** Manifest indices this tab holds in full, and can seed. */
   held: ReadonlySet<number>
-  /** Pull the current selection into local storage. */
-  onSync: () => void
-  syncDisabled?: boolean
+  /** Pull the current selection into local storage, so this tab can seed it. */
+  onSeed: () => void
+  seedDisabled?: boolean
 }
 
 /** The directory chain the current path selects, root first. */
@@ -243,8 +243,8 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
             detailWidth.value = fitDetailWidth(node, 2)
           }}
           held={props.held}
-          onSync={props.onSync}
-          syncDisabled={props.syncDisabled}
+          onSeed={props.onSeed}
+          seedDisabled={props.seedDisabled}
         />
       </div>
     )
@@ -426,8 +426,8 @@ function Detail({
   onResizeStart,
   onFit,
   held,
-  onSync,
-  syncDisabled,
+  onSeed,
+  seedDisabled,
 }: {
   node: Node | undefined
   width: number
@@ -436,8 +436,8 @@ function Detail({
   onResizeStart: (event: MouseEvent) => void
   onFit: (node: Node) => void
   held: ReadonlySet<number>
-  onSync: () => void
-  syncDisabled?: boolean
+  onSeed: () => void
+  seedDisabled?: boolean
 }) {
   if (!node) return null
   const state = seedState(node, held)
@@ -473,14 +473,6 @@ function Detail({
           ) : (
             <Text color="fgMuted">folder</Text>
           )}
-          {/*
-            Stated in words as well as by the row mark. "seeding" rather than
-            "downloaded": holding the bytes is not the interesting part, other
-            people being able to get them from you is.
-          */}
-          <Text color={state === 'full' ? 'accent' : 'fgSubtle'}>
-            {seedLabel(state, node, held)}
-          </Text>
           <div style={{ alignSelf: 'start' }}>
             <Stack direction="row" gap={1}>
               <Button
@@ -494,13 +486,17 @@ function Detail({
                 Disabled once everything here is held: pressing it again would
                 be a no-op the client skips anyway, and a button that does
                 nothing is worse than one that says it has nothing to do.
+
+                Still `Seed` rather than `Seeding` while `seedDisabled` holds —
+                that flag also covers redialling, so it does not mean a seed is
+                running, and only the held state can claim so honestly.
               */}
               <Button
                 variant="secondary"
-                onclick={() => onSync()}
-                disabled={syncDisabled || state === 'full'}
+                onclick={() => onSeed()}
+                disabled={seedDisabled || state === 'full'}
               >
-                {state === 'full' ? 'Synced' : 'Sync'}
+                {state === 'full' ? 'Seeding' : 'Seed'}
               </Button>
             </Stack>
           </div>
