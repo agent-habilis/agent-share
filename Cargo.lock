@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "fofoca-iroh-webrtc-transport"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1672,7 +1672,6 @@ dependencies = [
  "iroh",
  "iroh-base",
  "js-sys",
- "n0-error",
  "n0-watcher",
  "noq-udp",
  "rand 0.9.4",
@@ -1682,7 +1681,6 @@ dependencies = [
  "str0m-aws-lc-rs",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

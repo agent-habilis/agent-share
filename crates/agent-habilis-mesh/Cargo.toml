@@ -124,7 +124,7 @@ tracing-subscriber = { workspace = true, optional = true }
 # RTCPeerConnection in a tab — and `WebRtcHandle` is the same type either way,
 # so the wiring in `lookup` is written once.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-fofoca-iroh-webrtc-transport = { path = "../fofoca-iroh-webrtc-transport", features = ["host"] }
+fofoca-iroh-webrtc-transport = { path = "../../../../fofoca-network/fofoca/crates/fofoca-iroh-webrtc-transport", features = ["native"] }
 iroh.workspace = true
 iroh-gossip.workspace = true
 
@@ -132,7 +132,7 @@ iroh-gossip.workspace = true
 # host-only and drag `tokio/net` -> `mio`, which refuses to build for wasm32.
 # The browser needs the endpoint and the relay transport and nothing else.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-fofoca-iroh-webrtc-transport = { path = "../fofoca-iroh-webrtc-transport", features = ["web"] }
+fofoca-iroh-webrtc-transport = { path = "../../../../fofoca-network/fofoca/crates/fofoca-iroh-webrtc-transport", features = ["web"] }
 iroh = { version = "1.0.1", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
 # Both generations that reach wasm need their browser backend switched on. 0.3+

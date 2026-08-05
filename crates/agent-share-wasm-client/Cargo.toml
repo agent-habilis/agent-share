@@ -29,7 +29,7 @@ agent-share-proto = { path = "../agent-share-proto" }
 # remains is the whole node runtime — `setup_mesh` → `Node::spawn` → the event
 # loop — so a browser peer is the same peer a CLI runs, not a reduced stand-in.
 agent-habilis-mesh = { path = "../agent-habilis-mesh", default-features = false }
-fofoca-iroh-webrtc-transport = { path = "../fofoca-iroh-webrtc-transport", features = ["web"] }
+fofoca-iroh-webrtc-transport = { path = "../../../../fofoca-network/fofoca/crates/fofoca-iroh-webrtc-transport", features = ["web"] }
 iroh = { version = "1.0.1", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 iroh-base = { version = "1.0.1", default-features = false, features = ["key"] }
 anyhow = "1"
@@ -67,7 +67,7 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 # The unit tests run on wasm32, because that is the only target this crate
 # builds for at all: `agent-habilis-mesh` turns on
-# `fofoca-iroh-webrtc-transport/host` off wasm32, and with both backends
+# `fofoca-iroh-webrtc-transport/native` off wasm32, and with both backends
 # enabled `WebRtcHandle` resolves to the host one — so a host build of this
 # crate cannot type-check by construction. Each `mod tests` renames the
 # attribute (see `transport_mode.rs`), so the tests stay plain `#[test]`.

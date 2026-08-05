@@ -38,7 +38,7 @@ regardless of timer drift.
   on a run of `|v|`/`|s|` closure parameters; two more of the same kind turned
   up elsewhere once the first crate compiled far enough to reveal them. The
   wasm client's *host*-target lib tests could never have compiled: off wasm32
-  `agent-habilis-mesh` enables `fofoca-iroh-webrtc-transport/host`, and with
+  `agent-habilis-mesh` enables `fofoca-iroh-webrtc-transport/native`, and with
   both backends on `WebRtcHandle` takes an `Arc<WebRtcTransport>` while the
   client hands it an `Arc<BrowserHubTransport>`. Those 15 tests now run on
   wasm32, where the crate actually builds.

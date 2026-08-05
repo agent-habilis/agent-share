@@ -14,14 +14,6 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
 
     output::status("Running", "tests");
     cmd!(sh, "cargo test --workspace").quiet().run()?;
-    // The host backend is not in the default feature set, so a plain
-    // `--workspace` run never touches it.
-    cmd!(
-        sh,
-        "cargo test -p fofoca-iroh-webrtc-transport --features host"
-    )
-    .quiet()
-    .run()?;
 
     // The web app is half the product, and the gate had never looked at it:
     // 404 `bun test` cases and five `tsc` projects, none of them run here.
@@ -49,31 +41,29 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     }
 
     // The transport id and the signal envelope must have exactly one
-    // definition each. They were duplicated across two crates upstream, kept
-    // in sync by a comment; peers that disagree on either fail to connect with
-    // no useful error, so the de-duplication is worth a test.
-    output::status("Checking", "no duplicated wire constants");
-    for (needle, owner) in [
-        (
-            "0x5752_5443",
-            "crates/fofoca-iroh-webrtc-transport/src/addr.rs",
-        ),
-        (
-            "enum SignalEnvelope",
-            "crates/fofoca-iroh-webrtc-transport/src/signaling.rs",
-        ),
-    ] {
-        // Source files only: a README is free to name the constant in prose,
-        // and this crate's does precisely to explain the rule.
+    // definition each. They were duplicated across two crates once already,
+    // kept in sync by a comment; peers that disagree on either fail to connect
+    // with no useful error, so the de-duplication is worth a test.
+    //
+    // Their one definition now lives in `fofoca-iroh-webrtc-transport`, which
+    // moved to the `fofoca-network/fofoca` workspace — so what this side can
+    // still assert is the half that matters here: neither is redeclared
+    // locally. A copy in this tree is exactly the drift the original check
+    // existed to catch, and it would compile.
+    output::status("Checking", "no redeclared wire constants");
+    for needle in ["0x5752_5443", "enum SignalEnvelope"] {
+        // Source files only: a README is free to name the constant in prose.
         let hits = cmd!(sh, "grep -rl --include=*.rs {needle} crates")
             .quiet()
             .ignore_status()
             .read()?;
         let files: Vec<_> = hits.lines().filter(|line| !line.is_empty()).collect();
-        if files != [owner] {
-            return Err(
-                format!("`{needle}` must be defined only in {owner}, found in {files:?}").into(),
-            );
+        if !files.is_empty() {
+            return Err(format!(
+                "`{needle}` is owned by fofoca-iroh-webrtc-transport and must not be \
+                 redeclared here, found in {files:?}"
+            )
+            .into());
         }
     }
 
@@ -100,7 +90,6 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         match wasm_clang(sh) {
             Some(clang) => {
                 for args in [
-                    "check --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web",
                     // The engine itself must reach the browser, not merely be
                     // avoidable from it. Without this gate the wasm target rots
                     // on the next edit that reaches for a file or a socket.
@@ -128,7 +117,7 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         // the other `cargo test` lines above.
         //
         // Not a preference. Off wasm32 `agent-habilis-mesh` turns on
-        // `fofoca-iroh-webrtc-transport/host`, and with both backends enabled
+        // `fofoca-iroh-webrtc-transport/native`, and with both backends enabled
         // `WebRtcHandle` resolves to the host one while this crate hands it a
         // `BrowserHubTransport` — so a host build cannot type-check by
         // construction. CI ran it on the host anyway and had been red for it.
