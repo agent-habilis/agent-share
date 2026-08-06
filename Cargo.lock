@@ -5093,6 +5093,7 @@ name = "tasks"
 version = "0.1.0"
 dependencies = [
  "agent-share",
+ "agent-share-proto",
  "anstream 0.6.21",
  "anstyle",
  "cargo-zigbuild",

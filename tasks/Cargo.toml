@@ -19,6 +19,11 @@ cargo-zigbuild = "0.23"
 # crate's clap tree (`cli_command`) through `clap_mangen`. This makes the
 # agent-share lib a build dependency of the task runner.
 agent-share = { path = "../crates/agent-share" }
+# The real ticket codec, so the e2e matrix can build a *legacy* ticket (one with
+# no mesh id) by decoding and re-encoding rather than by hand-rolling the format
+# here — a second copy would drift, and the drift would read as a passing test.
+# Already in Cargo.lock: `agent-share` depends on it.
+agent-share-proto = { path = "../crates/agent-share-proto" }
 clap_mangen = "0.2"
 # Cargo-style status output, shared with the binary by `include!`ing its
 # canonical source (`../src/util/output.rs`) — see `src/util/output.rs`.

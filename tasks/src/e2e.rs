@@ -25,7 +25,7 @@ use xshell::{Shell, cmd};
 
 use crate::TaskOutcome;
 use crate::bench::browser::{Browser, evaluate, js_string, run_browse, start_dev_server};
-use crate::bench::proc::{Proc, Res, TempDir, spawn_piped};
+use crate::bench::proc::{Proc, Res, TempDir, run_capture, spawn_piped};
 use crate::bench::reap;
 use crate::util::{self, output};
 
@@ -70,6 +70,14 @@ struct Ctx<'a> {
 struct Cell {
     name: &'static str,
     run: fn(&Ctx<'_>) -> Res<()>,
+    /// What this row needs beyond the suite-wide prerequisites, if anything.
+    ///
+    /// `Some(reason)` skips the row *with that reason* instead of failing it.
+    /// A row whose dependency is genuinely absent has not found a defect, and
+    /// reporting one would train people to ignore the report — but neither may
+    /// it pass, which is the outcome a runner must never invent. Suite-wide
+    /// needs stay in [`missing_prerequisite`]; this is for the one-row ones.
+    precheck: Option<fn() -> Option<String>>,
 }
 
 /// The matrix, in one place so a skipped run still reports every row.
@@ -80,34 +88,112 @@ const CELLS: &[Cell] = &[
     Cell {
         name: "web-list",
         run: cell_list,
+        precheck: None,
     },
     Cell {
         name: "web-download-single",
         run: cell_download_single,
+        precheck: None,
     },
     Cell {
         name: "web-download-zip",
         run: cell_download_zip,
+        precheck: None,
     },
     Cell {
         name: "web-download-dismissed",
         run: cell_download_dismissed,
+        precheck: None,
     },
     Cell {
         name: "web-reconnect",
         run: cell_reconnect,
+        precheck: None,
     },
     Cell {
         name: "web-producer-gone",
         run: cell_producer_gone,
+        precheck: None,
     },
     Cell {
         name: "web-transport-webrtc",
         run: cell_transport_webrtc,
+        precheck: None,
     },
     Cell {
         name: "web-transport-relay",
         run: cell_transport_relay,
+        precheck: None,
+    },
+    Cell {
+        name: "web-password",
+        run: cell_password,
+        precheck: None,
+    },
+    Cell {
+        name: "web-password-no-producer",
+        run: cell_password_no_producer,
+        precheck: None,
+    },
+    Cell {
+        name: "password-native-live-right",
+        run: cell_password_native_live_right,
+        precheck: None,
+    },
+    Cell {
+        name: "password-native-live-wrong",
+        run: cell_password_native_live_wrong,
+        precheck: None,
+    },
+    Cell {
+        name: "password-native-dead-wrong",
+        run: cell_password_native_dead_wrong,
+        precheck: None,
+    },
+    Cell {
+        name: "password-native-dead-right",
+        run: cell_password_native_dead_right,
+        precheck: None,
+    },
+    Cell {
+        name: "password-native-absent",
+        run: cell_password_native_absent,
+        precheck: None,
+    },
+    Cell {
+        name: "password-native-spurious",
+        run: cell_password_native_spurious,
+        precheck: None,
+    },
+    Cell {
+        name: "password-native-mirror-reserve",
+        run: cell_password_native_mirror_reserve,
+        precheck: None,
+    },
+    Cell {
+        name: "password-legacy-ticket",
+        run: cell_password_legacy_ticket,
+        precheck: None,
+    },
+    Cell {
+        name: "password-web-dead-right",
+        run: cell_password_web_dead_right,
+        precheck: None,
+    },
+    Cell {
+        name: "password-web-persist",
+        run: cell_password_web_persist,
+        precheck: None,
+    },
+    Cell {
+        name: "password-node-cli",
+        run: cell_password_node_cli,
+        precheck: Some(node_datachannel_missing),
+    },
+    Cell {
+        name: "password-web-producer",
+        run: cell_password_web_producer,
+        precheck: None,
     },
 ];
 
@@ -143,6 +229,13 @@ pub(crate) fn run(sh: &Shell, cells: &str) -> TaskOutcome {
     let outcomes: Vec<Outcome> = selected
         .iter()
         .map(|cell| {
+            if let Some(reason) = cell.precheck.and_then(|precheck| precheck()) {
+                output::status("Skipping", cell.name);
+                return Outcome {
+                    cell: cell.name,
+                    verdict: Verdict::Skip(reason),
+                };
+            }
             output::status("Running", cell.name);
             Outcome {
                 cell: cell.name,
@@ -171,16 +264,39 @@ fn select(cells: &str) -> Res<Vec<&'static Cell>> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(|name| {
-            CELLS.iter().find(|cell| cell.name == name).ok_or_else(|| {
-                let known: Vec<&str> = CELLS.iter().map(|cell| cell.name).collect();
-                format!(
-                    "no such cell `{name}`; known cells are {}",
-                    known.join(", ")
-                )
-                .into()
-            })
+            // Exact first, so a full name never picks up a longer sibling.
+            if let Some(cell) = CELLS.iter().find(|cell| cell.name == name) {
+                return Ok(vec![cell]);
+            }
+            // Then as a group prefix: `password` selects every `password-*`.
+            // The matrix outgrew a list anyone would type in full, and the
+            // groups are already spelled out in the names.
+            let group: Vec<&'static Cell> = CELLS
+                .iter()
+                .filter(|cell| cell.name.starts_with(name))
+                .collect();
+            if !group.is_empty() {
+                return Ok(group);
+            }
+            let known: Vec<&str> = CELLS.iter().map(|cell| cell.name).collect();
+            Err(format!(
+                "no such cell or group `{name}`; known cells are {}",
+                known.join(", ")
+            )
+            .into())
         })
-        .collect()
+        .collect::<Res<Vec<Vec<&'static Cell>>>>()
+        .map(|groups| {
+            // Flatten, then drop repeats: `--cells password,password-native-absent`
+            // names one cell twice, and running it twice would report it twice.
+            let mut selected: Vec<&'static Cell> = Vec::new();
+            for cell in groups.concat() {
+                if !selected.iter().any(|seen| seen.name == cell.name) {
+                    selected.push(cell);
+                }
+            }
+            selected
+        })
 }
 
 /// The first prerequisite that is not met, if any.
@@ -341,8 +457,22 @@ struct Page {
 impl Page {
     /// Serve `files + 1` fixture files and land a headless window on the share.
     fn open(ctx: &Ctx<'_>, files: usize, query: &str) -> Res<Self> {
+        Self::open_protected(ctx, files, query, None)
+    }
+
+    /// As [`Self::open`], but the share is behind `password`.
+    ///
+    /// The window lands on the same URL — the ticket *is* the address, and its
+    /// being postable without the password is the whole feature — so what
+    /// differs is only what the page does on arrival.
+    fn open_protected(
+        ctx: &Ctx<'_>,
+        files: usize,
+        query: &str,
+        password: Option<&str>,
+    ) -> Res<Self> {
         let (dir, blob_sha256) = make_share(files)?;
-        let (producer, ticket) = serve(ctx.binary, dir.path())?;
+        let (producer, ticket) = serve(ctx.binary, dir.path(), password)?;
 
         let target = format!("{}files/{ticket}{query}", ctx.url);
         run_browse(&["launch", "--headless", ctx.folder, &target])?;
@@ -526,10 +656,571 @@ const INSTRUMENT: &str = r"
 })()
 ";
 
+// ---------------------------------------------------------------------------
+// Driving the native binary
+// ---------------------------------------------------------------------------
+
+/// How long a native consumer may take before the cell calls it hung.
+///
+/// This is the *ceiling*, not the assertion. The rows that care about speed say
+/// so with [`Attempt::faster_than`]; this only has to be generous enough for the
+/// one row that must actually finish a dial — the right password against a dead
+/// producer, which has to exhaust discovery before it can report the share
+/// unreachable.
+const NATIVE_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Discovery deadline handed to the consumer under test.
+///
+/// The binary defaults to 90 s, which is right in the field and far too patient
+/// for a suite that kills producers on purpose. Its own hidden knob, used the
+/// way `consume.rs` documents it.
+const DISCOVERY_SECS: &str = "5";
+
+/// What running the consumer produced.
+struct Attempt {
+    /// Both streams joined: the error text lands on stderr, the progress on
+    /// stdout, and every assertion here is about one string or the other.
+    output: String,
+    /// Whether the process exited 0.
+    ok: bool,
+    /// Wall-clock. The assertion, not a statistic, for the rows about a wrong
+    /// password being ruled on locally.
+    took: Duration,
+}
+
+impl Attempt {
+    /// Fail unless the output contains `needle`.
+    fn says(&self, needle: &str) -> Res<()> {
+        if self.output.contains(needle) {
+            return Ok(());
+        }
+        Err(format!(
+            "expected the output to say `{needle}`, got:\n{}",
+            self.output
+        )
+        .into())
+    }
+
+    /// Fail if the output contains `needle`.
+    fn silent_about(&self, needle: &str) -> Res<()> {
+        if self.output.contains(needle) {
+            return Err(
+                format!("the output should not mention `{needle}`:\n{}", self.output).into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Fail unless it finished inside `limit`.
+    ///
+    /// The point of several rows: a wrong password used to be reported after a
+    /// 96-second hang, and an answer that is merely *correct* is not the fix.
+    fn faster_than(&self, limit: Duration) -> Res<()> {
+        if self.took <= limit {
+            return Ok(());
+        }
+        Err(format!(
+            "took {:.1}s, which is past the {:.0}s this row exists to hold — \
+             a local ruling became a network wait",
+            self.took.as_secs_f64(),
+            limit.as_secs_f64(),
+        )
+        .into())
+    }
+}
+
+/// Run `agent-share mirror <ticket> <dest>` with an optional password.
+///
+/// `mirror` rather than the bare mount form: it needs no NFS, no mountpoint and
+/// no privileges, exits on its own, and exercises the same `redeem_auth` gate
+/// every consumer path goes through.
+fn mirror_attempt(ctx: &Ctx<'_>, ticket: &str, password: Option<&str>) -> Res<(Attempt, TempDir)> {
+    let dest = TempDir::new("e2e-mirror")?;
+    let mut cmd = Command::new(ctx.binary);
+    cmd.arg("mirror").arg(ticket).arg(dest.path());
+    if let Some(password) = password {
+        cmd.args(["--password", password]);
+    }
+    // A dead producer means a long discovery retry, and that wait is precisely
+    // what several rows measure.
+    cmd.env("AGENT_SHARE_DISCOVERY_DEADLINE_SECS", DISCOVERY_SECS);
+    let started = Instant::now();
+    let captured = run_capture(cmd, "e2e mirror", NATIVE_TIMEOUT)?;
+    let took = started.elapsed();
+    Ok((
+        Attempt {
+            output: format!("{}{}", captured.stdout, captured.stderr),
+            ok: captured.status.success(),
+            took,
+        },
+        dest,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// The password matrix
+// ---------------------------------------------------------------------------
+
+/// The password every row in this group uses.
+const PASSWORD: &str = "e2e-hunter2";
+
+/// Stand up a protected share and hand back its ticket.
+fn protected_share(ctx: &Ctx<'_>) -> Res<(Proc, String, TempDir)> {
+    let (dir, _sha) = make_share(1)?;
+    let (producer, ticket) = serve(ctx.binary, dir.path(), Some(PASSWORD))?;
+    Ok((producer, ticket, dir))
+}
+
+/// The ordinary path: the right password, a producer that is up, files arrive.
+///
+/// The row that would catch a check so strict it refuses everyone.
+fn cell_password_native_live_right(ctx: &Ctx<'_>) -> Res<()> {
+    let (mut producer, ticket, _dir) = protected_share(ctx)?;
+    let (attempt, _dest) = mirror_attempt(ctx, &ticket, Some(PASSWORD))?;
+    producer.interrupt();
+    if !attempt.ok {
+        return Err(format!(
+            "the right password did not open the share:\n{}",
+            attempt.output
+        )
+        .into());
+    }
+    attempt.says("Mirrored")
+}
+
+/// A wrong password, with the producer up. Named, and named locally.
+///
+/// The producer *could* answer this one — it would close the connection with
+/// `CLOSE_UNAUTHORIZED` — so the timing is what says the ruling happened here
+/// instead.
+fn cell_password_native_live_wrong(ctx: &Ctx<'_>) -> Res<()> {
+    let (mut producer, ticket, _dir) = protected_share(ctx)?;
+    let (attempt, _dest) = mirror_attempt(ctx, &ticket, Some("not-the-password"))?;
+    producer.interrupt();
+    if attempt.ok {
+        return Err("a wrong password opened the share".into());
+    }
+    attempt.says("does not open this share")?;
+    attempt.faster_than(Duration::from_secs(10))
+}
+
+/// **The regression guard.** A wrong password, named with no producer at all.
+///
+/// This is the row the whole design turns on. A share is built to outlive its
+/// producer, so a check that needs one to answer is a check that usually cannot
+/// run — and before the ticket carried a mesh id this exact case spent 96
+/// seconds on discovery and then blamed the network.
+fn cell_password_native_dead_wrong(ctx: &Ctx<'_>) -> Res<()> {
+    let (mut producer, ticket, _dir) = protected_share(ctx)?;
+    producer.interrupt();
+    let (attempt, _dest) = mirror_attempt(ctx, &ticket, Some("not-the-password"))?;
+    if attempt.ok {
+        return Err("a wrong password opened the share".into());
+    }
+    attempt.says("does not open this share")?;
+    // Argon2id is ~100 ms; everything else here is process startup. Five
+    // seconds is loose enough not to flake and far under any dial.
+    attempt.faster_than(Duration::from_secs(5))
+}
+
+/// The right password against a producer that is gone must blame the *share*.
+///
+/// The false accusation this replaced: the consumer used to report a correct
+/// password as refused whenever it could not reach anybody.
+fn cell_password_native_dead_right(ctx: &Ctx<'_>) -> Res<()> {
+    let (mut producer, ticket, _dir) = protected_share(ctx)?;
+    producer.interrupt();
+    let (attempt, _dest) = mirror_attempt(ctx, &ticket, Some(PASSWORD))?;
+    if attempt.ok {
+        return Err("a share with no producer and no seeder served bytes".into());
+    }
+    attempt.says("could not reach")?;
+    attempt.silent_about("does not open this share")
+}
+
+/// A protected ticket with no password named at all is a usage error.
+///
+/// It must arrive before anything dials: there is nothing to try.
+fn cell_password_native_absent(ctx: &Ctx<'_>) -> Res<()> {
+    let (mut producer, ticket, _dir) = protected_share(ctx)?;
+    producer.interrupt();
+    let (attempt, _dest) = mirror_attempt(ctx, &ticket, None)?;
+    if attempt.ok {
+        return Err("a protected share opened with no password".into());
+    }
+    attempt.says("password-protected")?;
+    attempt.faster_than(Duration::from_secs(5))
+}
+
+/// A password offered to an *unprotected* ticket names the ticket, not the
+/// password.
+///
+/// Almost always the wrong link rather than the wrong password, and silently
+/// ignoring it would open the wrong share and look like success.
+fn cell_password_native_spurious(ctx: &Ctx<'_>) -> Res<()> {
+    let (dir, _sha) = make_share(1)?;
+    let (mut producer, ticket) = serve(ctx.binary, dir.path(), None)?;
+    producer.interrupt();
+    let (attempt, _dest) = mirror_attempt(ctx, &ticket, Some(PASSWORD))?;
+    if attempt.ok {
+        return Err("a password was accepted for an unprotected share".into());
+    }
+    attempt.says("not password-protected")?;
+    attempt.faster_than(Duration::from_secs(5))
+}
+
+/// A mirror of a protected share, re-served without the password.
+///
+/// The documented degradation: `fofoca` gates every mesh derivation behind the
+/// stretched password key, so such a copy cannot join the share's mesh. It must
+/// still *serve* — the token in its sidecar opens the mount protocol — because
+/// serving nothing would be the worse trade. Asserted from the outside: a fresh
+/// consumer with the password reads the tree out of the re-server.
+fn cell_password_native_mirror_reserve(ctx: &Ctx<'_>) -> Res<()> {
+    let (mut origin, ticket, _dir) = protected_share(ctx)?;
+    let (copied, dest) = mirror_attempt(ctx, &ticket, Some(PASSWORD))?;
+    if !copied.ok {
+        return Err(format!("the mirror failed:\n{}", copied.output).into());
+    }
+    origin.interrupt();
+
+    // No `--password`: the copy has only what the mirror left beside it.
+    let (mut reserver, reserved_ticket) = serve(ctx.binary, dest.path(), None)?;
+    let (read_back, _dest2) = mirror_attempt(ctx, &reserved_ticket, Some(PASSWORD))?;
+    reserver.interrupt();
+    if !read_back.ok {
+        return Err(format!(
+            "a re-served protected mirror did not serve its bytes:\n{}",
+            read_back.output
+        )
+        .into());
+    }
+    read_back.says("Mirrored")
+}
+
+/// A protected ticket that carries **no mesh id**, as an older producer minted.
+///
+/// The compatibility row. Such a ticket has no verifier to rule against, so the
+/// local check cannot run and the consumer falls back to what it always did:
+/// present the token and let the producer refuse it. That fallback is the only
+/// path where the origin still has to be alive, which is why this row keeps one
+/// up — and why the wrong-password half asserts nothing about elapsed time.
+///
+/// Built by stripping the id off a real ticket rather than by mocking one, so
+/// the row breaks if the field ever stops being optional.
+fn cell_password_legacy_ticket(ctx: &Ctx<'_>) -> Res<()> {
+    let (mut producer, ticket, _dir) = protected_share(ctx)?;
+    let legacy = strip_mesh_id(&ticket)?;
+
+    let (wrong, _a) = mirror_attempt(ctx, &legacy, Some("not-the-password"))?;
+    if wrong.ok {
+        return Err("a wrong password opened a legacy ticket".into());
+    }
+    // The producer's refusal, reworded by the consumer — same words as the
+    // local ruling, because the user does not care which end decided.
+    wrong.says("does not open this share")?;
+
+    let (right, _b) = mirror_attempt(ctx, &legacy, Some(PASSWORD))?;
+    producer.interrupt();
+    if !right.ok {
+        return Err(format!(
+            "a legacy ticket refused the right password:\n{}",
+            right.output
+        )
+        .into());
+    }
+    right.says("Mirrored")
+}
+
+/// Re-encode `ticket` with its mesh id removed — a ticket as an older producer
+/// would have minted it.
+///
+/// Through the real codec, not a copy of the format written here: a second
+/// implementation in the harness would drift from the one under test, and the
+/// drift would show up as a passing row.
+fn strip_mesh_id(ticket: &str) -> Res<String> {
+    let mut decoded = agent_share_proto::ticket::MountTicket::decode(ticket)
+        .map_err(|error| format!("decoding the ticket to strip its mesh id: {error}"))?;
+    decoded.mesh_id = None;
+    Ok(decoded.encode())
+}
+
+/// The browser twin of the false-accusation guard.
+///
+/// Right password, producer already dead. The tab cannot reach anybody, so it
+/// keeps trying — that is the app's posture and not a fault. What it must never
+/// do is blame the password, which is exactly what it did before the ruling
+/// moved off the network: the seeder wait timed out and the gate came back
+/// saying the password was refused, about a password that was correct.
+///
+/// A negative assertion held over time, because the failure it guards is
+/// something *appearing* rather than something missing. The window is past the
+/// 30 s seeder-card deadline where the old accusation was minted.
+fn cell_password_web_dead_right(ctx: &Ctx<'_>) -> Res<()> {
+    let (dir, _sha) = make_share(3)?;
+    let (mut producer, ticket) = serve(ctx.binary, dir.path(), Some(PASSWORD))?;
+    producer.interrupt();
+
+    // Bound, not discarded: dropping the guard closes the window.
+    let _browser = open_window(ctx, &format!("{}files/{ticket}", ctx.url))?;
+    wait_for_true(
+        "/Password required/.test(document.body.innerText)",
+        CONNECT_TIMEOUT,
+        "the password gate",
+    )?;
+    type_password(PASSWORD)?;
+    click("Open share")?;
+
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < deadline {
+        if evaluate("String(/does not open this share/.test(document.body.innerText))")?.trim()
+            == "true"
+        {
+            return Err(
+                "the page blamed a correct password for a share it simply could not reach".into(),
+            );
+        }
+        std::thread::sleep(POLL);
+    }
+    Ok(())
+}
+
+/// A password typed once is not asked for again in the same tab.
+///
+/// `sessionStorage`, keyed by a digest of the ticket. Two things follow and both
+/// are asserted: a reload does not re-prompt, and neither does moving between
+/// the share's two views. A tab that forgot would also re-pay ~100 ms of
+/// Argon2id every time, but the reason this row exists is the re-prompt.
+fn cell_password_web_persist(ctx: &Ctx<'_>) -> Res<()> {
+    let page = Page::open_protected(ctx, 3, "", Some(PASSWORD))?;
+    wait_for_true(
+        "/Password required/.test(document.body.innerText)",
+        CONNECT_TIMEOUT,
+        "the password gate",
+    )?;
+    type_password(PASSWORD)?;
+    click("Open share")?;
+    wait_for_listing()?;
+
+    run_browse(&["cdp", "Page.reload", "{}", "--folder", ctx.folder])?;
+    run_browse(&[
+        "wait",
+        "--selector",
+        "body",
+        "--timeout",
+        "60000",
+        "--folder",
+        ctx.folder,
+    ])?;
+    // Straight back to the listing. If the gate returns, the tab forgot.
+    wait_for_listing()?;
+    if evaluate("String(/Password required/.test(document.body.innerText))")?.trim() == "true" {
+        return Err("a reload re-prompted for a password the tab had already taken".into());
+    }
+
+    // And the other view of the same share, which is a route change rather than
+    // a reload — a different path through the session, same stored password.
+    click("Info")?;
+    if evaluate("String(/Password required/.test(document.body.innerText))")?.trim() == "true" {
+        return Err("switching to the info view re-prompted for the password".into());
+    }
+    page.finish()
+}
+
+/// `npx agent-share <ticket> --password` — the third client.
+///
+/// The node CLI links the same wasm as the browser but drives it from a
+/// process, so it is the one platform where a break would show up in neither
+/// the native tests nor the browser cells.
+fn cell_password_node_cli(ctx: &Ctx<'_>) -> Res<()> {
+    let root = util::repo_root();
+    let cli = root.join("node/src/cli.js");
+    let (dir, _sha) = make_share(1)?;
+    let (mut producer, ticket) = serve(ctx.binary, dir.path(), Some(PASSWORD))?;
+
+    let dest = TempDir::new("e2e-node")?;
+    let mut cmd = Command::new("node");
+    cmd.arg(&cli)
+        .arg(&ticket)
+        .arg(dest.path())
+        .args(["--password", PASSWORD]);
+    let ok = run_capture(cmd, "e2e node consumer", NATIVE_TIMEOUT)?;
+
+    let wrong_dest = TempDir::new("e2e-node-wrong")?;
+    let mut wrong_cmd = Command::new("node");
+    wrong_cmd
+        .arg(&cli)
+        .arg(&ticket)
+        .arg(wrong_dest.path())
+        .args(["--password", "not-the-password"]);
+    let wrong = run_capture(wrong_cmd, "e2e node consumer (wrong)", NATIVE_TIMEOUT)?;
+    producer.interrupt();
+
+    if !ok.status.success() {
+        return Err(format!(
+            "the node CLI refused the right password:\n{}{}",
+            ok.stdout, ok.stderr
+        )
+        .into());
+    }
+    if wrong.status.success() {
+        return Err("the node CLI accepted a wrong password".into());
+    }
+    let said = format!("{}{}", wrong.stdout, wrong.stderr);
+    if !said.contains("password") {
+        return Err(format!("the node CLI did not name the password:\n{said}").into());
+    }
+    Ok(())
+}
+
+/// Why the node row cannot run here, if it cannot.
+///
+/// `node-datachannel` is an *optional* dependency of the node package (Node has
+/// no built-in `RTCPeerConnection`), so a clean checkout does not have it and
+/// the row would fail for a reason that is not a defect.
+fn node_datachannel_missing() -> Option<String> {
+    // Whether it *loads*, not whether the directory is there. The package can
+    // be installed while its native addon is not built for this Node — which is
+    // the state a bun install leaves, and it fails at import rather than at
+    // resolution, so a path check reports it as present and the row then fails
+    // for a reason that is not a defect.
+    let node_dir = util::repo_root().join("node");
+    let loaded = Command::new("node")
+        .current_dir(&node_dir)
+        .args(["-e", "import('node-datachannel/polyfill')"])
+        .output();
+    match loaded {
+        Ok(output) if output.status.success() => None,
+        Ok(_) => Some(
+            "node-datachannel does not load — Node has no built-in RTCPeerConnection, and \
+             the native addon is missing or not built for this Node (cd node && npm install)"
+                .to_owned(),
+        ),
+        Err(error) => Some(format!("node is not runnable: {error}")),
+    }
+}
+
+/// **A browser tab creates a protected share; the native CLI opens it.**
+///
+/// The direction nothing else covers. Every other row has a native producer, so
+/// the browser's `set_password` and the mesh id it mints were never checked
+/// against what the native side derives from the same ticket — and they have to
+/// agree byte for byte or the two ends land on different meshes.
+///
+/// Producing in the app needs `showDirectoryPicker()`, which needs a user
+/// gesture and cannot be driven headlessly, which is why this row did not exist.
+/// `/lab` seeds the **origin private file system** instead: real
+/// `FileSystemFileHandle`s with no gesture and no prompt, handed to the same
+/// `startProducer` the app calls. Only the origin of the folder differs.
+fn cell_password_web_producer(ctx: &Ctx<'_>) -> Res<()> {
+    let _browser = open_window(ctx, &format!("{}lab", ctx.url))?;
+
+    // Stated, not inferred: a Chrome without OPFS must fail this row with the
+    // reason, never pass it. The `precheck` hook cannot help — it runs before
+    // any browser exists.
+    let opfs = evaluate("String(typeof navigator.storage?.getDirectory === 'function')")?;
+    if opfs.trim() != "true" {
+        return Err(
+            "this browser has no origin private file system, so a tab cannot \
+                    produce a share without the directory picker"
+                .into(),
+        );
+    }
+
+    let started = format!(
+        "(() => {{ \
+           document.getElementById('share-files').value = '2'; \
+           document.getElementById('share-password').value = {}; \
+           document.getElementById('share-start').click(); \
+           return true }})()",
+        js_string(PASSWORD)
+    );
+    wait_for_true(&started, Duration::from_secs(30), "the lab share panel")?;
+
+    wait_for_true(
+        "document.getElementById('share-ticket').value",
+        CONNECT_TIMEOUT,
+        "the tab to mint a ticket for its own share",
+    )?;
+    // `String(…)` explicitly: `evaluate` reads `/result/value` as a JSON string
+    // and yields "" for anything else, so an unwrapped `.value` can come back
+    // empty even though the wait above just saw it populated.
+    let ticket = evaluate("String(document.getElementById('share-ticket').value)")?
+        .trim()
+        .to_owned();
+    if ticket.is_empty() {
+        let log = evaluate("String(document.getElementById('share-log').textContent)")
+            .unwrap_or_default();
+        return Err(
+            format!("the lab reported a ticket that was empty; its log says:\n{log}").into(),
+        );
+    }
+
+    // A wrong password is refused, and refused locally — the verifier in the
+    // mesh id the *browser* minted is what the native side checks against.
+    let (wrong, _a) = mirror_attempt(ctx, &ticket, Some("not-the-password"))?;
+    if wrong.ok {
+        return Err("a wrong password opened a browser-produced share".into());
+    }
+    wrong.says("does not open this share")?;
+    wrong.faster_than(Duration::from_secs(10))?;
+
+    // And the right one reads the tree the tab is serving.
+    let (right, dest) = mirror_attempt(ctx, &ticket, Some(PASSWORD))?;
+    if !right.ok {
+        return Err(format!(
+            "the native CLI could not open a browser-produced share:\n{}",
+            right.output
+        )
+        .into());
+    }
+    // The two shapes the fixture carries on purpose. A nested directory has to
+    // survive the manifest, and a zero-byte file has a slot with nothing to
+    // read — the case that found the browser producer dropping `OP_HASH`
+    // instead of answering "cannot vouch".
+    for expected in ["nested/deep.txt", "empty.txt", "blob.bin"] {
+        if !dest.path().join(expected).exists() {
+            return Err(format!("`{expected}` did not arrive from the browser share").into());
+        }
+    }
+
+    // Stop the share so the lab removes its OPFS directory rather than leaving
+    // it for the next run.
+    let _ = evaluate("(() => { document.getElementById('share-stop').click(); return true })()");
+    Ok(())
+}
+
+/// Launch a headless window on `target` and wait for it to be drivable.
+///
+/// The part of [`Page::open`] that does not need a producer of its own, for the
+/// rows that stand one up themselves — or kill it first.
+fn open_window(ctx: &Ctx<'_>, target: &str) -> Res<Browser> {
+    run_browse(&["launch", "--headless", ctx.folder, target])?;
+    reap::track_browser(ctx.folder);
+    let browser = Browser::new(ctx.folder.to_owned());
+    run_browse(&[
+        "wait",
+        "--selector",
+        "body",
+        "--timeout",
+        "60000",
+        "--folder",
+        ctx.folder,
+    ])?;
+    Ok(browser)
+}
+
 /// Serve `dir` and return the producer plus the ticket it printed.
-fn serve(binary: &str, dir: &Path) -> Res<(Proc, String)> {
+///
+/// `password` protects the share. The printed line is unchanged either way —
+/// json mode is read by machines and stays one runnable command — so a
+/// protected share is recognised from the *ticket*, not from the output.
+fn serve(binary: &str, dir: &Path, password: Option<&str>) -> Res<(Proc, String)> {
     let mut cmd = Command::new(binary);
     cmd.arg("serve").arg(dir).args(["--output", "json"]);
+    if let Some(password) = password {
+        cmd.args(["--password", password]);
+    }
     let (producer, mut lines) = spawn_piped(cmd, "e2e producer")?;
     // `mount::announce` in json mode prints exactly `agent-share <ticket> .`.
     let Some(line) = lines.wait_for("agent-share ", Duration::from_mins(1)) else {
@@ -768,18 +1459,33 @@ fn cell_reconnect(ctx: &Ctx<'_>) -> Res<()> {
     wait_for_listing()?;
     click("Info")?;
     click("Kill connection")?;
-    click("Close")?;
 
+    // The Info panel stays open across this wait, and that is load-bearing.
+    // `reconnecting` is rendered in exactly one place — `TechInfo`'s status —
+    // because the breadcrumb deliberately never says it ("redialing is the
+    // app's permanent background posture … naming it in the chrome would label
+    // the normal state of the world", `web/src/App.tsx`). This cell used to
+    // close the panel first and then wait for a word only the panel renders.
     wait_for_true(
         "window.__e2eSawReconnecting",
         ACTION_TIMEOUT,
         "the app to notice the connection died",
     )?;
+    // Still inside the Info panel: it is the only surface that renders the
+    // label, so "no longer reconnecting" is only a real assertion while it is
+    // open. Closing first made this vacuous — the word is absent from a page
+    // that never shows it, and the cell then tried to download over a session
+    // that was still redialling.
     wait_for_true(
-        "!/reconnecting/i.test(document.body.innerText) \
-         && /blob\\.bin/.test(document.body.innerText)",
+        "!/reconnecting/i.test(document.body.innerText)",
         ACTION_TIMEOUT,
         "the session to come back on its own",
+    )?;
+    click("Close")?;
+    wait_for_true(
+        "/blob\\.bin/.test(document.body.innerText)",
+        ACTION_TIMEOUT,
+        "the file listing after the session recovered",
     )?;
 
     // Back on screen is not the same as back in service. The bug's whole
@@ -792,21 +1498,41 @@ fn cell_reconnect(ctx: &Ctx<'_>) -> Res<()> {
     page.finish()
 }
 
-/// A producer that goes away is reported **on the page**.
+/// A producer that goes away does not take the page with it.
 ///
-/// It used to arrive as an unhandled rejection in a crash overlay, naming an
-/// internal stream operation that was not at fault. Two independent paths threw
-/// there — the download, and the mesh departure during teardown — so this cell
-/// asserts the readable failure *and* leans on `finish`'s rejection check,
-/// which is the half that guards the teardown path.
+/// What this asserts changed with `25d20897` (*let seeders keep a share alive
+/// after its producer dies*). Before it, a dead producer was a failure and the
+/// cell waited for one to be *reported*; the bug it was written for was that
+/// the report arrived as an unhandled rejection in a crash overlay, naming an
+/// internal stream operation that was not at fault.
+///
+/// Now the tab holds the manifest and the listing survives, so waiting for a
+/// failure waits forever. The property worth holding is the one that bug was
+/// really about: nothing crashes, and when an action genuinely cannot be served
+/// — no producer, no seeder — it *says so* instead of throwing into the void.
+/// `finish`'s rejection check is still the half that guards the teardown path.
 fn cell_producer_gone(ctx: &Ctx<'_>) -> Res<()> {
     let mut page = Page::open(ctx, 3, "")?;
     wait_for_listing()?;
     page.producer.interrupt();
+
+    // The listing outlives the producer. Asserted after a pause long enough for
+    // the connection to actually die, so this cannot pass on staleness alone.
+    std::thread::sleep(Duration::from_secs(5));
+    if evaluate("String(/blob\\.bin/.test(document.body.innerText))")?.trim() != "true" {
+        return Err("the listing did not survive the producer".into());
+    }
+
+    // But the bytes are gone, and the page says so the way a UI should: by
+    // refusing the action rather than by accepting it and throwing. Asserted as
+    // "no *enabled* Download button", which covers both disabling it and
+    // removing it — the cell is about the user not being led into a failure,
+    // not about which of the two the app picks.
     wait_for_true(
-        "/could not connect|lost|timed out|failed/i.test(document.body.innerText)",
+        "[...document.querySelectorAll('button')] \
+         .every((b) => (b.innerText || '').trim().toLowerCase() !== 'download' || b.disabled)",
         ACTION_TIMEOUT,
-        "a readable failure on the page",
+        "the download action to stop being offered once nobody can serve it",
     )?;
     page.finish()
 }
@@ -835,4 +1561,105 @@ fn cell_transport(ctx: &Ctx<'_>, transport: &str) -> Res<()> {
         &format!("the Info pane to report `transport {transport}`"),
     )?;
     page.finish()
+}
+
+/// Type `password` into the gate's field, the way a person would.
+///
+/// Sets the value and dispatches `input`, because the field is uncontrolled and
+/// the component reads it from that event — assigning `.value` alone updates the
+/// pixels and tells the app nothing.
+fn type_password(password: &str) -> Res<()> {
+    let expression = format!(
+        "(()=>{{const field=document.querySelector('input[type=password]');\
+         if(!field)return false;field.value={};\
+         field.dispatchEvent(new Event('input',{{bubbles:true}}));return true}})()",
+        js_string(password)
+    );
+    wait_for_true(&expression, Duration::from_secs(30), "the password field")
+}
+
+/// **The browser half of password-protected shares.**
+///
+/// One window, one protected ticket, three states: the gate instead of a
+/// listing, a refusal that says so, and the listing once the right password
+/// lands. The middle step is the one worth the wall-clock — a wrong password
+/// that merely hung would look identical to a slow connect.
+fn cell_password(ctx: &Ctx<'_>) -> Res<()> {
+    let page = Page::open_protected(ctx, 3, "", Some(PASSWORD))?;
+
+    // The link alone shows nothing. Asserted before anything is typed: if the
+    // listing were reachable here, the feature would not exist.
+    wait_for_true(
+        "/Password required/.test(document.body.innerText)",
+        CONNECT_TIMEOUT,
+        "the password gate",
+    )?;
+    if evaluate("String(/blob\\.bin/.test(document.body.innerText))")?.trim() == "true" {
+        return Err("the share listed its files without a password".into());
+    }
+
+    // A wrong password is refused *as a wrong password*.
+    type_password("not-the-password")?;
+    click("Open share")?;
+    wait_for_true(
+        "/does not open this share/.test(document.body.innerText)",
+        ACTION_TIMEOUT,
+        "the gate to report a refused password",
+    )?;
+
+    // And the right one opens it.
+    type_password(PASSWORD)?;
+    click("Open share")?;
+    wait_for_listing()?;
+
+    page.finish()
+}
+
+/// **A wrong password is named with no producer at all.**
+///
+/// The case the whole design turns on. A share is built to outlive its
+/// producer — seeders keep it alive — so a check that needs the producer to
+/// answer is a check that usually cannot run. Before the ticket carried a mesh
+/// id this hung: the tab redialled a dead origin, then waited out the seeder
+/// deadline on a mesh a wrong password cannot even find, and never reached the
+/// gate.
+///
+/// The producer is killed *before* the window ever opens, so nothing here can
+/// be answered by the network.
+fn cell_password_no_producer(ctx: &Ctx<'_>) -> Res<()> {
+    let (dir, _blob_sha256) = make_share(3)?;
+    let (mut producer, ticket) = serve(ctx.binary, dir.path(), Some(PASSWORD))?;
+    // Dead before the browser is even launched.
+    producer.interrupt();
+
+    let target = format!("{}files/{ticket}", ctx.url);
+    run_browse(&["launch", "--headless", ctx.folder, &target])?;
+    reap::track_browser(ctx.folder);
+    let _browser = Browser::new(ctx.folder.to_owned());
+    run_browse(&[
+        "wait",
+        "--selector",
+        "body",
+        "--timeout",
+        "60000",
+        "--folder",
+        ctx.folder,
+    ])?;
+
+    wait_for_true(
+        "/Password required/.test(document.body.innerText)",
+        CONNECT_TIMEOUT,
+        "the password gate",
+    )?;
+    type_password("not-the-password")?;
+    click("Open share")?;
+    // A minute, not the full action timeout: the point is that this answer
+    // comes from an Argon2id stretch and a byte comparison, not from a network
+    // round trip that has nobody on the other end.
+    wait_for_true(
+        "/does not open this share/.test(document.body.innerText)",
+        Duration::from_mins(1),
+        "the gate to name the password with no producer running",
+    )?;
+    Ok(())
 }
