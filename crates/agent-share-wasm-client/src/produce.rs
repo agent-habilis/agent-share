@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use agent_share_proto::framing::{
     BENCH_KIND_ECHO, BENCH_KIND_FILL, MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES,
-    MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_MANIFEST, OP_READ, OP_WATCH,
+    MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_HASH, OP_MANIFEST, OP_READ,
+    OP_WATCH,
     REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_MANIFEST, WEBRTC_SIGNAL_ALPN,
     decode_bench_request_prefix,
 };
@@ -688,6 +689,23 @@ async fn serve_bench_stream(
                 left -= take;
             }
         }
+        OP_HASH => {
+            let mut request = [0u8; 4];
+            if recv.read_exact(&mut request).await.is_err() {
+                return Ok(());
+            }
+            // A browser source keeps no hash cache, so it can never vouch for a
+            // file's root — but it must *say* so rather than drop the stream.
+            // `BadIndex` is exactly that sentence, and it is the same answer a
+            // native producer without a cache gives (`produce.rs`'s `OP_HASH`
+            // arm). Dropping it instead read as a broken connection on the far
+            // side: `fetch_hash` treats a vanished stream as an error, not as
+            // "cannot vouch", so `agent-share mirror` could not copy a
+            // browser-produced share at all.
+            send.write_all(&[ReadStatus::BadIndex.to_byte()])
+                .await
+                .map_err(|error| err("write hash status", &error))?;
+        }
         _ => return Ok(()),
     }
     let _ = send.finish();
@@ -901,6 +919,23 @@ async fn serve_stream<S: ServeSource>(
             send.write_all(&data)
                 .await
                 .map_err(|error| err("write body", &error))?;
+        }
+        OP_HASH => {
+            let mut request = [0u8; 4];
+            if recv.read_exact(&mut request).await.is_err() {
+                return Ok(());
+            }
+            // A browser source keeps no hash cache, so it can never vouch for a
+            // file's root — but it must *say* so rather than drop the stream.
+            // `BadIndex` is exactly that sentence, and it is the same answer a
+            // native producer without a cache gives (`produce.rs`'s `OP_HASH`
+            // arm). Dropping it instead read as a broken connection on the far
+            // side: `fetch_hash` treats a vanished stream as an error, not as
+            // "cannot vouch", so `agent-share mirror` could not copy a
+            // browser-produced share at all.
+            send.write_all(&[ReadStatus::BadIndex.to_byte()])
+                .await
+                .map_err(|error| err("write hash status", &error))?;
         }
         _ => return Ok(()),
     }
