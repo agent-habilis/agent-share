@@ -11,9 +11,9 @@
  * rates, since they come from differencing cumulative counters.
  */
 
-import { Button, Stack, Text, roleVar } from 'moonspace-ui'
+import { Button, Stack, Text, t } from 'moonspace-dom'
 import { component, interval, listen, signal } from 'visage-dom'
-import type { Ctx, ReadonlySignal } from 'visage-dom'
+import type { ReadonlySignal } from 'visage-dom'
 
 import { missingSlots, peerAvailability } from './availability.ts'
 import { sortPeers } from './peers.ts'
@@ -122,8 +122,8 @@ function AvailabilityRow(props: {
             style={{
               width: '0.8ch',
               height: '0.8ch',
-              background: has ? roleVar.accent : roleVar.bgSunken,
-              outline: has ? 'none' : `1px solid ${roleVar.border}`,
+              background: has ? t.accent : t.bgSunken,
+              outline: has ? 'none' : `1px solid ${t.border}`,
             }}
           />
         ))}
@@ -210,7 +210,9 @@ function readInfo(client: InfoClient): SessionInfo | null {
   }
 }
 
-export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
+export const TechInfo = component<TechInfoProps>(function* (props) {
+  // The nested plain function below captures `ctx`; `this` would not reach it.
+  const ctx = this
   /** IP → ISO country code (or `null` after a failed / non-candidate lookup). */
   const countries = signal<Record<string, string | null>>({})
   const inflight = new Set<string>()
@@ -297,7 +299,7 @@ export const TechInfo = component<TechInfoProps>(function* (props, ctx: Ctx) {
           minHeight: 0,
           overflowY: 'auto',
           padding: '0 2ch calc(2 * var(--ms-row))',
-          background: roleVar.bg,
+          background: t.bg,
         }}
       >
         <Stack direction="column" gap={1}>

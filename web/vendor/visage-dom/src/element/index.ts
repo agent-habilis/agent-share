@@ -87,7 +87,7 @@ export function fromArgs<T>(tag: T, args: unknown[]): ElementNode<T> {
  * generator, which is what gives the reconciler stable instance identity.
  */
 export function component<P extends object = {}>(
-  render: (props: Readonly<P>, ctx: Ctx) => ComponentGen,
+  render: (this: Ctx, props: Readonly<P>) => ComponentGen,
   options?: ComponentOptions,
 ): ComponentFn<P> {
   return define(render, false, options)
@@ -95,7 +95,7 @@ export function component<P extends object = {}>(
 
 /** Define an async component. See the tracking caveat in the README. */
 export function asyncComponent<P extends object = {}>(
-  render: (props: Readonly<P>, ctx: Ctx) => AsyncComponentGen,
+  render: (this: Ctx, props: Readonly<P>) => AsyncComponentGen,
   options?: ComponentOptions,
 ): ComponentFn<P> {
   return define(render, true, options)
@@ -113,7 +113,7 @@ export interface ComponentOptions {
 }
 
 function define<P extends object>(
-  render: (props: P, ctx: Ctx) => ComponentGen | AsyncComponentGen,
+  render: (this: Ctx, props: P) => ComponentGen | AsyncComponentGen,
   isAsync: boolean,
   options: ComponentOptions | undefined,
 ): ComponentFn<P> {

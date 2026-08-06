@@ -1,7 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "types": ["bun"]
-  },
+  // web/tsconfig.base.json omits `types`; the Bun globals are needed for tests.
+  "compilerOptions": { "types": ["bun"] },
   "include": ["src"]
 }

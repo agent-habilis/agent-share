@@ -205,6 +205,8 @@ class ComputedImpl<T> implements ReadonlySignal<T>, Subscriber {
   disposed = false
 
   #deps = new Set<Source>()
+  /** Double-buffered like `Instance#depsAlt`: swapped and cleared per recomputation, not reallocated. */
+  #depsAlt = new Set<Source>()
   #value!: T
   #stale = true
 
@@ -230,8 +232,10 @@ class ComputedImpl<T> implements ReadonlySignal<T>, Subscriber {
 
   #recompute(): void {
     for (const dep of this.#deps) dep.subs.delete(this)
-    const deps = new Set<Source>()
+    const deps = this.#depsAlt
+    deps.clear()
     const next = trackInto(deps, this.compute)
+    this.#depsAlt = this.#deps
     this.#deps = deps
     for (const dep of deps) dep.subs.add(this)
     this.#stale = false

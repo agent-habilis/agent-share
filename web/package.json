@@ -7,12 +7,14 @@
     "dev": "bun --hot dev.ts",
     "build": "bun build.ts",
     "preview": "bun preview.ts",
-    "typecheck": "bun scripts/gen-wasm-path.ts && tsc --noEmit -p tsconfig.json && tsc --noEmit -p vendor/visage-dom && tsc --noEmit -p vendor/visage-style && tsc --noEmit -p vendor/visage-router && tsc --noEmit -p vendor/moonspace-ui",
+    "typecheck": "bun scripts/gen-wasm-path.ts && tsc --noEmit -p tsconfig.json && tsc --noEmit -p vendor/visage-dom && tsc --noEmit -p vendor/visage-style && tsc --noEmit -p vendor/visage-router && tsc --noEmit -p vendor/moonspace && tsc --noEmit -p vendor/moonspace-theme && tsc --noEmit -p vendor/moonspace-dom",
     "test": "bun scripts/gen-wasm-path.ts && bun test"
   },
   "dependencies": {
     "client-zip": "^2.4.5",
-    "moonspace-ui": "workspace:*",
+    "moonspace": "workspace:*",
+    "moonspace-dom": "workspace:*",
+    "moonspace-theme": "workspace:*",
     "visage-dom": "workspace:*",
     "visage-router": "workspace:*",
     "visage-style": "workspace:*"

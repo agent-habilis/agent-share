@@ -268,7 +268,7 @@ export function createRouter(options: RouterOptions): ComponentFn<{}> {
   }
 
   return component(
-    function* (_props, ctx) {
+    function* () {
       const state = signal<RouteState>(toState(history.current, history.key, 'pop'))
       const loaders = signal<readonly LoaderState<unknown>[]>([])
 
@@ -417,7 +417,7 @@ export function createRouter(options: RouterOptions): ComponentFn<{}> {
           globalThis.addEventListener(
             'scroll',
             () => positions.set(history.key, [globalThis.scrollX, globalThis.scrollY]),
-            { passive: true, signal: ctx.aborted },
+            { passive: true, signal: this.aborted },
           )
           const previous = globalThis.history.scrollRestoration
           globalThis.history.scrollRestoration = 'manual'
@@ -426,8 +426,8 @@ export function createRouter(options: RouterOptions): ComponentFn<{}> {
           }
         }
 
-        ctx.provide(RouterCtx, api)
-        ctx.provide(DepthCtx, 0)
+        this.provide(RouterCtx, api)
+        this.provide(DepthCtx, 0)
 
         runLoaders(state.peek())
 
@@ -453,10 +453,10 @@ export function createRouter(options: RouterOptions): ComponentFn<{}> {
  * written inside a route that has children of its own.
  */
 export const Outlet: ComponentFn<{}> = component(
-  function* (_props, ctx) {
-    const router = ctx.inject(RouterCtx)
-    const depth = ctx.inject(DepthCtx)
-    ctx.provide(DepthCtx, depth + 1)
+  function* () {
+    const router = this.inject(RouterCtx)
+    const depth = this.inject(DepthCtx)
+    this.provide(DepthCtx, depth + 1)
 
     yield () => {
       const match = router.matches.value[depth]
@@ -515,8 +515,8 @@ function toChildren(children: Child | Child[] | undefined): readonly Child[] {
  * only takes over for the plain left-click that would otherwise reload the page.
  */
 export const A: ComponentFn<LinkProps> = component<LinkProps>(
-  function* (props, ctx) {
-    const router = ctx.inject(RouterCtx)
+  function* (props) {
+    const router = this.inject(RouterCtx)
 
     // Handlers run outside a tracking window, so these reads see current values
     // and subscribe to nothing. There is no stale-closure problem to solve and

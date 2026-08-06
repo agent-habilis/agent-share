@@ -237,15 +237,15 @@ test('a prop read in the thunk resumes it; an unread prop does not', () => {
   expect(html()).toBe('<div><span>b</span></div>')
 })
 
-test('ctx.track inside a thunk survives the resubscribe', () => {
+test('this.track inside a thunk survives the resubscribe', () => {
   const n = signal(0)
   let renders = 0
 
-  const C = component(function* (_props, ctx) {
+  const C = component(function* () {
     yield () => {
       renders++
-      // Reading through ctx.track() must subscribe just as a bare read does.
-      const value = ctx.track(() => n.value)
+      // Reading through this.track() must subscribe just as a bare read does.
+      const value = this.track(() => n.value)
       return div(String(value))
     }
   })
@@ -322,7 +322,7 @@ test('finally and using run when a parked component unmounts', () => {
 
 test('a using scope unwinds when a parked component unmounts', () => {
   let cleaned = 0
-  const C = component(function* (_props, ctx) {
+  const C = component(function* () {
     using _cleanup = disposable(() => cleaned++)
     yield () => div('x')
   })
@@ -339,16 +339,16 @@ test('a using scope unwinds when a parked component unmounts', () => {
   expect(cleaned).toBe(1)
 })
 
-test('ctx.provide above the yield reaches children mounted from the thunk', () => {
+test('this.provide above the yield reaches children mounted from the thunk', () => {
   const Theme = context<string>('theme')
 
-  const Leaf = component(function* (_props, ctx) {
-    const theme = ctx.inject(Theme)
+  const Leaf = component(function* () {
+    const theme = this.inject(Theme)
     yield () => span(theme)
   })
 
-  const App = component(function* (_props, ctx) {
-    ctx.provide(Theme, 'dark')
+  const App = component(function* () {
+    this.provide(Theme, 'dark')
     yield () => div(Leaf())
   })
 
@@ -602,13 +602,13 @@ test('an async prologue parks on a thunk and stops advancing', async () => {
   expect(resumes).toBe(settled)
 })
 
-test('reads in a parked thunk are tracked without ctx.track, even after an await', async () => {
+test('reads in a parked thunk are tracked without this.track, even after an await', async () => {
   const n = signal(0)
 
   const C = asyncComponent(async function* () {
     await tick(5)
     // The synchronous window closed at the await, but the thunk gets a fresh
-    // one on every call — so this read subscribes with no ctx.track().
+    // one on every call — so this read subscribes with no this.track().
     yield () => div(String(n.value))
   })
 
@@ -659,7 +659,7 @@ test('props arriving while an async component is still advancing are coalesced',
 
 test('unmounting a parked async component runs its cleanups', async () => {
   let cleaned = 0
-  const C = asyncComponent(async function* (_props, ctx) {
+  const C = asyncComponent(async function* () {
     using _cleanup1 = disposable(() => cleaned++)
     await tick(5)
     yield () => div('x')

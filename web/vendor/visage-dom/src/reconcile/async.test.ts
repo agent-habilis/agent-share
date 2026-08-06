@@ -84,16 +84,16 @@ test('reads before the first await subscribe automatically', async () => {
   expect(html()).toBe('<div>grace</div>')
 })
 
-test('ctx.track keeps a post-await read subscribed', async () => {
+test('this.track keeps a post-await read subscribed', async () => {
   const name = signal('ada')
   let subscribed = false
 
-  const C = asyncComponent(async function* (_props, ctx) {
+  const C = asyncComponent(async function* () {
     while (true) {
       await tick(5)
       // The synchronous window closed at the await, so this read would not
       // subscribe on its own.
-      const current = ctx.track(() => {
+      const current = this.track(() => {
         subscribed = true
         return name.value
       })
@@ -276,18 +276,18 @@ test('a thunk is not called after the component was unmounted mid-await', async 
   expect(calls).toEqual(['cleanup'])
 })
 
-test('ctx.aborted reports aborted even when first read after unmount', async () => {
+test('this.aborted reports aborted even when first read after unmount', async () => {
   const seen: Array<[string, boolean]> = []
 
-  const Comp = asyncComponent(async function* (_props, ctx) {
+  const Comp = asyncComponent(async function* () {
     try {
       yield div('loading')
       await new Promise((r) => setTimeout(r, 30))
       // The canonical cancellation check — and the first read of `aborted`, so
       // `dispose` had no controller to abort and this used to be false.
-      seen.push(['body', ctx.aborted.aborted])
+      seen.push(['body', this.aborted.aborted])
     } finally {
-      seen.push(['finally', ctx.aborted.aborted])
+      seen.push(['finally', this.aborted.aborted])
     }
   })
 
@@ -301,12 +301,12 @@ test('ctx.aborted reports aborted even when first read after unmount', async () 
   for (const [, aborted] of seen) expect(aborted).toBe(true)
 })
 
-test('ctx.track after unmount does not re-subscribe the dead instance', async () => {
+test('this.track after unmount does not re-subscribe the dead instance', async () => {
   const s = signal(0)
   let captured: { track: <T>(fn: () => T) => T } | null = null
 
-  const Comp = asyncComponent(async function* (_props, ctx) {
-    captured = ctx
+  const Comp = asyncComponent(async function* () {
+    captured = this
     yield div('a')
     await new Promise((r) => setTimeout(r, 50))
   })
@@ -315,7 +315,7 @@ test('ctx.track after unmount does not re-subscribe the dead instance', async ()
   await new Promise((r) => setTimeout(r, 10))
   root.unmount()
 
-  // `ctx.track()` is what the docs tell async components to use for reads after
+  // `this.track()` is what the docs tell async components to use for reads after
   // an await — i.e. exactly the reads that happen after an unmount lands.
   captured!.track(() => s.value)
 

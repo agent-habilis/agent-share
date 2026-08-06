@@ -6,16 +6,17 @@
  * drag-resizable on the right border; double-clicking a border snaps that pane
  * to the width of its longest name — the same gestures Finder uses.
  *
- * Built from moonspace-ui primitives — the design system has no column
+ * Built from moonspace primitives — the design system has no column
  * component, and adding one there would mean designing for its eventual TUI
  * port, which this does not need.
  *
- * Hierarchy comes from colour, weight and inversion, never size: moonspace-ui
+ * Hierarchy comes from colour, weight and inversion, never size: moonspace
  * has no `fontSize` token by design, and that *is* the "one size only"
  * requirement rather than a limitation to work around.
  */
 
-import { Button, Stack, Text, MiddleTruncate, glyphs, roleVar, theme } from 'moonspace-ui'
+import { Button, Stack, Text, MiddleTruncate, t } from 'moonspace-dom'
+import { glyphs } from 'moonspace'
 import { component, keyed, signal } from 'visage-dom'
 
 import { seedLabel, seedState } from './seeding.ts'
@@ -40,7 +41,7 @@ const CHEVRON_SLOT = { ...SLOT, marginLeft: '1ch' } as const
  * Darker than the raised surface so rules stay quiet. Semantic `border` reads
  * too bright against `bg`.
  */
-const SURFACE_BORDER = roleVar.bgSunken
+const SURFACE_BORDER = t.bgSunken
 
 interface ColumnViewProps {
   root: DirNode
@@ -211,7 +212,7 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
           alignItems: 'stretch',
           flex: 1,
           minHeight: 0,
-          background: roleVar.bg,
+          background: t.bg,
           outline: `1px solid ${SURFACE_BORDER}`,
           outlineOffset: 0,
         }}
@@ -386,7 +387,9 @@ function Row({
         // trailing edge like Finder column view.
         paddingLeft: `${padX}ch`,
         paddingRight: 0,
-        background: active ? theme.color.bgSelected : 'transparent',
+        // `t.bgSelected` is the CSS var, not a hex — it has to be, or the
+        // active row would not follow the light/dark scheme switch.
+        background: active ? t.bgSelected : 'transparent',
       }}
     >
       <div style={{ minWidth: 0, flex: 1, overflow: 'hidden' }}>

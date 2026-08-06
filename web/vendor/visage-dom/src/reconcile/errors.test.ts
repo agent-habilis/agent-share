@@ -159,7 +159,7 @@ test('finally blocks run for every generator the error passes through', () => {
 test('cleanups still run when the failed subtree is replaced', () => {
   const cleaned: string[] = []
 
-  const Leaf = component(function* (_props, ctx) {
+  const Leaf = component(function* () {
     using _cleanup = disposable(() => cleaned.push('leaf'))
     yield () => span('leaf')
   })

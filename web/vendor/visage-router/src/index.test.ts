@@ -122,8 +122,8 @@ test('a route with neither component nor lazy is a legal layout', () => {
 // Nesting
 // ---------------------------------------------------------------------------
 
-const Task = component(function* (_props, ctx) {
-  const params = useParams(ctx)
+const Task = component(function* () {
+  const params = useParams(this)
   yield () => span(`task:${params.value['task'] ?? '-'}`)
 })
 
@@ -197,9 +197,9 @@ test('nesting goes as deep as it is declared', () => {
 
 test('params update without remounting when only the value changes', () => {
   let mounts = 0
-  const User = component(function* (_props, ctx) {
+  const User = component(function* () {
     mounts++
-    const params = useParams(ctx)
+    const params = useParams(this)
     yield () => div(`user:${params.value['id'] ?? '-'}`)
   })
   const { history } = mount([{ path: '/users/:id', component: User }], { at: '/users/1' })
@@ -213,8 +213,8 @@ test('a component deep inside a route still sees param changes', () => {
   // The reason route state travels as signals in context rather than as props:
   // a component that reads no props is never woken by its parent, so a props
   // chain would leave this one stale.
-  const Deep = component(function* (_props, ctx) {
-    const params = useParams(ctx)
+  const Deep = component(function* () {
+    const params = useParams(this)
     yield () => span(`deep:${params.value['id'] ?? '-'}`)
   })
   const Middle = component(function* () {
@@ -230,8 +230,8 @@ test('a component deep inside a route still sees param changes', () => {
 })
 
 test('location reports the path in pieces', () => {
-  const Probe = component(function* (_props, ctx) {
-    const location = useLocation(ctx)
+  const Probe = component(function* () {
+    const location = useLocation(this)
     yield () => {
       const at = location.value
       return div(`${at.pathname}|${at.search}|${at.hash}|${at.query.get('tab') ?? ''}`)
@@ -244,9 +244,9 @@ test('location reports the path in pieces', () => {
 })
 
 test('navigate resolves a relative path against the current one', () => {
-  const Probe = component(function* (_props, ctx) {
-    const router = useRouter(ctx)
-    const location = useLocation(ctx)
+  const Probe = component(function* () {
+    const router = useRouter(this)
+    const location = useLocation(this)
     yield () =>
       div(
         span(location.value.pathname),
@@ -433,8 +433,8 @@ test('a link can replace instead of push', () => {
 // ---------------------------------------------------------------------------
 
 test('search params read as a signal and write as a navigation', () => {
-  const Arm = component(function* (_props, ctx) {
-    const [query, setQuery] = useSearchParams(ctx)
+  const Arm = component(function* () {
+    const [query, setQuery] = useSearchParams(this)
     yield () =>
       div(
         span(query.value.get('arm') ?? 'none'),
@@ -457,8 +457,8 @@ test('search params read as a signal and write as a navigation', () => {
 })
 
 test('setting search params keeps the other ones', () => {
-  const Probe = component(function* (_props, ctx) {
-    const [query, setQuery] = useSearchParams(ctx)
+  const Probe = component(function* () {
+    const [query, setQuery] = useSearchParams(this)
     yield () =>
       div(
         span(`${query.value.get('a') ?? '-'}/${query.value.get('b') ?? '-'}`),
@@ -472,8 +472,8 @@ test('setting search params keeps the other ones', () => {
 })
 
 test('search params accept a function of the previous value', () => {
-  const Probe = component(function* (_props, ctx) {
-    const [query, setQuery] = useSearchParams(ctx)
+  const Probe = component(function* () {
+    const [query, setQuery] = useSearchParams(this)
     yield () =>
       div(
         span(query.value.get('n') ?? '0'),
@@ -583,8 +583,8 @@ test('a lazy import resolving to nothing says so', async () => {
 // ---------------------------------------------------------------------------
 
 test('a synchronous loader is ready on the first render', () => {
-  const Show = component(function* (_props, ctx) {
-    const data = useLoader<string>(ctx)
+  const Show = component(function* () {
+    const data = useLoader<string>(this)
     yield () => div(`${data.value.status}:${data.value.data ?? '-'}`)
   })
   mount([{ path: '/x', component: Show, load: () => 'now' }], { at: '/x' })
@@ -593,8 +593,8 @@ test('a synchronous loader is ready on the first render', () => {
 })
 
 test('an async loader reports pending and then ready', async () => {
-  const Show = component(function* (_props, ctx) {
-    const data = useLoader<string>(ctx)
+  const Show = component(function* () {
+    const data = useLoader<string>(this)
     yield () => div(`${data.value.status}:${data.value.data ?? '-'}`)
   })
   const { history } = mount([
@@ -616,8 +616,8 @@ test('an async loader reports pending and then ready', async () => {
 })
 
 test('a loader that throws reports the error', () => {
-  const Show = component(function* (_props, ctx) {
-    const data = useLoader<string>(ctx)
+  const Show = component(function* () {
+    const data = useLoader<string>(this)
     yield () => div(`${data.value.status}:${String((data.value.error as Error)?.message ?? '')}`)
   })
   mount(
@@ -637,9 +637,9 @@ test('a loader that throws reports the error', () => {
 
 test('a superseded load is aborted and never lands', async () => {
   const aborted: string[] = []
-  const Show = component(function* (_props, ctx) {
-    const data = useLoader<string>(ctx)
-    const params = useParams(ctx)
+  const Show = component(function* () {
+    const data = useLoader<string>(this)
+    const params = useParams(this)
     yield () => div(`${params.value['id']}=${data.value.data ?? '-'}`)
   })
   const { history } = mount(
@@ -669,12 +669,12 @@ test('a superseded load is aborted and never lands', async () => {
 })
 
 test('a loader sees the params of its own depth', () => {
-  const Show = component(function* (_props, ctx) {
-    const data = useLoader<string>(ctx)
+  const Show = component(function* () {
+    const data = useLoader<string>(this)
     yield () => span(`[${data.value.data ?? '-'}]`)
   })
-  const Layout = component(function* (_props, ctx) {
-    const data = useLoader<string>(ctx)
+  const Layout = component(function* () {
+    const data = useLoader<string>(this)
     yield () => div(`outer:${data.value.data ?? '-'}`, Outlet())
   })
   mount(
@@ -692,8 +692,8 @@ test('a loader sees the params of its own depth', () => {
 })
 
 test('a depth with no loader still reports ready', () => {
-  const Show = component(function* (_props, ctx) {
-    const data = useLoader<string>(ctx)
+  const Show = component(function* () {
+    const data = useLoader<string>(this)
     yield () => div(data.value.status)
   })
   mount([{ path: '/x', component: Show }], { at: '/x' })
@@ -740,7 +740,7 @@ test('unmounting aborts a load still in flight', async () => {
 
 test('leaving a route disposes what it held', () => {
   const disposed: string[] = []
-  const Held = component(function* (_props, ctx) {
+  const Held = component(function* () {
     using _cleanup = disposable(() => disposed.push('held'))
     yield () => div('held')
   })
@@ -779,14 +779,14 @@ test('a key forces a remount when it changes', () => {
   // — only `patchChildren` consults keys; a component's root view is matched
   // on type alone.
   let mounts = 0
-  const Fresh = component(function* (_props, ctx) {
+  const Fresh = component(function* () {
     mounts++
-    const params = useParams(ctx)
+    const params = useParams(this)
     const seen = signal(params.value['id'])
     yield () => span(`${seen.value}`)
   })
-  const Wrapper = component(function* (_props, ctx) {
-    const params = useParams(ctx)
+  const Wrapper = component(function* () {
+    const params = useParams(this)
     yield (): Child => div(Fresh({ key: params.value['id'] ?? '' }))
   })
   const { history } = mount([{ path: '/u/:id', component: Wrapper }], { at: '/u/1' })

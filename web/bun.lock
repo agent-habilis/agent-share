@@ -6,7 +6,9 @@
       "name": "agent-share-web",
       "dependencies": {
         "client-zip": "^2.4.5",
-        "moonspace-ui": "workspace:*",
+        "moonspace": "workspace:*",
+        "moonspace-dom": "workspace:*",
+        "moonspace-theme": "workspace:*",
         "visage-dom": "workspace:*",
         "visage-router": "workspace:*",
         "visage-style": "workspace:*",
@@ -17,12 +19,34 @@
         "typescript": "^7.0.2",
       },
     },
-    "vendor/moonspace-ui": {
-      "name": "moonspace-ui",
+    "vendor/moonspace": {
+      "name": "moonspace",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@types/bun": "^1.3.14",
+        "typescript": "^5.9.0",
+      },
+    },
+    "vendor/moonspace-dom": {
+      "name": "moonspace-dom",
       "version": "0.0.0",
       "dependencies": {
+        "moonspace": "workspace:*",
+        "moonspace-theme": "workspace:*",
         "visage-dom": "workspace:*",
         "visage-style": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.14",
+        "typescript": "^5.9.0",
+      },
+    },
+    "vendor/moonspace-theme": {
+      "name": "moonspace-theme",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@types/bun": "^1.3.14",
+        "typescript": "^5.9.0",
       },
     },
     "vendor/visage-dom": {
@@ -105,7 +129,11 @@
 
     "happy-dom": ["happy-dom@20.11.1", "", { "dependencies": { "@types/node": ">=20.0.0", "@types/whatwg-mimetype": "^3.0.2", "@types/ws": "^8.18.1", "buffer-image-size": "^0.6.4", "entities": "^7.0.1", "whatwg-mimetype": "^3.0.0", "ws": "^8.21.0" } }, "sha512-XSt8tMzbW9ymE7687xztkO1ckR7qJNQ3LywY9vlYGhGi3zXrGBHuUo2Cl1ztZaICW+1eAGdkLbj6iwVqDT33kg=="],
 
-    "moonspace-ui": ["moonspace-ui@workspace:vendor/moonspace-ui"],
+    "moonspace": ["moonspace@workspace:vendor/moonspace"],
+
+    "moonspace-dom": ["moonspace-dom@workspace:vendor/moonspace-dom"],
+
+    "moonspace-theme": ["moonspace-theme@workspace:vendor/moonspace-theme"],
 
     "typescript": ["typescript@7.0.2", "", { "optionalDependencies": { "@typescript/typescript-aix-ppc64": "7.0.2", "@typescript/typescript-darwin-arm64": "7.0.2", "@typescript/typescript-darwin-x64": "7.0.2", "@typescript/typescript-freebsd-arm64": "7.0.2", "@typescript/typescript-freebsd-x64": "7.0.2", "@typescript/typescript-linux-arm": "7.0.2", "@typescript/typescript-linux-arm64": "7.0.2", "@typescript/typescript-linux-loong64": "7.0.2", "@typescript/typescript-linux-mips64el": "7.0.2", "@typescript/typescript-linux-ppc64": "7.0.2", "@typescript/typescript-linux-riscv64": "7.0.2", "@typescript/typescript-linux-s390x": "7.0.2", "@typescript/typescript-linux-x64": "7.0.2", "@typescript/typescript-netbsd-arm64": "7.0.2", "@typescript/typescript-netbsd-x64": "7.0.2", "@typescript/typescript-openbsd-arm64": "7.0.2", "@typescript/typescript-openbsd-x64": "7.0.2", "@typescript/typescript-sunos-x64": "7.0.2", "@typescript/typescript-win32-arm64": "7.0.2", "@typescript/typescript-win32-x64": "7.0.2" }, "bin": { "tsc": "bin/tsc" } }, "sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA=="],
 
@@ -120,5 +148,11 @@
     "whatwg-mimetype": ["whatwg-mimetype@3.0.0", "", {}, "sha512-nt+N2dzIutVRxARx1nghPKGv1xHikU7HKdfafKkLNLindmPU/ch3U31NOCGGA/dmPcmb1VlofO0vnKAcsm0o/Q=="],
 
     "ws": ["ws@8.21.1", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-+0NTnW77fFN/DjQi6k/Sq/Yvk4Sgajw7urW8V+asjXnRgDs9gyGkdb7EzgfhA4goXsRIZKE28fzIXBHEzhuiWw=="],
+
+    "moonspace/typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+
+    "moonspace-dom/typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+
+    "moonspace-theme/typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
   }
 }

@@ -11,6 +11,7 @@
     "visage-dom": "workspace:*"
   },
   "scripts": {
+    "build": "bun run ../../scripts/build.ts visage-style",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   }

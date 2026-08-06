@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>agent-share lab</title>
     <style>
+      /* Superstylin pairs, matching the app; the OS picks the half. */
       :root {
-        color-scheme: light;
+        color-scheme: light dark;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         font-size: 14px;
         line-height: 1.4;
@@ -14,8 +15,8 @@
       body {
         margin: 0;
         padding: 1rem;
-        background: #f4f4f1;
-        color: #1a1a1a;
+        background: light-dark(#f6f6f6, #1e1d1e);
+        color: light-dark(#272727, #ffffff);
       }
       h1 {
         font-size: 1rem;
@@ -36,8 +37,8 @@
         }
       }
       section {
-        background: #fff;
-        border: 1px solid #ccc;
+        background: light-dark(#ffffff, #272727);
+        border: 1px solid light-dark(#d8d8d8, #000000);
         padding: 0.75rem;
       }
       button,
@@ -62,8 +63,8 @@
       pre {
         margin: 0.5rem 0 0;
         padding: 0.5rem;
-        background: #111;
-        color: #d6ffd6;
+        background: light-dark(#f6f6f6, #1e1d1e);
+        color: light-dark(#127a4a, #6cd8a0);
         white-space: pre-wrap;
         word-break: break-word;
         min-height: 8rem;
@@ -78,7 +79,7 @@
         margin: 0.5rem 0;
       }
       .hint {
-        color: #555;
+        color: light-dark(#595859, #a6a5a6);
         margin: 0 0 1rem;
       }
       a {

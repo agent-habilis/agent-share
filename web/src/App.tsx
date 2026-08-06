@@ -14,10 +14,10 @@ import {
   Spinner,
   Stack,
   Text,
-  roleVar,
-} from 'moonspace-ui'
+  t,
+} from 'moonspace-dom'
 import { component, computed, interval, signal } from 'visage-dom'
-import type { Child, Ctx } from 'visage-dom'
+import type { Child } from 'visage-dom'
 
 import { ColumnView } from './ColumnView.tsx'
 import { seedState } from './seeding.ts'
@@ -376,7 +376,7 @@ function SessionChrome({
           minHeight: 0,
           display: 'flex',
           flexDirection: 'column',
-          background: roleVar.bg,
+          background: t.bg,
         }}
       >
         {children}
@@ -520,7 +520,9 @@ function FailedBody({ reason, kind }: { reason: string; kind?: FailureKind }) {
   )
 }
 
-const Home = component(function* (_props, ctx: Ctx) {
+const Home = component(function* (_props) {
+  // Nested plain functions below capture `ctx`; `this` would not reach them.
+  const ctx = this
   const state = signal<HomeState>({ phase: 'landing' })
   /**
    * Optional password for the share about to be created. Read at the moment
@@ -724,10 +726,9 @@ const Session = component<{
   view: ShareView
   transport?: TransportMode
   dev?: boolean
-}>(function* (
-  props,
-  ctx: Ctx,
-) {
+}>(function* (props) {
+  // Nested plain functions below capture `ctx`; `this` would not reach them.
+  const ctx = this
   const state = signal<State>({ phase: 'connecting' })
   const path = signal<string[]>([])
   const transfer = signal<Transfer | null>(null)
@@ -1516,12 +1517,12 @@ const Session = component<{
   }
 })
 
-export const App = component(function* (_props, ctx: Ctx) {
+export const App = component(function* (_props) {
   const route = signal(parseRoute())
   const stop = onRouteChange(() => {
     route.value = parseRoute()
   })
-  ctx.aborted.addEventListener('abort', stop)
+  this.aborted.addEventListener('abort', stop)
 
   yield () => {
     const current = route.value

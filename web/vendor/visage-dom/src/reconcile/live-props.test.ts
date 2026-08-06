@@ -238,16 +238,16 @@ test('assigning to a prop throws', () => {
   expect(() => render(div(Bad({ label: 'x' })), host)).toThrow(/assigned to a prop/)
 })
 
-test('reading props after an await needs ctx.track, and then it works', async () => {
+test('reading props after an await needs this.track, and then it works', async () => {
   // The synchronous window closes at the first await for props exactly as it
-  // does for signals, and ctx.track reopens it for both.
+  // does for signals, and this.track reopens it for both.
   const { asyncComponent } = await import('../index.ts')
 
   let tracked = ''
-  const Child = asyncComponent<{ label: string }>(async function* (props, ctx) {
+  const Child = asyncComponent<{ label: string }>(async function* (props) {
     while (true) {
       await Promise.resolve()
-      tracked = ctx.track(() => props.label)
+      tracked = this.track(() => props.label)
       yield span(tracked)
       await new Promise((resolve) => setTimeout(resolve, 0))
     }

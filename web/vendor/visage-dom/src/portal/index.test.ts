@@ -153,7 +153,7 @@ test('unmounting the portal leaves the target clean', () => {
 
 test('components inside a portal are disposed on unmount', () => {
   const cleaned: string[] = []
-  const Inner = component(function* (_props, ctx) {
+  const Inner = component(function* () {
     using _cleanup = disposable(() => cleaned.push('inner'))
     yield () => span('inner')
   })

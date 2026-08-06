@@ -3,13 +3,13 @@
  *
  * A token is an identity, not a store. It carries a symbol the reconciler keys
  * on, a name for error messages, and an optional default; the values themselves
- * live on the component instances that provided them, and `ctx.inject` finds
+ * live on the component instances that provided them, and `this.inject` finds
  * the nearest one by walking up the component tree.
  *
  * There is no provider component. `component()` builds descriptors with an
  * empty children array, so a component cannot take positional children, and a
  * `<Theme.Provider>` wrapper would read well in JSX and badly everywhere else.
- * Providing from `ctx` works the same from both front ends.
+ * Providing from `this` works the same from both front ends.
  */
 
 /** The `defaultValue` slot when a token was created without one. */

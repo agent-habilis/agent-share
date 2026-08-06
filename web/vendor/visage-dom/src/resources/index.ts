@@ -160,7 +160,7 @@ export function poll(
  * `addEventListener`, removed on dispose. Typed per target through the DOM event
  * maps, so the handler's event type is inferred.
  *
- * Inside a component, `addEventListener(..., { signal: ctx.aborted })` does the
+ * Inside a component, `addEventListener(..., { signal: this.aborted })` does the
  * same job and stays the recommended form; this exists for use outside one.
  */
 export function listen<K extends keyof WindowEventMap>(

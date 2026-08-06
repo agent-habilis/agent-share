@@ -19,7 +19,7 @@
  * return the moment a connection does.
  */
 
-import { Spinner, Text, oneRow } from 'moonspace-ui'
+import { ONE_ROW, Spinner, Text } from 'moonspace-dom'
 import { component } from 'visage-dom'
 import type { ReadonlySignal } from 'visage-dom'
 import { Style, css, raw } from 'visage-style'
@@ -144,7 +144,7 @@ function Separator() {
  * narrow window the actions are what a reader needs and the rates are not.
  */
 const READOUT = css({
-  ...oneRow,
+  ...ONE_ROW,
   display: 'inline-flex',
   alignItems: 'center',
   gap: raw('1ch'),

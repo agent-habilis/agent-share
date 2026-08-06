@@ -82,6 +82,26 @@ export type AsyncBehavior<P = unknown, R = void> = AsyncGenerator<Yielded, R, P>
 // Component context
 // ---------------------------------------------------------------------------
 
+/**
+ * The component context, reached as `this` inside a component body.
+ *
+ *     const C = component(function* () {
+ *       const theme = this.inject(Theme)
+ *       yield () => div(theme.value)
+ *     })
+ *
+ * It arrives through `this` rather than a second parameter so that a component
+ * needing nothing from the runtime declares nothing, and one needing everything
+ * declares nothing either. `this` is the language's own dynamic scope: it is
+ * bound when the generator is *called*, so unlike an ambient module global it
+ * stays correct for the whole body — including after an `await`, and inside any
+ * arrow function the body closes over.
+ *
+ * The cost is that it does not cross a call boundary. A plain helper or a
+ * `yield*` delegate has its own `this`, so it takes what it needs as an ordinary
+ * argument — `useParams(this)` — or is invoked with `yield* behavior.call(this)`.
+ * TypeScript rejects the form that would silently get `undefined`.
+ */
 export interface Ctx {
   /**
    * Resume this component explicitly. The signal layer is built on this; you
@@ -123,7 +143,7 @@ export interface Ctx {
 // ---------------------------------------------------------------------------
 
 export interface ComponentDef<P> {
-  readonly render: (props: P, ctx: Ctx) => ComponentGen | AsyncComponentGen
+  readonly render: (this: Ctx, props: P) => ComponentGen | AsyncComponentGen
   readonly name: string
   readonly isAsync: boolean
   /**

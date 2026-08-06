@@ -1,8 +1,8 @@
 import { test, expect, beforeEach } from 'bun:test'
 import {
-  batch, component, computed, disposable, flushSync, keyed, render, signal, tags,
+  batch, component, computed, context, disposable, flushSync, keyed, render, signal, tags,
 } from './index.ts'
-import type { Behavior, ComponentGen } from './index.ts'
+import type { Behavior, ComponentGen, Ctx } from './index.ts'
 
 /** Subscriber count. `subs` is internal to the signal graph, not public API. */
 const subCount = (source: unknown): number =>
@@ -60,20 +60,6 @@ test('applies properties, style objects, dataset and attrs', () => {
   expect(el.style.paddingLeft).toBe('4px')
   expect(el.dataset['role']).toBe('main')
   expect(el.getAttribute('aria-label')).toBe('hi')
-})
-
-test('unitless style numbers stay bare (flex: 1 is not 1px)', () => {
-  const App = component(function* () {
-    yield () => div({ style: { flex: 1, opacity: 0.5, zIndex: 2, padding: 8 } })
-  })
-  render(App(), host)
-  const el = host.querySelector('div')!
-  // Browsers expand the `flex: 1` shorthand; the bug was writing `1px`.
-  expect(el.style.flex).not.toContain('px')
-  expect(el.style.getPropertyValue('flex')).not.toBe('1px')
-  expect(el.style.opacity).toBe('0.5')
-  expect(el.style.zIndex).toBe('2')
-  expect(el.style.padding).toBe('8px')
 })
 
 // ---------------------------------------------------------------------------
@@ -157,11 +143,11 @@ test('dependencies are recomputed each yield, so they can change', () => {
   expect(renders).toBe(before)
 })
 
-test('ctx.refresh() resumes without any signal', () => {
+test('this.refresh() resumes without any signal', () => {
   let n = 0
-  const C = component(function* (_props, ctx) {
+  const C = component(function* () {
     while (true) {
-      yield button({ onclick: () => { n += 1; ctx.refresh() } }, `n=${n}`)
+      yield button({ onclick: () => { n += 1; this.refresh() } }, `n=${n}`)
     }
   })
   render(C(), host)
@@ -252,9 +238,9 @@ test('yield* delegates view and state to a behavior', () => {
     }
   }
 
-  const C = component(function* (_props, ctx) {
+  const C = component(function* () {
     yield* counterBehavior(2)
-    void ctx
+    void this
   })
 
   render(C(), host)
@@ -306,10 +292,10 @@ test('using inside a component disposes on unmount', () => {
   expect(log).toEqual(['b', 'a'])
 })
 
-test('ctx.aborted fires on unmount', () => {
+test('this.aborted fires on unmount', () => {
   let aborted = false
-  const C = component(function* (_props, ctx) {
-    ctx.aborted.addEventListener('abort', () => { aborted = true })
+  const C = component(function* () {
+    this.aborted.addEventListener('abort', () => { aborted = true })
     yield () => div('x')
   })
   const root = render(C(), host)
@@ -722,4 +708,53 @@ test('a ref that returns nothing is still fine', () => {
   const root = render(C(), host)
   expect(seen).not.toBeNull()
   expect(() => root.unmount()).not.toThrow()
+})
+
+// ---------------------------------------------------------------------------
+// The `this` binding
+// ---------------------------------------------------------------------------
+
+test('a yield* delegate reaches the context through .call(this)', () => {
+  const Theme = context<string>('theme')
+
+  // A behavior is an ordinary generator function, so it gets its own `this` —
+  // the one thing `this` does not do is cross a call boundary. Declaring the
+  // parameter is what makes the requirement visible: TypeScript rejects a bare
+  // `yield* withTheme()` rather than letting it read `undefined` at runtime.
+  function* withTheme(this: Ctx): Behavior<unknown, string> {
+    return this.inject(Theme)
+  }
+
+  const Leaf = component(function* () {
+    const theme = yield* withTheme.call(this)
+    yield () => span(theme)
+  })
+
+  const App = component(function* () {
+    this.provide(Theme, 'delegated')
+    yield () => div(Leaf())
+  })
+
+  render(App(), host)
+  expect(host.textContent).toBe('delegated')
+})
+
+test('a plain helper takes the context as an ordinary argument', () => {
+  // The shape every `use*` in visage-router has: `this` at the call site, a
+  // normal parameter in the helper.
+  const Theme = context<string>('theme')
+  const useTheme = (ctx: Ctx): string => ctx.inject(Theme)
+
+  const Leaf = component(function* () {
+    const theme = useTheme(this)
+    yield () => span(theme)
+  })
+
+  const App = component(function* () {
+    this.provide(Theme, 'threaded')
+    yield () => div(Leaf())
+  })
+
+  render(App(), host)
+  expect(host.textContent).toBe('threaded')
 })

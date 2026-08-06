@@ -1,12 +1,13 @@
 /*
- * Page chrome sits darker than the file browser surface.
+ * Page chrome sits below the file browser surface (darker in dark mode,
+ * dimmer in light).
  *
- * `html body` beats moonspace-ui's unlayered `body { background: var(--ms-bg) }`
- * regardless of stylesheet link order — Bun's HTML bundler does not preserve
- * the JS import order Vite did (global.css then app.css).
+ * moonspace-dom's GlobalStyle puts `body { background: var(--bg) }` in
+ * `@layer reset`; this file is unlayered author CSS, so it wins regardless
+ * of order. `html body` keeps the extra specificity for good measure.
  */
 html body {
-  background: var(--ms-bg-sunken);
+  background: var(--bg-sunken);
 }
 
 #root {
@@ -23,8 +24,8 @@ html body {
  * CSS's reach. If an `<input>` ever lands in this app it needs `user-select`
  * back, or it will not be possible to select text inside it.
  *
- * Unlayered on purpose: author CSS outside `@layer` outranks both the `base`
- * and `components` layers moonspace-ui declares, so this wins over any
+ * Unlayered on purpose: author CSS outside `@layer` outranks both the `reset`
+ * and `moonspace` layers moonspace-dom declares, so this wins over any
  * component style without reaching for `!important`.
  */
 html {

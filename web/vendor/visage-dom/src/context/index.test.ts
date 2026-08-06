@@ -29,8 +29,8 @@ beforeEach(() => {
 test('a descendant reads what an ancestor provided', () => {
   const Theme = context<string>('theme')
 
-  const Leaf = component(function* (_props, ctx) {
-    const theme = ctx.inject(Theme)
+  const Leaf = component(function* () {
+    const theme = this.inject(Theme)
     yield () => span(theme)
   })
 
@@ -38,8 +38,8 @@ test('a descendant reads what an ancestor provided', () => {
     yield () => div(Leaf())
   })
 
-  const App = component(function* (_props, ctx) {
-    ctx.provide(Theme, 'dark')
+  const App = component(function* () {
+    this.provide(Theme, 'dark')
     yield () => div(Middle())
   })
 
@@ -50,17 +50,17 @@ test('a descendant reads what an ancestor provided', () => {
 test('the nearest provider wins', () => {
   const Theme = context<string>('theme')
 
-  const Leaf = component(function* (_props, ctx) {
-    yield () => span(ctx.inject(Theme))
+  const Leaf = component(function* () {
+    yield () => span(this.inject(Theme))
   })
 
-  const Inner = component(function* (_props, ctx) {
-    ctx.provide(Theme, 'inner')
+  const Inner = component(function* () {
+    this.provide(Theme, 'inner')
     yield () => div(Leaf())
   })
 
-  const Outer = component(function* (_props, ctx) {
-    ctx.provide(Theme, 'outer')
+  const Outer = component(function* () {
+    this.provide(Theme, 'outer')
     yield () => div(Leaf(), Inner())
   })
 
@@ -72,12 +72,12 @@ test('the nearest provider wins', () => {
 test('siblings do not see one another values', () => {
   const Slot = context<string>('slot')
 
-  const Leaf = component(function* (_props, ctx) {
-    yield () => span(ctx.inject(Slot))
+  const Leaf = component(function* () {
+    yield () => span(this.inject(Slot))
   })
 
-  const Branch = component<{ value: string }>(function* (props, ctx) {
-    ctx.provide(Slot, props.value)
+  const Branch = component<{ value: string }>(function* (props) {
+    this.provide(Slot, props.value)
     yield () => div(Leaf())
   })
 
@@ -96,8 +96,8 @@ test('siblings do not see one another values', () => {
 test('falls back to the token default', () => {
   const Theme = context<string>('theme', 'light')
 
-  const App = component(function* (_props, ctx) {
-    yield () => div(ctx.inject(Theme))
+  const App = component(function* () {
+    yield () => div(this.inject(Theme))
   })
 
   render(App(), host)
@@ -107,8 +107,8 @@ test('falls back to the token default', () => {
 test('a default of undefined is still a default', () => {
   const Maybe = context<string | undefined>('maybe', undefined)
 
-  const App = component(function* (_props, ctx) {
-    yield () => div(String(ctx.inject(Maybe)))
+  const App = component(function* () {
+    yield () => div(String(this.inject(Maybe)))
   })
 
   render(App(), host)
@@ -118,8 +118,8 @@ test('a default of undefined is still a default', () => {
 test('injecting an unprovided token without a default throws', () => {
   const Missing = context<string>('router')
 
-  const App = component(function* (_props, ctx) {
-    yield () => div(ctx.inject(Missing))
+  const App = component(function* () {
+    yield () => div(this.inject(Missing))
   })
 
   expect(() => render(App(), host)).toThrow(/no value provided for context "router"/)
@@ -129,9 +129,9 @@ test('two tokens with the same name do not collide', () => {
   const a = context<string>('dup', 'from-a')
   const b = context<string>('dup', 'from-b')
 
-  const App = component(function* (_props, ctx) {
-    ctx.provide(a, 'provided-a')
-    yield () => div(ctx.inject(a), '/', ctx.inject(b))
+  const App = component(function* () {
+    this.provide(a, 'provided-a')
+    yield () => div(this.inject(a), '/', this.inject(b))
   })
 
   render(App(), host)
@@ -146,14 +146,14 @@ test('a signal-valued context propagates updates to readers', () => {
   const Theme = context<Signal<string>>('theme')
   const theme = signal('dark')
 
-  const Leaf = component(function* (_props, ctx) {
-    const value = ctx.inject(Theme)
+  const Leaf = component(function* () {
+    const value = this.inject(Theme)
     // Read inside the loop, so it is re-read on every resume and tracked.
     yield () => span(value.value)
   })
 
-  const App = component(function* (_props, ctx) {
-    ctx.provide(Theme, theme)
+  const App = component(function* () {
+    this.provide(Theme, theme)
     yield () => div(Leaf())
   })
 
@@ -173,13 +173,13 @@ test('a signal-valued context propagates updates to readers', () => {
 test('a component mounted during a later re-render still finds the value', () => {
   const Theme = context<string>('theme')
 
-  const Leaf = component(function* (_props, ctx) {
-    yield () => span(ctx.inject(Theme))
+  const Leaf = component(function* () {
+    yield () => span(this.inject(Theme))
   })
 
   const show = signal(false)
-  const App = component(function* (_props, ctx) {
-    ctx.provide(Theme, 'dark')
+  const App = component(function* () {
+    this.provide(Theme, 'dark')
     // Leaf does not exist on the first render; it is mounted from a commit.
     yield () => div(show.value ? Leaf() : 'empty')
   })
@@ -195,14 +195,14 @@ test('a component mounted during a later re-render still finds the value', () =>
 test('items added to a keyed list find the value', () => {
   const Prefix = context<string>('prefix')
 
-  const Item = component<{ n: number }>(function* (props, ctx) {
-    const prefix = ctx.inject(Prefix)
+  const Item = component<{ n: number }>(function* (props) {
+    const prefix = this.inject(Prefix)
     yield () => li(`${prefix}${props.n}`)
   })
 
   const items = signal<number[]>([1])
-  const App = component(function* (_props, ctx) {
-    ctx.provide(Prefix, '#')
+  const App = component(function* () {
+    this.provide(Prefix, '#')
     yield () => ul(items.value.map((n) => Item({ key: n, n })))
   })
 
@@ -217,12 +217,12 @@ test('items added to a keyed list find the value', () => {
 test('an async component provides to children it mounts after awaiting', async () => {
   const Theme = context<string>('theme')
 
-  const Leaf = component(function* (_props, ctx) {
-    yield () => span(ctx.inject(Theme))
+  const Leaf = component(function* () {
+    yield () => span(this.inject(Theme))
   })
 
-  const App = asyncComponent(async function* (_props, ctx) {
-    ctx.provide(Theme, 'async-dark')
+  const App = asyncComponent(async function* () {
+    this.provide(Theme, 'async-dark')
     yield div('loading')
     await tick(5)
     // Mounted from a commit that happens after an await, where the resume
@@ -240,15 +240,38 @@ test('an async component provides to children it mounts after awaiting', async (
   expect(host.textContent).toBe('async-dark')
 })
 
+test('this is still bound after an await, so inject works past one', async () => {
+  const Theme = context<string>('theme')
+
+  const Child = asyncComponent(async function* () {
+    await tick(5)
+    // The whole reason the context arrives through `this`. The binding belongs
+    // to the generator's execution context, so it is untouched by the await —
+    // where a module-global "currently rendering" cell would have been cleared
+    // the moment `gen.next()` returned.
+    const theme = this.inject(Theme)
+    while (true) yield span(theme)
+  })
+
+  const App = component(function* () {
+    this.provide(Theme, 'past-the-await')
+    yield () => div(Child())
+  })
+
+  render(App(), host)
+  await tick(30)
+  expect(host.textContent).toBe('past-the-await')
+})
+
 test('provide is scoped to the subtree and gone after unmount', () => {
   const Theme = context<string>('theme', 'default')
 
-  const Leaf = component(function* (_props, ctx) {
-    yield () => span(ctx.inject(Theme))
+  const Leaf = component(function* () {
+    yield () => span(this.inject(Theme))
   })
 
-  const Provider = component(function* (_props, ctx) {
-    ctx.provide(Theme, 'scoped')
+  const Provider = component(function* () {
+    this.provide(Theme, 'scoped')
     yield () => div(Leaf())
   })
 

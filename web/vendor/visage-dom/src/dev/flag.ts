@@ -24,6 +24,10 @@
  * `DEV` and defines it directly. See the comment on `foldDev` there.
  *
  * Not re-exported from `src/index.ts`: this is not public API.
+ *
+ * The cast keeps this compiling in programs without the Bun/Node globals —
+ * the app's tsconfig deliberately sets `types: []`, and tsc typechecks this
+ * vendored source as part of the app program.
  */
 export const DEV =
   (globalThis as typeof globalThis & { process?: { env?: { NODE_ENV?: string } } }).process?.env

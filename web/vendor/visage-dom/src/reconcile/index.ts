@@ -62,11 +62,10 @@ interface ElFiber {
   key: Key | undefined
   dom: HostEl
   tag: string
-  props: Readonly<Record<string, unknown>>
   children: Fiber[]
   /** What this element's `ref` handed back, run when the fiber is disposed. */
   detach: (() => void) | undefined
-  /** The descriptor that produced this fiber, for the identity bail in `patch`. */
+  /** The descriptor that produced this fiber — also where its props live (`vnode.props`), so patch's previous-props read has to happen before this is overwritten. */
   vnode: ElementNode
 }
 
@@ -365,7 +364,7 @@ class Instance implements Subscriber {
    * thousand allocations per update.
    */
   #depsAlt = new Set<Source>()
-  /** Allocated on demand: most components never read `ctx.aborted`. */
+  /** Allocated on demand: most components never read `this.aborted`. */
   #abort: AbortController | null = null
   #finished = false
   #fiber: CompFiber | null = null
@@ -375,7 +374,7 @@ class Instance implements Subscriber {
   #looping = false
   #pending: object | typeof NO_VIEW = NO_VIEW
   /**
-   * Deps collected during the current resume. `ctx.track()` adds into this so
+   * Deps collected during the current resume. `this.track()` adds into this so
    * that reads after an `await` survive the end-of-resume resubscribe.
    */
   #resumeDeps: Set<Source> | null = null
@@ -503,47 +502,29 @@ class Instance implements Subscriber {
    */
   get propsView(): object {
     if (this.#propsView !== null) return this.#propsView
-    const self = this
-    this.#propsView = new Proxy(
-      {},
-      {
-        get(_target, key): unknown {
-          if (typeof key === 'string') self.#readProp(key)
-          return (self.#props as Record<string | symbol, unknown>)[key]
-        },
-        has(_target, key): boolean {
-          if (typeof key === 'string') self.#readProp(key)
-          return key in self.#props
-        },
-        ownKeys(): ArrayLike<string | symbol> {
-          // A spread or `Object.keys` reads everything, so it depends on
-          // everything. Recording each key is what makes that true rather than
-          // merely plausible.
-          const keys = Reflect.ownKeys(self.#props)
-          for (const key of keys) if (typeof key === 'string') self.#readProp(key)
-          return keys
-        },
-        getOwnPropertyDescriptor(_target, key): PropertyDescriptor | undefined {
-          const descriptor = Reflect.getOwnPropertyDescriptor(self.#props, key)
-          // The target has no own properties, so anything reported back must be
-          // configurable or the invariant check throws.
-          return descriptor === undefined ? undefined : { ...descriptor, configurable: true }
-        },
-        set(): boolean {
-          if (DEV) {
-            throw new Error(
-              `view: <${self.#def.name}> assigned to a prop. Props are owned by the ` +
-                'parent and are read-only here; hold state the parent does not ' +
-                'describe in a signal or a generator-scope variable.',
-            )
-          }
-          // Stripped in production: the write is dropped rather than corrupting
-          // the parent's descriptor, which is the same outcome the throw has.
-          return true
-        },
-      },
-    )
+    // The target has no own properties, same reasoning as before: the props
+    // object may be the frozen `NO_PROPS` singleton, and a frozen target
+    // constrains what the traps are allowed to return. It still has to be
+    // fresh per instance — `PROPS_VIEW_HANDLER` is what is shared, not this.
+    const target = {}
+    instanceForTarget.set(target, this)
+    this.#propsView = new Proxy(target, PROPS_VIEW_HANDLER)
     return this.#propsView
+  }
+
+  /** For `PROPS_VIEW_HANDLER` — records a prop read against the resume in flight. */
+  notePropRead(key: string): void {
+    this.#readProp(key)
+  }
+
+  /** For `PROPS_VIEW_HANDLER`. */
+  get liveProps(): object {
+    return this.#props
+  }
+
+  /** For `PROPS_VIEW_HANDLER`'s DEV-mode `set` throw. */
+  get displayName(): string {
+    return this.#def.name
   }
 
   /** Open the prop-read window for a resume. Pairs with `#endPropWindow`. */
@@ -754,7 +735,7 @@ class Instance implements Subscriber {
     }
     if (hasDefault(key)) return defaultOf(key)
     throw new Error(
-      `view: no value provided for context "${key.name}". Call ctx.provide(${key.name}, …) ` +
+      `view: no value provided for context "${key.name}". Call this.provide(${key.name}, …) ` +
         'in an ancestor, or give the token a default.',
     )
   }
@@ -763,7 +744,7 @@ class Instance implements Subscriber {
     // `dispose` aborts the controller, but only when something had already read
     // this — allocation is lazy so most components never build one. Without the
     // check, a first read *after* teardown hands back a fresh, un-aborted
-    // signal, and the canonical `if (ctx.aborted.aborted) return` guard after
+    // signal, and the canonical `if (this.aborted.aborted) return` guard after
     // an `await` reads false on a component that is already gone.
     if (this.#abort === null && this.disposed) return AbortSignal.abort()
     return (this.#abort ??= new AbortController()).signal
@@ -780,7 +761,7 @@ class Instance implements Subscriber {
     // them; otherwise fall back to the instance's standing deps.
     const target = this.#resumeDeps ?? this.#deps
     const prev = openTracking(target)
-    // Props are tracked the same way, so `ctx.track(() => props.x)` after an
+    // Props are tracked the same way, so `this.track(() => props.x)` after an
     // `await` records the prop key just as it records a signal read. Falls back
     // to the standing set for the same reason the deps do.
     const prevKeys = this.#resumePropKeys
@@ -865,7 +846,7 @@ class Instance implements Subscriber {
     const deps = this.#depsAlt
     deps.clear()
     const prev = openTracking(deps)
-    // So that a `ctx.track()` inside this window collects into the set the
+    // So that a `this.track()` inside this window collects into the set the
     // resubscribe below keeps, rather than into the outgoing one.
     this.#resumeDeps = deps
     this.#beginPropWindow()
@@ -892,7 +873,7 @@ class Instance implements Subscriber {
   /**
    * Async resume. The synchronous tracking window cannot span an `await`, so
    * only reads before the first await are captured automatically; use
-   * `ctx.track()` for reads after one. See README "Async caveat".
+   * `this.track()` for reads after one. See README "Async caveat".
    *
    * Also reports whether the generator truly awaited anything: if its promise
    * settled before a macrotask boundary, it did not, which is how the spin
@@ -939,7 +920,7 @@ class Instance implements Subscriber {
         // The synchronous window closed at the first `await`, so open a fresh
         // one around the thunk. This is the one place the async caveat does not
         // apply: from here the component renders synchronously, and everything
-        // the thunk reads is tracked without `ctx.track()`.
+        // the thunk reads is tracked without `this.track()`.
         const inner = openTracking(deps)
         this.#beginPropWindow()
         try {
@@ -953,7 +934,7 @@ class Instance implements Subscriber {
       }
     }
 
-    // `deps` now holds the synchronous window plus anything ctx.track() added.
+    // `deps` now holds the synchronous window plus anything this.track() added.
     resubscribe(this, this.#deps, deps)
     this.#deps = deps
 
@@ -1025,11 +1006,17 @@ class Instance implements Subscriber {
    * first `next()`, so any prop read that happens in here came from
    * destructuring in the parameter list. `#constructing` is what lets
    * `#readProp` tell that apart from an ordinary read and refuse it.
+   *
+   * `this` is bound at the same moment and by the same rule, which is the whole
+   * reason the context arrives that way rather than as a second parameter: the
+   * binding belongs to the generator's execution context, so it survives every
+   * `yield` and every `await` in the body, and any arrow the body creates closes
+   * over it. A module-global would not — it is only correct inside a resume.
    */
   #construct(): ComponentGen | AsyncComponentGen {
     this.#constructing = true
     try {
-      return this.#def.render(this.propsView, this.ctx)
+      return this.#def.render.call(this.ctx, this.propsView)
     } finally {
       this.#constructing = false
     }
@@ -1119,7 +1106,7 @@ class Instance implements Subscriber {
     }
   }
 
-  /** Subscriber contract: a dependency changed, or ctx.refresh() was called. */
+  /** Subscriber contract: a dependency changed, or this.refresh() was called. */
   run(): void {
     if (this.disposed || this.#finished || this.#broken || !this.#fiber) return
 
@@ -1242,12 +1229,65 @@ class Instance implements Subscriber {
       }
     }
 
-    // Only components that actually read `ctx.aborted` ever have a controller.
+    // Only components that actually read `this.aborted` ever have a controller.
     this.#abort?.abort()
     unsubscribeAll(this, this.#deps)
     this.#gen = null
     this.#fiber = null
   }
+}
+
+/** Recovers the instance a `propsView` trap is firing for. See `PROPS_VIEW_HANDLER`. */
+const instanceForTarget = new WeakMap<object, Instance>()
+
+/**
+ * One `ProxyHandler`, shared by every component's `propsView` — the same
+ * "closures cost per instance, prototype methods don't" trade `InstanceCtx`
+ * already makes below, applied to the five Proxy traps instead of `Ctx`'s
+ * methods. Each instance still allocates its own opaque target (see
+ * `propsView`'s comment for why), just not its own copy of these five
+ * functions.
+ */
+const PROPS_VIEW_HANDLER: ProxyHandler<object> = {
+  get(target, key): unknown {
+    const inst = instanceForTarget.get(target) as Instance
+    if (typeof key === 'string') inst.notePropRead(key)
+    return (inst.liveProps as Record<string | symbol, unknown>)[key]
+  },
+  has(target, key): boolean {
+    const inst = instanceForTarget.get(target) as Instance
+    if (typeof key === 'string') inst.notePropRead(key)
+    return key in inst.liveProps
+  },
+  ownKeys(target): ArrayLike<string | symbol> {
+    const inst = instanceForTarget.get(target) as Instance
+    // A spread or `Object.keys` reads everything, so it depends on
+    // everything. Recording each key is what makes that true rather than
+    // merely plausible.
+    const keys = Reflect.ownKeys(inst.liveProps)
+    for (const key of keys) if (typeof key === 'string') inst.notePropRead(key)
+    return keys
+  },
+  getOwnPropertyDescriptor(target, key): PropertyDescriptor | undefined {
+    const inst = instanceForTarget.get(target) as Instance
+    const descriptor = Reflect.getOwnPropertyDescriptor(inst.liveProps, key)
+    // The target has no own properties, so anything reported back must be
+    // configurable or the invariant check throws.
+    return descriptor === undefined ? undefined : { ...descriptor, configurable: true }
+  },
+  set(target): boolean {
+    if (DEV) {
+      const inst = instanceForTarget.get(target) as Instance
+      throw new Error(
+        `view: <${inst.displayName}> assigned to a prop. Props are owned by the ` +
+          'parent and are read-only here; hold state the parent does not ' +
+          'describe in a signal or a generator-scope variable.',
+      )
+    }
+    // Stripped in production: the write is dropped rather than corrupting
+    // the parent's descriptor, which is the same outcome the throw has.
+    return true
+  },
 }
 
 /**
@@ -1440,14 +1480,19 @@ function mount(
 
   const tag = node.tag as string
   const dom = host.createNode(tag)
-  const children: Fiber[] = []
+  // Pre-sized and filled by index, like the array-vnode and portal branches
+  // above: a row's `<tr>` mounts with a known child count, and growing the
+  // array one `push` at a time reallocates as it goes for no reason.
+  let children: Fiber[] = []
+  let built = 0
   let detach: (() => void) | undefined
   let inserted = false
   try {
     host.applyProps(dom, node.props)
     const kids = flatten(node.children)
-    for (let i = 0; i < kids.length; i++) {
-      children.push(mount(host, kids[i] as Child, dom, null, depth + 1))
+    children = new Array(kids.length) as Fiber[]
+    for (; built < kids.length; built++) {
+      children[built] = mount(host, kids[built] as Child, dom, null, depth + 1)
     }
     host.insert(into, dom, before)
     inserted = true
@@ -1458,11 +1503,13 @@ function mount(
     // so `disposeTree` could never reach them again, and every `using` scope
     // and subscription beneath would leak with no way to unwind it.
     // Removing `dom` takes their nodes with it, so only disposal is needed.
-    for (const child of children) disposeTree(host, child)
+    // Only `built` slots are ever filled — the rest of a pre-sized array is
+    // holes, and iterating past `built` would hand `disposeTree` `undefined`.
+    for (let i = 0; i < built; i++) disposeTree(host, children[i] as Fiber)
     if (inserted) host.remove(dom)
     throw error
   }
-  return { kind: 'el', key: node.key, dom, tag, props: node.props, children, detach, vnode: node }
+  return { kind: 'el', key: node.key, dom, tag, children, detach, vnode: node }
 }
 
 /**
@@ -1715,8 +1762,9 @@ function patch(
     return fiber
   }
 
-  host.applyProps(fiber.dom, node.props, fiber.props)
-  fiber.props = node.props
+  // Read through the outgoing `vnode` before it is overwritten below — its
+  // `.props` is the fiber's only copy of what was last applied.
+  host.applyProps(fiber.dom, node.props, fiber.vnode.props)
   fiber.vnode = node
   // An element owns every one of its children, so the list runs to its end.
   try {
@@ -1771,6 +1819,40 @@ function patchChildren(
   if (newLen === 0) {
     unmountAll(host, parent, oldFibers, end)
     return NO_FIBERS
+  }
+
+  // Fast path: same length, and every old fiber reuses at its own index — no
+  // insertion, removal, or reorder anywhere in the list, which is the common
+  // case for a list whose *rows* changed but whose row count and order did
+  // not (`update`, `select`). Checked read-only first — `reusable` has no
+  // side effects — so a mismatch found part-way through never leaves
+  // anything patched; only once every index is confirmed reusable does the
+  // second loop run `patch`, in place on `oldFibers`, and skip the `result`
+  // allocation-and-copy below entirely.
+  if (oldFibers.length === newLen) {
+    let allReusable = true
+    for (let i = 0; i < newLen; i++) {
+      if (!reusable(oldFibers[i] as Fiber, vnodes[i] as Child)) {
+        allReusable = false
+        break
+      }
+    }
+    if (allReusable) {
+      try {
+        for (let i = 0; i < newLen; i++) {
+          oldFibers[i] = patch(host, oldFibers[i] as Fiber, vnodes[i] as Child, parent, depth)
+        }
+      } catch (error) {
+        // Same collapse as the general path's catch below: every slot still
+        // holds a fiber describing what is currently mounted at that
+        // position — the ones `patch` has not reached yet are still their
+        // original fiber, the ones it has are patched in place — so
+        // unmounting the whole array, patched or not, is exact.
+        for (const fiber of oldFibers) unmount(host, fiber)
+        throw error
+      }
+      return oldFibers
+    }
   }
 
   const result: Fiber[] = new Array(newLen) as Fiber[]

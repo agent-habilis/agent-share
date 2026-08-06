@@ -229,7 +229,7 @@ test('unmounting a fragment row removes all of its nodes', () => {
 
 test('cleanups run when a fragment row is removed', () => {
   const cleaned: number[] = []
-  const Tracked = component<{ n: number }>(function* (props, ctx) {
+  const Tracked = component<{ n: number }>(function* (props) {
     const id = props.n
     using _cleanup = disposable(() => cleaned.push(id))
     yield () => [li(`${props.n}a`), li(`${props.n}b`)]
