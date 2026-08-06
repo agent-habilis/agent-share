@@ -9,6 +9,7 @@ import {
   Badge,
   Box,
   Button,
+  Input,
   ProgressBar,
   Spinner,
   Stack,
@@ -60,6 +61,7 @@ import {
   type FileNode,
   type Manifest,
 } from './tree.ts'
+import { forgetPassword, rememberPassword, rememberedPassword } from './password.ts'
 import { loadWasm } from './wasm.ts'
 
 interface Client {
@@ -76,6 +78,8 @@ interface Client {
   close_connection(): void
   /** Announce departure from the share's mesh. Safe to call more than once. */
   leave_mesh(): void
+  /** The page-death farewell: purge the shared membership and broadcast. */
+  shutdown_mesh(): void
   /** Members on the share's mesh, including us. 0 when the mesh is not up. */
   readonly peers_gossip: number
   /** Peers we hold a direct WebRTC data channel with. */
@@ -119,6 +123,15 @@ type State =
   | { phase: 'idle' }
   | { phase: 'connecting' }
   | { phase: 'ready'; client: Client; manifest: Manifest }
+  /**
+   * The ticket says this share is password-protected and we do not have a
+   * password it accepts. Its own phase rather than a `failed` variant: nothing
+   * is broken and retrying changes nothing — the session is waiting on input.
+   *
+   * `error` is set on the second and later visits, when a password was tried
+   * and refused.
+   */
+  | { phase: 'needs-password'; error?: string }
   | { phase: 'failed'; reason: string; kind?: FailureKind }
 
 type HomeState =
@@ -156,6 +169,7 @@ function connect(
   ticket: string,
   transport?: TransportMode,
   originCapMs?: number,
+  password?: string,
 ): Promise<Client> {
   const key = clientKey(ticket, transport)
   let client = clients.get(key)
@@ -179,6 +193,7 @@ function connect(
           transport,
           buildPeerCard({ role: 'consumer' }),
           originCapMs,
+          password,
         ) as unknown as Promise<Client>,
     )
     // Evict on failure so a retry (a re-entered hash, say) can dial again.
@@ -398,6 +413,82 @@ function LoadingBody({ label }: { label: string }) {
   )
 }
 
+/**
+ * The prefix wasm puts on every credential failure, so the page can tell
+ * "wrong password, ask again" from "this share is broken" without reading prose.
+ * Mirrors `UNAUTHORIZED_PREFIX` in the wasm client.
+ */
+const UNAUTHORIZED_PREFIX = 'unauthorized:'
+
+/** Whether `error` is the producer refusing the password rather than a fault. */
+function isUnauthorized(error: unknown): boolean {
+  return String(error).includes(UNAUTHORIZED_PREFIX)
+}
+
+/**
+ * The gate in front of a password-protected share.
+ *
+ * Rendered instead of the file browser, not over it: there is nothing behind it
+ * to see yet. Until a password the producer accepts arrives, this tab has not
+ * connected, is not on the share's mesh, and holds no listing — the ticket in
+ * the URL is an address, not a key.
+ */
+function PasswordGate({
+  error,
+  onSubmit,
+}: {
+  error?: string
+  onSubmit: (password: string) => void
+}) {
+  let typed = ''
+  const submit = () => {
+    // An empty password is not a password — sending it would spend ~100 ms of
+    // Argon2id and a round trip to be told what we already know.
+    if (typed.length > 0) onSubmit(typed)
+  }
+  // A real `<form>` rather than a keydown handler on the input: Enter-to-submit
+  // then comes from the platform, and the browser's password managers recognise
+  // the shape and offer to fill it.
+  return (
+    <Centered>
+      <div style={{ padding: '0 2ch', maxWidth: '60ch' }}>
+        <Box border="line" padX={2} padY={1}>
+          <form
+            onsubmit={(event: Event) => {
+              event.preventDefault()
+              submit()
+            }}
+          >
+            <Stack direction="column" gap={1}>
+              <Text weight="bold">Password required</Text>
+              <Text color="fgMuted">
+                This share is password-protected. The link alone will not open it — ask
+                whoever sent it for the password.
+              </Text>
+              <Input
+                type="password"
+                name="password"
+                placeholder="Password"
+                aria-label="Share password"
+                invalid={error !== undefined}
+                oninput={(event: Event) => {
+                  typed = (event.target as HTMLInputElement).value
+                }}
+              />
+              {error !== undefined ? (
+                <Text color="danger" class="selectable">
+                  {error}
+                </Text>
+              ) : null}
+              <Button onclick={submit}>Open share</Button>
+            </Stack>
+          </form>
+        </Box>
+      </div>
+    </Centered>
+  )
+}
+
 function FailedBody({ reason, kind }: { reason: string; kind?: FailureKind }) {
   const unsupported = kind === 'unsupported'
   const iceHint =
@@ -431,6 +522,12 @@ function FailedBody({ reason, kind }: { reason: string; kind?: FailureKind }) {
 
 const Home = component(function* (_props, ctx: Ctx) {
   const state = signal<HomeState>({ phase: 'landing' })
+  /**
+   * Optional password for the share about to be created. Read at the moment
+   * the folder is picked, not stored: this is the only place it exists, and
+   * once `ShareProducer` has stretched it into a token nothing needs it again.
+   */
+  let newSharePassword = ''
 
   async function createShare(): Promise<void> {
     if (!canProduce()) {
@@ -445,7 +542,12 @@ const Home = component(function* (_props, ctx: Ctx) {
       const root = await pickShareRoot()
       if (ctx.aborted.aborted) return
       state.value = { phase: 'creating' }
-      const producer = await startProducer(root)
+      // Empty means unprotected. An empty string is not a password, and
+      // passing one would protect the share with something nobody can type.
+      const producer = await startProducer(
+        root,
+        newSharePassword.length > 0 ? newSharePassword : undefined,
+      )
       if (ctx.aborted.aborted) {
         await producer.stop()
         return
@@ -542,6 +644,17 @@ const Home = component(function* (_props, ctx: Ctx) {
                     taking part of it — the ticket alone, say.
                   */}
                   <Text class="selectable">{url}</Text>
+                  {/*
+                    The password is deliberately not in the link — that is what
+                    makes the link postable. Say so, so the sender knows the
+                    recipient will be asked for something they have to supply.
+                  */}
+                  {current.producer.passwordProtected ? (
+                    <Text color="fgMuted">
+                      Password-protected — send the password separately; the link alone
+                      will not open it.
+                    </Text>
+                  ) : null}
                   <Button
                     variant="primary"
                     onclick={() => {
@@ -565,6 +678,20 @@ const Home = component(function* (_props, ctx: Ctx) {
             <Button variant="primary" onclick={() => void createShare()}>
               Add files/folder
             </Button>
+            {/*
+              Above the picker rather than after it: the folder picker needs a
+              user gesture, so the password has to already be typed when the
+              button is clicked. Empty is the default and means an open share,
+              which is what this tool did before passwords existed.
+            */}
+            <Input
+              type="password"
+              placeholder="Password (optional)"
+              aria-label="Password for the share"
+              oninput={(event: Event) => {
+                newSharePassword = (event.target as HTMLInputElement).value
+              }}
+            />
             <Button variant="secondary" onclick={() => joinShare()}>
               Join a share
             </Button>
@@ -748,11 +875,20 @@ const Session = component<{
     }
   }
 
+  /**
+   * The password this session presents, if the share wants one.
+   *
+   * Seeded from the tab's memory so a refresh or a `/files` ↔ `/info` switch
+   * does not re-prompt. `undefined` on an ordinary share, where it is simply
+   * never read.
+   */
+  let password = rememberedPassword(props.ticket)
+
   // Dial now, and register the release before the first await. A ticket change
   // unmounts this session; the mesh membership belongs to it, so it goes too —
   // and it has to go even when the abort lands *during* the connect, which is
   // why this holds the promise rather than a client we may not have yet.
-  let pending = connect(props.ticket, props.transport)
+  let pending = connect(props.ticket, props.transport, undefined, password)
   ctx.aborted.addEventListener('abort', () => release(props.ticket, props.transport, pending))
 
   // Announce departure while the page still exists. Without this the tab
@@ -771,7 +907,7 @@ const Session = component<{
     // silently disappeared because `max_direct` fell to 0.
     if (event.persisted) return
     const current = state.peek()
-    if (current.phase === 'ready') current.client.leave_mesh()
+    if (current.phase === 'ready') current.client.shutdown_mesh()
   }
   window.addEventListener('pagehide', onHide)
   ctx.aborted.addEventListener('abort', () => {
@@ -815,7 +951,14 @@ const Session = component<{
     )
   }
 
-  void (async () => {
+  /**
+   * Dial until the share comes up, or until something says stop.
+   *
+   * Re-entered by the password gate: a refused credential ends this loop
+   * rather than retrying it — the same password would be refused every time —
+   * and submitting a new one starts it again.
+   */
+  async function dialUntilReady(): Promise<void> {
     // Literal backoff bounds: the shared constants are declared later in this
     // body, and this loop starts synchronously — before they initialize.
     let backoff = 1_000
@@ -825,6 +968,20 @@ const Session = component<{
         return
       } catch (error) {
         if (ctx.aborted.aborted) return
+        // The producer refused the credential — or the ticket says it wants one
+        // and we have none. Retrying is pointless and would spend ~100 ms of
+        // Argon2id per attempt; what is missing is a person, so ask for one.
+        if (isUnauthorized(error)) {
+          const stale = password !== undefined
+          if (stale) forgetPassword(props.ticket)
+          password = undefined
+          state.value = {
+            phase: 'needs-password',
+            error: stale ? 'That password does not open this share.' : undefined,
+          }
+          release(props.ticket, props.transport, pending)
+          return
+        }
         if (permanentConnectError(error)) {
           state.value = { phase: 'failed', reason: String(error) }
           return
@@ -833,10 +990,21 @@ const Session = component<{
         await new Promise((resolve) => setTimeout(resolve, backoff))
         backoff = Math.min(backoff * 2, 30_000)
         release(props.ticket, props.transport, pending)
-        pending = connect(props.ticket, props.transport)
+        pending = connect(props.ticket, props.transport, undefined, password)
       }
     }
-  })()
+  }
+
+  /** The gate's submit: remember the password and dial again from the top. */
+  function submitPassword(entered: string): void {
+    rememberPassword(props.ticket, entered)
+    password = entered
+    state.value = { phase: 'connecting' }
+    pending = connect(props.ticket, props.transport, undefined, password)
+    void dialUntilReady()
+  }
+
+  void dialUntilReady()
 
   /** In-flight revival, so concurrent callers share one dial. */
   let revivalInFlight: Promise<void> | null = null
@@ -899,7 +1067,7 @@ const Session = component<{
             // Each attempt is self-terminating (the wasm side caps the origin
             // dial and bounds its card wait), so no outer race is needed —
             // control always comes back here to try again.
-            pending = connect(props.ticket, props.transport, REVIVAL_ORIGIN_CAP_MS)
+            pending = connect(props.ticket, props.transport, REVIVAL_ORIGIN_CAP_MS, password)
             await bringUp(pending)
             // The swap point: the replacement is up (and re-seeding via
             // `refresh_held`), so the old client may finally say goodbye.
@@ -1127,6 +1295,13 @@ const Session = component<{
       return (
         <SessionChrome>
           <LoadingBody label="connecting…" />
+        </SessionChrome>
+      )
+    }
+    if (current.phase === 'needs-password') {
+      return (
+        <SessionChrome crumb="locked">
+          <PasswordGate error={current.error} onSubmit={submitPassword} />
         </SessionChrome>
       )
     }

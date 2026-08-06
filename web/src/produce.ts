@@ -14,6 +14,11 @@ export interface ShareProducer {
   readonly transport: string
   readonly files: number
   readonly bytes: number
+  /**
+   * Whether this share is behind a password — so the UI can say the ticket is
+   * not on its own enough, beside the link it offers to copy.
+   */
+  readonly passwordProtected: boolean
   stop(): Promise<void>
 }
 
@@ -81,13 +86,24 @@ async function scanDirectory(root: FileSystemDirectoryHandle): Promise<{
   return { dirs, files }
 }
 
-/** Bind a producer on `root` and return a handle that keeps serving until stop. */
-export async function startProducer(root: FileSystemDirectoryHandle): Promise<ShareProducer> {
+/**
+ * Bind a producer on `root` and return a handle that keeps serving until stop.
+ *
+ * Pass a `password` to protect the share: the ticket then addresses it without
+ * opening it, so the link is safe to post somewhere the password is not. Costs
+ * ~100 ms of Argon2id on the main thread, once, here — the same price every
+ * viewer pays when they open it.
+ */
+export async function startProducer(
+  root: FileSystemDirectoryHandle,
+  password?: string,
+): Promise<ShareProducer> {
   const listing = await scanDirectory(root)
   const wasm = await loadWasm()
   const producer = await wasm.ShareProducer.start(
     listing,
     buildPeerCard({ role: 'producer', transport: 'webrtc' }),
+    password,
   )
 
   let stopped = false
@@ -108,6 +124,9 @@ export async function startProducer(root: FileSystemDirectoryHandle): Promise<Sh
     transport: producer.transport,
     files: producer.files,
     bytes: Number(producer.bytes),
+    // Read back from what was actually asked for, not re-derived from the
+    // ticket: this is the producer's own knowledge of its own share.
+    passwordProtected: password !== undefined,
     stop: async () => {
       stopped = true
       await producer.stop()

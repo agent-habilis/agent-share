@@ -198,6 +198,10 @@ async fn bind_bench(
         secret,
         lookups,
         kind: transport.ticket_kind(),
+        // A bench share is synthetic — no directory, no bytes, nothing worth
+        // protecting — so it never carries a password.
+        flags: 0,
+        mesh_id: None,
     };
     Ok((endpoint, ticket, secret, webrtc))
 }
@@ -760,6 +764,8 @@ mod tests {
             secret: [0u8; SECRET_LEN],
             lookups: LookupOpts::loopback(),
             kind: TICKET_KIND_BENCH_RELAY,
+            flags: 0,
+            mesh_id: None,
         };
 
         let transport = BenchTransport::from_ticket_kind(ticket.kind).unwrap();

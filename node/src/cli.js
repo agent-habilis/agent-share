@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `npx agent-share <ticket> [dir]` — receive a shared folder.
+ * `npx agent-share <ticket> [dir] [--password <pw>]` — receive a shared folder.
  * `npx agent-share bench --transport webrtc|relay` — synthetic OP_BENCH producer.
  * `npx agent-share bench <ticket>` — bench consumer (transport from ticket).
  *
@@ -21,11 +21,14 @@ const CHUNK = 256 * 1024
 
 function usage() {
   console.error('usage:')
-  console.error('  npx agent-share <ticket> [destination]')
+  console.error('  npx agent-share <ticket> [destination] [--password <pw>]')
   console.error('  npx agent-share bench --transport webrtc|relay')
   console.error('  npx agent-share bench <ticket>')
   console.error()
   console.error('  Receive writes into `destination` (default: ./share).')
+  console.error(
+    '  --password (or AGENT_SHARE_PASSWORD) unlocks a password-protected share.',
+  )
   console.error('  Produce a share with the native binary: agent-share serve <dir>')
   console.error('  Bench: producer sets --transport; consumer reads it from the ticket.')
 }
@@ -89,13 +92,28 @@ async function loadClient() {
 /**
  * @param {string} ticket
  * @param {string} destination
+ * @param {string | undefined} password
  */
-async function receive(ticket, destination) {
+async function receive(ticket, destination, password) {
   await installWebRtc()
   const wasm = await loadClient()
 
+  // Checked before the dial so a missing password reads as a usage error
+  // rather than as a share that refuses to talk.
+  if (wasm.ShareClient.password_required(ticket) && password === undefined) {
+    throw new Error(
+      'this share is password-protected — pass --password <pw> or set AGENT_SHARE_PASSWORD',
+    )
+  }
+
   process.stderr.write('connecting (relay)…\n')
-  const client = await wasm.ShareClient.connect(ticket, 'relay')
+  const client = await wasm.ShareClient.connect(
+    ticket,
+    'relay',
+    undefined,
+    undefined,
+    password,
+  )
   process.stderr.write(`connected over ${client.transport}\n`)
   const manifest = /** @type {Manifest} */ (await client.manifest())
 
@@ -259,6 +277,35 @@ async function benchConsume(ticket, duration) {
   console.log(JSON.stringify(report, null, 2))
 }
 
+/**
+ * Split the receive argv into positionals and the password.
+ *
+ * `--password <pw>` and `--password=<pw>` both work; `AGENT_SHARE_PASSWORD` is
+ * the form for scripts, since piping into a bare `npx` invocation is awkward
+ * and a literal on the command line lands in shell history.
+ *
+ * @param {string[]} argv
+ * @returns {{ positional: string[], password: string | undefined }}
+ */
+function parseReceiveArgs(argv) {
+  /** @type {string[]} */
+  const positional = []
+  let password = process.env.AGENT_SHARE_PASSWORD || undefined
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--password') {
+      password = argv[++i]
+      continue
+    }
+    if (arg.startsWith('--password=')) {
+      password = arg.slice('--password='.length)
+      continue
+    }
+    positional.push(arg)
+  }
+  return { positional, password }
+}
+
 async function main() {
   const argv = process.argv.slice(2)
   if (argv[0] === '-h' || argv[0] === '--help') {
@@ -288,12 +335,13 @@ async function main() {
     return
   }
 
-  const [ticket, destination = './share'] = argv
+  const { positional, password } = parseReceiveArgs(argv)
+  const [ticket, destination = './share'] = positional
   if (!ticket) {
     usage()
     process.exit(2)
   }
-  await receive(ticket, destination)
+  await receive(ticket, destination, password)
 }
 
 main().catch((error) => {

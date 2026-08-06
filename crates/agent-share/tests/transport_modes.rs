@@ -68,14 +68,16 @@ fn spawn_mount_server(
 ) -> tokio::task::JoinHandle<()> {
     let (manifest, paths) = agent_share::test_support::scan(&tree).expect("scan");
     let shared_tree = agent_share::test_support::live_tree(tree, manifest, paths);
+    // These fixtures serve unprotected shares, so the token is the secret.
+    let auth = agent_share_proto::auth::ShareAuth::new(&secret, None);
     tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
             let shared_tree = Arc::clone(&shared_tree);
             tokio::spawn(async move {
                 let Ok(conn) = incoming.await else { return };
                 if conn.alpn() == MOUNT_ALPN {
-                    let _ = agent_share::test_support::serve_mount(conn, secret, shared_tree, None)
-                        .await;
+                    let _ =
+                        agent_share::test_support::serve_mount(conn, auth, shared_tree, None).await;
                 }
             });
         }
@@ -91,6 +93,8 @@ fn spawn_signal_and_mount_server(
 ) -> tokio::task::JoinHandle<()> {
     let (manifest, paths) = agent_share::test_support::scan(&tree).expect("scan");
     let shared_tree = agent_share::test_support::live_tree(tree, manifest, paths);
+    // These fixtures serve unprotected shares, so the token is the secret.
+    let auth = agent_share_proto::auth::ShareAuth::new(&secret, None);
     tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
             let shared_tree = Arc::clone(&shared_tree);
@@ -116,8 +120,8 @@ fn spawn_signal_and_mount_server(
                         .expect("complete answer");
                     webrtc.attach(conn.remote_id(), session).expect("attach");
                 } else if conn.alpn() == MOUNT_ALPN {
-                    let _ = agent_share::test_support::serve_mount(conn, secret, shared_tree, None)
-                        .await;
+                    let _ =
+                        agent_share::test_support::serve_mount(conn, auth, shared_tree, None).await;
                 }
             });
         }

@@ -10,9 +10,11 @@ use clap::Parser;
 mod lookup;
 mod mount;
 mod output;
+mod password;
 
 pub(crate) use mount::MountAction;
 pub(crate) use output::OutputFormat;
+pub(crate) use password::PasswordArgs;
 
 /// Share a folder with peers, or mount a peer's folder locally
 /// (read-only, lazy, no daemon).
@@ -46,6 +48,11 @@ pub(crate) struct Cli {
     /// deadline.
     #[arg(long)]
     pub transport: Option<String>,
+
+    /// Password for a protected share. Required when the ticket says the share
+    /// carries one — the ticket alone will not open it.
+    #[command(flatten)]
+    pub password: PasswordArgs,
 
     /// Output format: human (default) or json (the bare mount command).
     #[arg(long, default_value = "human")]

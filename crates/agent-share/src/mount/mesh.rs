@@ -31,7 +31,7 @@ use fofoca::embed::{
 };
 use fofoca::net::TransportOpts;
 use fofoca::ops::{StateMergeParams, broadcast_state_merge};
-use fofoca::protocol::{Channel, Message, Nickname};
+use fofoca::protocol::{Channel, Message, Nickname, Password};
 use fofoca::runtime::{
     InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh_with,
 };
@@ -560,13 +560,14 @@ impl ShareMesh {
 /// A struct rather than six positional arguments: `protocols` and `transports`
 /// are both "empty/default for one role, not the other", and two adjacent
 /// defaultable arguments are exactly the shape that gets swapped silently.
-pub(crate) struct JoinOpts<'a> {
-    /// The ticket's bearer secret. Hashed into the mesh id, never carried on
-    /// it — see [`share_mesh_key`].
-    pub(crate) secret: &'a [u8; SECRET_LEN],
-    /// Read off the *ticket*, never off a local binding: every peer of a share
-    /// deriving its mesh from what the ticket says is what makes them agree.
-    pub(crate) lookups: &'a agent_share_proto::lookup::LookupOpts,
+pub(crate) struct JoinOpts {
+    /// The mesh this peer joins, already resolved — and, on a protected share,
+    /// already proven to match the password. See [`ShareMeshTarget`].
+    ///
+    /// Resolved by the caller rather than here because resolving is where a
+    /// wrong password is *caught*, and that has to happen before an endpoint is
+    /// bound and a dial is attempted, not inside a background join.
+    pub(crate) target: ShareMeshTarget,
     /// The endpoint this process already speaks the mount protocol on, so the
     /// share and the mesh are one identity rather than two peers on one host.
     pub(crate) shared: InjectedEndpoint,
@@ -591,15 +592,144 @@ pub(crate) struct JoinOpts<'a> {
     pub(crate) transports: TransportOpts,
 }
 
-/// Join the mesh this share's secret derives, and return a handle to it.
+/// What the share's mesh is, resolved once.
+///
+/// Holding the resolution rather than re-doing it is not only tidiness: on a
+/// protected share resolving costs ~100 ms of Argon2id, and it is also the
+/// moment a wrong password is caught. Both argue for doing it exactly once, at
+/// a point the caller controls.
+///
+/// `Debug` prints the id and nothing else. The id is safe to print — it opens
+/// nothing without the password — while the `Resolved` behind it holds the
+/// stretched key.
+pub(crate) struct ShareMeshTarget {
+    /// What `setup_mesh` needs. Carries the `Mesh` with its stretched key
+    /// already applied, so every derivation below it — the gossip topic, the
+    /// rendezvous keypair, the port ladder — is behind the password, and the
+    /// state/meta/broadcast documents are encrypted with keys off that same
+    /// stretch.
+    resolved: Resolved,
+    /// The id a producer puts in its ticket. On a protected share this string
+    /// carries the password verifier, which is the whole reason it has to
+    /// travel: a joiner cannot derive those sixteen bytes for itself.
+    mesh_id: String,
+}
+
+impl ShareMeshTarget {
+    /// The mesh id, for a producer minting a ticket.
+    pub(crate) fn mesh_id(&self) -> &str {
+        &self.mesh_id
+    }
+}
+
+impl std::fmt::Debug for ShareMeshTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShareMeshTarget")
+            .field("mesh_id", &self.mesh_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The topic string a share's mesh is derived from.
+///
+/// Off the **secret**, not the token. The password is applied on top by
+/// `fofoca`, which switches every derivation onto the stretched key
+/// (`Mesh::effective_seed`) — so the mesh is still unreachable without the
+/// password, but `fofoca` owns that gating rather than this crate re-deriving
+/// around it. Hashed first because the engine carries the topic string into its
+/// state file and user-facing lines.
+fn topic_string(secret: &[u8; SECRET_LEN]) -> String {
+    share_mesh_key(secret)
+}
+
+/// Build the mesh a **producer** serves under, minting its id.
 ///
 /// # Errors
-/// The derived id is unusable, or the node cannot bind an endpoint / reach a
-/// relay. Callers treat this as non-fatal: the share serves either way.
-pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
+/// The derived id is unusable.
+pub(crate) fn mint(
+    secret: &[u8; SECRET_LEN],
+    lookups: &agent_share_proto::lookup::LookupOpts,
+    password: Option<&str>,
+) -> Result<ShareMeshTarget> {
+    // The share's own reach, not the public preset — a private share must not
+    // stand up a public rendezvous it could never reach anyway.
+    let mut mesh = derive_topic_mesh_with(&topic_string(secret), mesh_lookups(lookups))
+        .context("deriving the share's mesh")?;
+    if let Some(password) = password {
+        // Bakes the verifier into the id and switches the derivations onto the
+        // stretched key. The id is then what a joiner checks its password
+        // against, with no network and no producer.
+        mesh.set_password(&Password::new(password.to_owned()));
+    }
+    resolve_id(mesh.to_string(), password)
+}
+
+/// Resolve the mesh a **consumer** joins, checking the password locally.
+///
+/// `mesh_id` is what the ticket carried. `None` means the ticket predates the
+/// field, so the id is derived the way a producer would — which still joins the
+/// right mesh, but leaves nothing to check the password against, so a wrong one
+/// is caught by the producer instead. That fallback is the *only* path where
+/// the origin still has to be alive.
+///
+/// # Errors
+/// The password is wrong, missing, or given for a share that has none.
+pub(crate) fn resolve(
+    mesh_id: Option<&str>,
+    secret: &[u8; SECRET_LEN],
+    lookups: &agent_share_proto::lookup::LookupOpts,
+    password: Option<&str>,
+) -> Result<ShareMeshTarget> {
+    match mesh_id {
+        Some(mesh_id) => resolve_id(mesh_id.to_owned(), password),
+        None => mint(secret, lookups, password),
+    }
+}
+
+/// Hand `mesh_id` to `fofoca` and let it rule on the password.
+///
+/// This is the check. `JoinParams::resolve` decodes the id, stretches the
+/// password with Argon2id, and compares the result against the verifier the id
+/// carries — locally, before any socket exists.
+fn resolve_id(mesh_id: String, password: Option<&str>) -> Result<ShareMeshTarget> {
+    let resolved = JoinParams {
+        target: mesh_id.parse().context("parsing the share mesh id")?,
+        nickname: Some(Nickname::random()),
+        password: password.map(|password| Password::new(password.to_owned())),
+    }
+    .resolve()
+    .map_err(explain_password_error)?;
+    Ok(ShareMeshTarget { resolved, mesh_id })
+}
+
+/// Rewrite `fofoca`'s password errors into this tool's vocabulary.
+///
+/// Matched on the message because `fofoca` does not export a type for these
+/// yet: `apply_password` fails with a bare `bail!("wrong password")` and its
+/// `PasswordRequired` is `pub(crate)`, despite its own doc calling it "typed for
+/// the frontends". Worth fixing there — until then a reword upstream silently
+/// turns this back into a generic failure, which is why the fallback keeps the
+/// original error rather than guessing.
+fn explain_password_error(error: anyhow::Error) -> anyhow::Error {
+    let rendered = format!("{error:#}").to_ascii_lowercase();
+    if rendered.contains("wrong password") {
+        return error.context(super::consume::WRONG_PASSWORD);
+    }
+    if rendered.contains("password") {
+        return error;
+    }
+    error.context("resolving the share mesh join")
+}
+
+/// Join the mesh this share's ticket names, and return a handle to it.
+///
+/// # Errors
+/// The node cannot bind an endpoint / reach a relay. Callers treat this as
+/// non-fatal: the share serves either way.
+pub(crate) async fn join(opts: JoinOpts) -> Result<ShareMesh> {
     let JoinOpts {
-        secret,
-        lookups,
+        target,
         shared,
         protocols,
         role,
@@ -607,27 +737,7 @@ pub(crate) async fn join(opts: JoinOpts<'_>) -> Result<ShareMesh> {
         serving,
         transports,
     } = opts;
-    // Hash first, then derive: the engine carries the topic *string* into its
-    // state file and user-facing lines, so handing it the bearer secret would
-    // print the secret. See `share_mesh_key`.
-    let key = share_mesh_key(secret);
-    // The share's own reach, not the public preset. Producer and consumers
-    // agree by construction because they read it from the same ticket, so this
-    // needs no new ticket field — and a private share stops standing up a
-    // public rendezvous it could never reach anyway.
-    let mesh =
-        derive_topic_mesh_with(&key, mesh_lookups(lookups)).context("deriving the share's mesh")?;
-
-    let Resolved { kind, author, .. } = JoinParams {
-        target: mesh
-            .to_string()
-            .parse()
-            .context("parsing the share mesh id")?,
-        nickname: Some(Nickname::random()),
-        password: None,
-    }
-    .resolve()
-    .context("resolving the share mesh join")?;
+    let Resolved { kind, author, .. } = target.resolved;
 
     // Read before `shared` is moved into the setup params below.
     let local_endpoint = shared.endpoint.id().to_string();
@@ -868,18 +978,18 @@ mod tests {
     /// only test that exercises a real join, a real gossip round and the
     /// `on_meta_applied` hook that carries a card from one process's driver to
     /// another's roster.
-    /// Bind an endpoint and join the share mesh `secret` derives, as `role`.
+    /// Bind an endpoint and join the share mesh `token` derives, as `role`.
     async fn join_as(
-        secret: &[u8; super::SECRET_LEN],
+        token: &[u8; super::SECRET_LEN],
         lookups: &crate::protocol::swarm::LookupOpts,
         role: Role,
     ) -> super::ShareMesh {
-        join_as_on_tree(secret, lookups, role, None).await
+        join_as_on_tree(token, lookups, role, None).await
     }
 
     /// As [`join_as`], but publishing a manifest fingerprint.
     async fn join_as_on_tree(
-        secret: &[u8; super::SECRET_LEN],
+        token: &[u8; super::SECRET_LEN],
         lookups: &crate::protocol::swarm::LookupOpts,
         role: Role,
         tree: Option<String>,
@@ -903,8 +1013,7 @@ mod tests {
         .await
         .expect("bind endpoint");
         super::join(super::JoinOpts {
-            secret,
-            lookups,
+            target: super::mint(token, lookups, None).expect("mint the share mesh"),
             shared: InjectedEndpoint { endpoint, webrtc },
             protocols: Vec::new(),
             role,

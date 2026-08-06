@@ -35,6 +35,7 @@ use fofoca::ops::{StateMergeParams, broadcast_state_merge};
 use fofoca::protocol::{
     Channel, DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message, Nickname,
 };
+use fofoca::protocol::Password;
 use fofoca::runtime::{
     CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams,
     derive_topic_mesh_with, setup_mesh,
@@ -426,14 +427,12 @@ impl MeshPeer {
     /// iroh permits one accept loop per endpoint — so its ALPNs must ride the
     /// mesh's Router rather than a loop of its own.
     pub(crate) async fn join_share_with(
-        secret: &[u8; SECRET_LEN],
-        lookups: &agent_share_proto::lookup::LookupOpts,
+        resolved: Resolved,
         endpoint: fofoca::iroh::Endpoint,
         webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
         protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
         card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
-        let resolved = resolve_share(secret, lookups)?;
         spawn_peer_inner(
             resolved,
             TransportOpts::default(),
@@ -451,13 +450,11 @@ impl MeshPeer {
     /// too, which is what makes a seeding tab actually answer reads instead
     /// of only advertising them.
     pub(crate) async fn join_share(
-        secret: &[u8; SECRET_LEN],
-        lookups: &agent_share_proto::lookup::LookupOpts,
+        resolved: Resolved,
         shared: Option<(fofoca::iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
         protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
         card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
-        let resolved = resolve_share(secret, lookups)?;
         let injected = shared.map(|(endpoint, webrtc)| InjectedEndpoint { endpoint, webrtc });
         spawn_peer_inner(resolved, TransportOpts::default(), injected, protocols, card).await
     }
@@ -601,29 +598,91 @@ impl MeshPeer {
 
 /// Stand the node up from resolved params. Shared by create and join — the only
 /// difference between them is the `SetupKind` that lands here.
-/// The mesh a share's secret derives, resolved for joining.
+/// Everything needed to name a share's mesh, and to unlock it.
 ///
-/// Hashes before deriving: the engine carries the topic string into its state
-/// file and user-facing lines, so it must not be the bearer secret.
-fn resolve_share(
-    secret: &[u8; SECRET_LEN],
-    lookups: &agent_share_proto::lookup::LookupOpts,
-) -> Result<Resolved, JsValue> {
-    // The share's own reach, from the ticket both ends read — not the public
-    // preset. See `derive_topic_mesh_with`.
-    let mesh = derive_topic_mesh_with(&share_mesh_key(secret), mesh_lookups(lookups))
-        .map_err(|error| err("derive the share mesh", &error))?;
-    let target = mesh
-        .to_string()
+/// Bundled because the four travel together through every join, and because two
+/// adjacent `Option<&str>` arguments — the mesh id and the password — are
+/// exactly the shape that gets swapped in silence.
+pub(crate) struct ShareMeshRef<'a> {
+    /// The id the ticket carried, or `None` when it carried none.
+    pub(crate) mesh_id: Option<&'a str>,
+    /// The ticket secret, to derive the id when the ticket has none.
+    pub(crate) secret: &'a [u8; SECRET_LEN],
+    /// The share's own reach, read off the ticket both ends share.
+    pub(crate) lookups: &'a agent_share_proto::lookup::LookupOpts,
+    /// The password, on a protected share.
+    pub(crate) password: Option<&'a str>,
+}
+
+/// The mesh a share belongs to, resolved for joining — and where a wrong
+/// password is caught.
+///
+/// The browser twin of the CLI's `mount::mesh`. `mesh_id` is what the ticket
+/// carried: on a protected share it holds the password verifier `fofoca` baked
+/// in, so `JoinParams::resolve` can stretch the password and compare it here,
+/// locally, with no producer and no network. That matters because a share is
+/// designed to outlive its producer — a check that needs one usually cannot run.
+///
+/// `None` means the ticket predates the field, so the id is derived the way a
+/// producer would. That still joins the right mesh, but leaves nothing to check
+/// against, and a wrong password falls back to the producer's refusal.
+pub(crate) fn resolve_share(share: ShareMeshRef<'_>) -> Result<Resolved, JsValue> {
+    let ShareMeshRef {
+        mesh_id,
+        secret,
+        lookups,
+        password,
+    } = share;
+    let mesh_id = match mesh_id {
+        Some(mesh_id) => mesh_id.to_owned(),
+        None => mint_share_mesh_id(secret, lookups, password)?,
+    };
+    let target = mesh_id
         .parse::<JoinTarget>()
         .map_err(|error| err("parse the share mesh id", &error))?;
     JoinParams {
         target,
         nickname: None,
-        password: None,
+        password: password.map(|password| Password::new(password.to_owned())),
     }
     .resolve()
-    .map_err(|error| err("resolve the share mesh join", &error))
+    .map_err(explain_password_error)
+}
+
+/// Derive this share's mesh id, baking in the password verifier when there is
+/// a password.
+///
+/// Hashes before deriving: the engine carries the topic string into its state
+/// file and user-facing lines, so it must not be the bearer secret. Derived
+/// from the *secret*, with the password layered on by `fofoca` — which switches
+/// every derivation onto the stretched key, so the mesh stays unreachable
+/// without the password.
+pub(crate) fn mint_share_mesh_id(
+    secret: &[u8; SECRET_LEN],
+    lookups: &agent_share_proto::lookup::LookupOpts,
+    password: Option<&str>,
+) -> Result<String, JsValue> {
+    // The share's own reach, from the ticket both ends read — not the public
+    // preset. See `derive_topic_mesh_with`.
+    let mut mesh = derive_topic_mesh_with(&share_mesh_key(secret), mesh_lookups(lookups))
+        .map_err(|error| err("derive the share mesh", &error))?;
+    if let Some(password) = password {
+        mesh.set_password(&Password::new(password.to_owned()));
+    }
+    Ok(mesh.to_string())
+}
+
+/// Rewrite `fofoca`'s password errors so the page can act on them.
+///
+/// Matched on the message because `fofoca` does not export a type for these
+/// yet — `apply_password` fails with a bare `bail!("wrong password")`. The
+/// `unauthorized:` prefix is what puts the password form back up.
+fn explain_password_error(error: anyhow::Error) -> JsValue {
+    let rendered = format!("{error:#}");
+    if rendered.to_ascii_lowercase().contains("password") {
+        return crate::unauthorized(&rendered);
+    }
+    err("resolve the share mesh join", &error)
 }
 
 /// `None` / `"dynamic"` ⇒ everything available; `"webrtc"` ⇒ WebRTC-only data

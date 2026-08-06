@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_share_proto::auth::ShareAuth;
 use anyhow::{Context, Result, bail};
 use fofoca::iroh::endpoint::{Connection, RecvStream, SendStream};
 use fofoca::iroh::{Endpoint, SecretKey};
@@ -38,6 +39,7 @@ pub(crate) async fn serve(
     swarm: Option<&str>,
     flags: LookupSet,
     dir: &Path,
+    password: Option<&str>,
     json: bool,
 ) -> Result<()> {
     let root = dir
@@ -54,49 +56,49 @@ pub(crate) async fn serve(
     // Adopted below so the copy joins the share it came from instead of
     // starting a rival one. See `bind`.
     let inherited_secret = super::mirror::origin_secret_for(&root);
-    let (tree, description) = if let Some(origin_bytes) = super::mirror::origin_manifest_for(&root)
-    {
-        let tree = Arc::new(LiveTree::mirrored(root.clone(), origin_bytes)?);
-        let (held, total) = tree.coverage();
-        let description = format!(
-            "{} (re-seeding another share: {held} of {total} files held, read-only)",
-            root.display()
+    // A mirror of a *protected* share also carries the token the origin's
+    // password derived, so it can re-seed without being handed the password a
+    // second time. The password was spent once, at copy time; what survives is
+    // the credential it produced.
+    let inherited_auth = super::mirror::origin_auth_for(&root);
+    // The origin's mesh id, so a re-served copy lands on the same mesh and hands
+    // out the same ticket rather than starting a rival swarm.
+    let inherited_mesh_id = super::mirror::origin_mesh_id_for(&root);
+    if inherited_auth.is_some() && password.is_some() {
+        bail!(
+            "this directory re-serves an existing share, whose password is already \
+             baked into its ticket — drop --password"
         );
-        (tree, description)
-    } else {
-        let (manifest, paths) = super::scan::scan(&root)?;
-        let file_count = manifest.files.len();
-        let total_bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
-        let encoded_len = manifest.encode().len();
-        // Enforce the consumer-side cap here too: past it, every redeem
-        // would abort with "manifest too large" — fail at serve time with a
-        // reason instead of minting a ticket nobody can use.
-        if encoded_len > usize::try_from(super::MAX_MANIFEST_BYTES).expect("u32 fits usize") {
-            bail!(
-                "tree too large to serve: the manifest is {} for {file_count} files (cap {})",
-                human_bytes(u64::try_from(encoded_len).expect("usize fits u64")),
-                human_bytes(u64::from(super::MAX_MANIFEST_BYTES))
-            );
-        }
-        let tree = Arc::new(LiveTree::new(root.clone(), manifest, paths));
-        // A watcher that cannot start is not fatal: the share still serves,
-        // it just serves the startup snapshot. Losing the whole share over
-        // it would be a worse trade than losing liveness.
-        if let Err(error) = super::live::spawn_watcher(Arc::clone(&tree)) {
-            tracing::warn!(%error, "watching the tree failed; serving a fixed snapshot");
-        }
-        let description = format!(
-            "{} ({file_count} files, {}, read-only)",
-            root.display(),
-            human_bytes(total_bytes)
-        );
-        (tree, description)
-    };
+    }
+    let (tree, description) = open_tree(&root)?;
 
     let lookups = resolve_transfer_lookups(swarm, flags)?;
-    let (endpoint, ticket, secret, webrtc) = bind(lookups, inherited_secret).await?;
+    let (endpoint, mut ticket, secret, webrtc) = bind(lookups, inherited_secret).await?;
 
-    let hashes = open_hash_cache(&secret);
+    // The share's real credential. On an unprotected share this is the ticket
+    // secret verbatim, so everything below is byte-for-byte what it was; on a
+    // protected one it is the Argon2id stretch, and the secret on its own opens
+    // nothing — not the mount, and not the mesh either, since `share_mesh_key`
+    // takes the token too.
+    let auth = match inherited_auth {
+        Some(auth) => auth,
+        None => ShareAuth::new(&secret, password),
+    };
+    if auth.password_protected() {
+        ticket.flags |= agent_share_proto::ticket::TICKET_FLAG_PASSWORD;
+    }
+
+    let mesh_target = mint_share_mesh(&auth, &secret, &ticket.lookups, password)?;
+    // A re-served copy must hand out the *origin's* mesh id, not a fresh one, or
+    // it splits the swarm in two.
+    ticket.mesh_id = inherited_mesh_id.or_else(|| {
+        mesh_target
+            .as_ref()
+            .filter(|_| auth.password_protected())
+            .map(|target| target.mesh_id().to_owned())
+    });
+
+    let hashes = open_hash_cache(auth.token());
 
     // Shell-quoted: the hint is printed for copy-paste (and captured verbatim
     // by scripts in json mode), so a dir name with a space must stay one word.
@@ -107,12 +109,20 @@ pub(crate) async fn serve(
         &description,
         &format!("agent-share {} {mount_hint}", ticket.encode()),
     );
+    // The password is deliberately *not* in that command. It travels out of
+    // band — putting it in the line people paste into chat alongside the ticket
+    // would defeat the whole point — so say so rather than let the recipient
+    // discover it from a refused connection. Human output only: json mode is
+    // read by scripts that want one runnable command and nothing else.
+    if auth.password_protected() && !json {
+        crate::util::output::status_out("Password", "required — send it separately");
+    }
 
     // One endpoint, shared with the mesh — see `mount::handlers` for why the
     // accept loop had to go. The share's two ALPNs are registered on a Router
     // instead, normally the mesh's.
     let ice = IceConfig::default();
-    let protocols = || share_protocols(secret, &tree, hashes.clone(), &endpoint, &webrtc, &ice);
+    let protocols = || share_protocols(auth, &tree, hashes.clone(), &endpoint, &webrtc, &ice);
 
     // The mesh normally owns the accept loop, but it must never be the reason a
     // share fails to serve. Sharing an endpoint made the mesh load-bearing for
@@ -121,32 +131,37 @@ pub(crate) async fn serve(
     // failure we stand up a plain Router with just the share's protocols and
     // carry on without peer counts, which is exactly the old behaviour.
     let mut fallback_router = None;
-    let share_mesh = match super::mesh::join(super::mesh::JoinOpts {
-        secret: &secret,
-        // Read off the ticket, not off the local `lookups` binding that `bind`
-        // consumed. Same value, but this way the invariant — every peer of this
-        // share derives the mesh from what the ticket says — is literal.
-        lookups: &ticket.lookups,
-        shared: fofoca::runtime::InjectedEndpoint {
-            endpoint: endpoint.clone(),
-            webrtc: webrtc.clone(),
-        },
-        protocols: protocols(),
-        role: super::mesh::Role::Producer,
-        // Over the bytes `OP_MANIFEST` actually serves, not a re-encode of the
-        // struct. The producer holds them, so it can fingerprint the exact
-        // thing a consumer will hash on the other side.
-        tree: Some(agent_share_proto::manifest::manifest_fingerprint(
-            &tree.manifest_bytes(),
-        )),
-        // What this peer can actually hand over. An origin holds everything; a
-        // mirror serving a partial copy holds a subset, and says so rather than
-        // letting readers discover the gaps by asking.
-        serving: tree.serving(),
-        // The producer never clears IP: it is the peer everyone else dials.
-        transports: fofoca::net::TransportOpts::default(),
-    })
-    .await
+    let joined = match mesh_target {
+        None => None,
+        Some(target) => Some(
+            super::mesh::join(super::mesh::JoinOpts {
+                // Resolved above, before the endpoint was bound: on a protected share
+                // that resolution is also where a wrong password would have been
+                // caught, and it must not wait on a background join.
+                target,
+                shared: fofoca::runtime::InjectedEndpoint {
+                    endpoint: endpoint.clone(),
+                    webrtc: webrtc.clone(),
+                },
+                protocols: protocols(),
+                role: super::mesh::Role::Producer,
+                // Over the bytes `OP_MANIFEST` actually serves, not a re-encode of the
+                // struct. The producer holds them, so it can fingerprint the exact
+                // thing a consumer will hash on the other side.
+                tree: Some(agent_share_proto::manifest::manifest_fingerprint(
+                    &tree.manifest_bytes(),
+                )),
+                // What this peer can actually hand over. An origin holds everything; a
+                // mirror serving a partial copy holds a subset, and says so rather than
+                // letting readers discover the gaps by asking.
+                serving: tree.serving(),
+                // The producer never clears IP: it is the peer everyone else dials.
+                transports: fofoca::net::TransportOpts::default(),
+            })
+            .await,
+        ),
+    };
+    let share_mesh = match joined.unwrap_or_else(|| Err(anyhow::anyhow!("no mesh for this share")))
     {
         Ok(mesh) => {
             tracing::info!(mesh = mesh.mesh_id(), "joined the share mesh");
@@ -218,9 +233,89 @@ pub(crate) async fn serve(
     Ok(())
 }
 
+/// The tree this directory serves, and the line describing it.
+///
+/// Two shapes, and which one applies is read off the directory rather than
+/// asked for: a copy a mirror produced carries the origin's manifest beside it,
+/// and re-serving those bytes rather than scanning is what keeps every index
+/// meaning what the origin says it means — and what lets a *partial* mirror
+/// serve at all, since a scan of a half-copy would renumber every slot after the
+/// first missing file.
+///
+/// # Errors
+/// The origin manifest is unreadable, the directory cannot be scanned, or the
+/// resulting manifest is past [`super::MAX_MANIFEST_BYTES`].
+fn open_tree(root: &Path) -> Result<(Arc<LiveTree>, String)> {
+    if let Some(origin_bytes) = super::mirror::origin_manifest_for(root) {
+        let tree = Arc::new(LiveTree::mirrored(root.to_path_buf(), origin_bytes)?);
+        let (held, total) = tree.coverage();
+        let description = format!(
+            "{} (re-seeding another share: {held} of {total} files held, read-only)",
+            root.display()
+        );
+        return Ok((tree, description));
+    }
+    let (manifest, paths) = super::scan::scan(root)?;
+    let file_count = manifest.files.len();
+    let total_bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
+    let encoded_len = manifest.encode().len();
+    // Enforce the consumer-side cap here too: past it, every redeem would abort
+    // with "manifest too large" — fail at serve time with a reason instead of
+    // minting a ticket nobody can use.
+    if encoded_len > usize::try_from(super::MAX_MANIFEST_BYTES).expect("u32 fits usize") {
+        bail!(
+            "tree too large to serve: the manifest is {} for {file_count} files (cap {})",
+            human_bytes(u64::try_from(encoded_len).expect("usize fits u64")),
+            human_bytes(u64::from(super::MAX_MANIFEST_BYTES))
+        );
+    }
+    let tree = Arc::new(LiveTree::new(root.to_path_buf(), manifest, paths));
+    // A watcher that cannot start is not fatal: the share still serves, it just
+    // serves the startup snapshot. Losing the whole share over it would be a
+    // worse trade than losing liveness.
+    if let Err(error) = super::live::spawn_watcher(Arc::clone(&tree)) {
+        tracing::warn!(%error, "watching the tree failed; serving a fixed snapshot");
+    }
+    let description = format!(
+        "{} ({file_count} files, {}, read-only)",
+        root.display(),
+        human_bytes(total_bytes)
+    );
+    Ok((tree, description))
+}
+
+/// The mesh this producer joins, or `None` when it cannot join one.
+///
+/// `None` has exactly one cause: a mirror re-serving a *protected* share it was
+/// given no password for. fofoca gates every mesh derivation behind the
+/// stretched password key, so such a peer genuinely cannot join — the token in
+/// its sidecar opens the mount protocol but says nothing about the mesh. It
+/// still serves every byte it holds to whoever dials it; it just does not appear
+/// on the roster. Serving nothing would be the worse trade.
+///
+/// # Errors
+/// The mesh id cannot be derived.
+fn mint_share_mesh(
+    auth: &ShareAuth,
+    secret: &[u8; SECRET_LEN],
+    lookups: &LookupOpts,
+    password: Option<&str>,
+) -> Result<Option<super::mesh::ShareMeshTarget>> {
+    if auth.password_protected() && password.is_none() {
+        tracing::warn!(
+            "re-serving a password-protected share without its password: \
+             serving reads, but not joining the share's mesh"
+        );
+        return Ok(None);
+    }
+    Ok(Some(
+        super::mesh::mint(secret, lookups, password).context("minting the share's mesh")?,
+    ))
+}
+
 /// The share's two ALPNs, ready for the mesh's Router.
 fn share_protocols(
-    secret: [u8; SECRET_LEN],
+    auth: ShareAuth,
     tree: &Arc<LiveTree>,
     hashes: Option<Arc<super::hash::HashCache>>,
     endpoint: &Endpoint,
@@ -231,7 +326,7 @@ fn share_protocols(
         (
             MOUNT_ALPN.to_vec(),
             Box::new(super::handlers::MountHandler::new(
-                secret,
+                auth,
                 Arc::clone(tree),
                 hashes,
             )),
@@ -249,16 +344,16 @@ fn share_protocols(
 
 /// Open this share's hash cache, or `None` if it cannot be opened.
 ///
-/// Keyed by the share's mesh id, which is already a one-way hash of the secret —
-/// see `mesh_key` for why the secret itself must never reach a path.
+/// Keyed by the share's mesh id, which is already a one-way hash of the token —
+/// see `mesh_key` for why the credential itself must never reach a path.
 ///
 /// Never fatal. Without a cache a consumer cannot verify bytes from a third
 /// party and falls back to reading from this origin, which is exactly today's
 /// behaviour.
-fn open_hash_cache(secret: &[u8; SECRET_LEN]) -> Option<Arc<super::hash::HashCache>> {
+fn open_hash_cache(token: &[u8; SECRET_LEN]) -> Option<Arc<super::hash::HashCache>> {
     let cache_dir = std::env::temp_dir()
         .join("agent-share-hashes")
-        .join(&agent_share_proto::mesh_key::share_mesh_key(secret)[..16]);
+        .join(&agent_share_proto::mesh_key::share_mesh_key(token)[..16]);
     match super::hash::HashCache::open(&cache_dir) {
         Ok(cache) => Some(Arc::new(cache)),
         Err(error) => {
@@ -324,6 +419,10 @@ pub(super) async fn bind(
         secret,
         lookups,
         kind: agent_share_proto::ticket::TICKET_KIND_SHARE,
+        // The caller sets `TICKET_FLAG_PASSWORD` if it protected the share;
+        // binding an endpoint knows nothing about that.
+        flags: 0,
+        mesh_id: None,
     };
     Ok((endpoint, ticket, secret, webrtc))
 }
@@ -336,19 +435,19 @@ pub(super) async fn bind(
 /// The connection drops, or a stream write fails.
 pub async fn serve_established(
     conn: Connection,
-    secret: [u8; SECRET_LEN],
+    auth: ShareAuth,
     tree: Arc<LiveTree>,
     hashes: Option<Arc<super::hash::HashCache>>,
 ) -> Result<()> {
     // `accept_bi` errors once the connection is gone (peer closed, or a bad
-    // secret closed it from within a stream task) — that ends the loop.
+    // token closed it from within a stream task) — that ends the loop.
     while let Ok((send, recv)) = conn.accept_bi().await {
         let conn = conn.clone();
         let tree = Arc::clone(&tree);
         let hashes = hashes.clone();
         tokio::spawn(async move {
             if let Err(error) =
-                serve_stream(&conn, send, recv, &secret, &tree, hashes.as_deref()).await
+                serve_stream(&conn, send, recv, &auth, &tree, hashes.as_deref()).await
             {
                 tracing::debug!(%error, "mount stream ended");
             }
@@ -358,13 +457,17 @@ pub async fn serve_established(
 }
 
 /// Authenticate one bi-stream by its 33-byte header and answer the request.
-/// A bad secret closes the whole connection (the bearer is poisoned); an
+/// A bad token closes the whole connection (the bearer is poisoned); an
 /// unknown op or a malformed request drops only this stream.
+///
+/// The close code says *which* kind of refusal it was, so a consumer that got
+/// the password wrong can be told to try again instead of concluding the share
+/// is broken. See [`ShareAuth::refusal_code`].
 async fn serve_stream(
     conn: &Connection,
     mut send: SendStream,
     mut recv: RecvStream,
-    secret: &[u8; SECRET_LEN],
+    auth: &ShareAuth,
     tree: &LiveTree,
     hashes: Option<&super::hash::HashCache>,
 ) -> Result<()> {
@@ -373,8 +476,8 @@ async fn serve_stream(
         // The stream died before delivering a full header — nothing to serve.
         return Ok(());
     }
-    if &header[..SECRET_LEN] != secret {
-        conn.close(1u32.into(), b"bad secret");
+    if !auth.accepts(&header) {
+        conn.close(auth.refusal_code().into(), auth.refusal_reason());
         return Ok(());
     }
     match header[SECRET_LEN] {

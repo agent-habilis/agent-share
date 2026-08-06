@@ -10,6 +10,8 @@
 //!   token shares.
 //! - [`ticket`]: the mount ticket — a bearer secret plus how to reach the
 //!   producer.
+//! - [`auth`]: the share token — what that secret becomes once a password is in
+//!   play, and what actually goes on the wire.
 //! - [`manifest`]: the directory/file listing a consumer turns into a tree.
 //! - [`framing`]: the ALPN, the op codes, and the request/response byte
 //!   layouts.
@@ -25,6 +27,7 @@
 //! The tests live beside the code they pin and must fail loudly; when a change
 //! really is intended, update them in the same commit that makes it.
 
+pub mod auth;
 pub mod client;
 pub mod framing;
 pub mod lookup;
@@ -40,13 +43,15 @@ pub use client::{
     PRODUCT as CLIENT_PRODUCT, PeerCard, format_label as format_client_label,
 };
 
+pub use auth::{MOUNT_TICKET_LABEL, ShareAuth, ct_eq, share_token};
 pub use framing::{
-    BENCH_ECHO_INTERVAL_SECS, BENCH_KIND_ECHO, BENCH_KIND_FILL, DEFAULT_BENCH_DURATION_SECS,
-    MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN,
-    OP_BENCH, OP_MANIFEST, OP_READ, REQUEST_HEADER_LEN, SECRET_LEN, WEBRTC_SIGNAL_ALPN,
+    BENCH_ECHO_INTERVAL_SECS, BENCH_KIND_ECHO, BENCH_KIND_FILL, CLOSE_BAD_SECRET,
+    CLOSE_UNAUTHORIZED, DEFAULT_BENCH_DURATION_SECS, MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES,
+    MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_MANIFEST, OP_READ,
+    REQUEST_HEADER_LEN, SECRET_LEN, WEBRTC_SIGNAL_ALPN,
 };
 pub use manifest::{DirEntry, FileEntry, MountManifest, ReadStatus};
 pub use ticket::{
-    MountTicket, TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC,
-    TICKET_KIND_SHARE,
+    MountTicket, TICKET_FLAG_PASSWORD, TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_RELAY,
+    TICKET_KIND_BENCH_WEBRTC, TICKET_KIND_SHARE,
 };

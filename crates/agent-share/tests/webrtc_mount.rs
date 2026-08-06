@@ -67,6 +67,8 @@ async fn a_share_is_readable_over_a_webrtc_data_channel() {
     let (manifest, paths) = agent_share::test_support::scan(&tree).expect("scan");
     let shared_tree = agent_share::test_support::live_tree(tree.clone(), manifest, paths);
     let secret = [7u8; SECRET_LEN];
+    // An unprotected share, so the token is the secret.
+    let auth = agent_share_proto::auth::ShareAuth::new(&secret, None);
 
     let (producer, producer_webrtc) =
         endpoint_with_webrtc(vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()]).await;
@@ -100,8 +102,8 @@ async fn a_share_is_readable_over_a_webrtc_data_channel() {
                         .expect("complete answer");
                     webrtc.attach(conn.remote_id(), session).expect("attach");
                 } else {
-                    let _ = agent_share::test_support::serve_mount(conn, secret, shared_tree, None)
-                        .await;
+                    let _ =
+                        agent_share::test_support::serve_mount(conn, auth, shared_tree, None).await;
                 }
             });
         }

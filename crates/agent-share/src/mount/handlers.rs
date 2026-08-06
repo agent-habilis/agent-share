@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use agent_share_proto::framing::SECRET_LEN;
+use agent_share_proto::auth::ShareAuth;
 use fofoca::iroh::EndpointId;
 use fofoca::iroh::endpoint::Connection;
 use fofoca::iroh::protocol::{AcceptError, ProtocolHandler};
@@ -31,7 +31,9 @@ use super::live::LiveTree;
 /// Serves `MOUNT_ALPN`: one long-lived connection, one request per bi-stream.
 #[derive(Debug, Clone)]
 pub(crate) struct MountHandler {
-    secret: [u8; SECRET_LEN],
+    /// What an inbound request has to present, and how to refuse one that
+    /// does not. Redacts itself in `Debug`, which this struct derives.
+    auth: ShareAuth,
     tree: Arc<LiveTree>,
     /// Outboards for files somebody has asked to verify. `None` when the cache
     /// directory could not be opened — the share still serves every byte, it
@@ -41,15 +43,11 @@ pub(crate) struct MountHandler {
 
 impl MountHandler {
     pub(crate) fn new(
-        secret: [u8; SECRET_LEN],
+        auth: ShareAuth,
         tree: Arc<LiveTree>,
         hashes: Option<Arc<super::hash::HashCache>>,
     ) -> Self {
-        Self {
-            secret,
-            tree,
-            hashes,
-        }
+        Self { auth, tree, hashes }
     }
 }
 
@@ -59,7 +57,7 @@ impl ProtocolHandler for MountHandler {
         // spawned task was. Errors are the peer going away, which is routine.
         if let Err(error) = super::produce::serve_established(
             conn,
-            self.secret,
+            self.auth,
             Arc::clone(&self.tree),
             self.hashes.clone(),
         )

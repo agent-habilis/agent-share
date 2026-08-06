@@ -15,12 +15,14 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             dir,
             swarm,
             lookups,
+            password,
             output: serve_output,
         }) => {
             return crate::mount::serve(
                 swarm.as_ref().map(crate::protocol::SwarmId::as_str),
                 lookups.to_set(),
                 &dir,
+                password.resolve()?.as_deref(),
                 matches!(serve_output, OutputFormat::Json),
             )
             .await;
@@ -29,12 +31,14 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             ticket,
             dest,
             only,
+            password,
             output: mirror_output,
         }) => {
             return crate::mount::mirror(
                 &ticket,
                 &dest,
                 &only,
+                password.resolve()?.as_deref(),
                 matches!(mirror_output, OutputFormat::Json),
             )
             .await;
@@ -93,5 +97,13 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             ),
         },
     };
-    crate::mount::attach(&ticket, &mountpoint, cli.no_mount, json, webrtc_only).await
+    crate::mount::attach(
+        &ticket,
+        &mountpoint,
+        cli.no_mount,
+        json,
+        webrtc_only,
+        cli.password.resolve()?.as_deref(),
+    )
+    .await
 }

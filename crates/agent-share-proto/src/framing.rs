@@ -1,9 +1,13 @@
 //! The mount protocol's identity and byte layouts.
 //!
 //! One QUIC bi-stream per request. Every stream opens with
-//! `secret(32) ‖ op(1)`; the op decides what follows. The producer treats a
-//! bad secret as fatal to the whole connection and an unknown op as fatal to
+//! `token(32) ‖ op(1)`; the op decides what follows. The producer treats a
+//! bad token as fatal to the whole connection and an unknown op as fatal to
 //! just that stream.
+//!
+//! The 32 bytes are the share *token*, not the ticket secret — they are the
+//! same thing on an unprotected share and differ on a passworded one. See
+//! [`crate::auth::share_token`].
 
 use anyhow::{Context, Result, bail};
 
@@ -27,11 +31,28 @@ pub const MOUNT_ALPN: &[u8] = b"agent-share/mount/1";
 /// data channel.
 pub const WEBRTC_SIGNAL_ALPN: &[u8] = b"agent-share/webrtc-signal/1";
 
-/// Length of the bearer-capability secret carried in a mount ticket.
+/// Length of the bearer-capability secret carried in a mount ticket, and so
+/// also of the share token derived from it.
 pub const SECRET_LEN: usize = 32;
 
-/// Per-request header: the 32-byte bearer secret followed by the 1-byte op.
+/// Per-request header: the 32-byte share token followed by the 1-byte op.
 pub const REQUEST_HEADER_LEN: usize = SECRET_LEN + 1;
+
+/// Connection close code: the token presented did not match, on a share that
+/// carries no password.
+///
+/// The bearer is simply wrong, and there is nothing the peer can do about it —
+/// which is what separates it from [`CLOSE_UNAUTHORIZED`].
+pub const CLOSE_BAD_SECRET: u32 = 1;
+
+/// Connection close code: the token presented did not match, on a share that
+/// **is** password-protected.
+///
+/// Split from [`CLOSE_BAD_SECRET`] so a consumer can say "wrong password" and
+/// offer another try, rather than reporting a share that refuses to talk. The
+/// producer picks by what its *own* share is, never by guessing at why the peer
+/// failed — so this code leaks only what the ticket's flag already says.
+pub const CLOSE_UNAUTHORIZED: u32 = 2;
 
 /// Request the manifest: the full dir + file listing with sizes and attrs.
 pub const OP_MANIFEST: u8 = 1;
@@ -133,18 +154,18 @@ pub const BENCH_REQUEST_PREFIX_LEN: usize = 5;
 /// Build the header for an [`OP_MANIFEST`] request. The manifest op has no
 /// body, so this is the whole request.
 #[must_use]
-pub fn encode_manifest_request(secret: &[u8; SECRET_LEN]) -> Vec<u8> {
+pub fn encode_manifest_request(token: &[u8; SECRET_LEN]) -> Vec<u8> {
     let mut out = Vec::with_capacity(REQUEST_HEADER_LEN);
-    out.extend_from_slice(secret);
+    out.extend_from_slice(token);
     out.push(OP_MANIFEST);
     out
 }
 
 /// Build a complete [`OP_HASH`] request: header followed by `index(u32)`.
 #[must_use]
-pub fn encode_hash_request(secret: &[u8; SECRET_LEN], index: u32) -> Vec<u8> {
+pub fn encode_hash_request(token: &[u8; SECRET_LEN], index: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(REQUEST_HEADER_LEN + 4);
-    out.extend_from_slice(secret);
+    out.extend_from_slice(token);
     out.push(OP_HASH);
     out.extend_from_slice(&index.to_le_bytes());
     out
@@ -165,23 +186,18 @@ pub fn decode_hash_request(body: &[u8]) -> Result<u32> {
 /// Build the header for an [`OP_WATCH`] request. Like the manifest op it has
 /// no body; unlike it, the response never ends until the share does.
 #[must_use]
-pub fn encode_watch_request(secret: &[u8; SECRET_LEN]) -> Vec<u8> {
+pub fn encode_watch_request(token: &[u8; SECRET_LEN]) -> Vec<u8> {
     let mut out = Vec::with_capacity(REQUEST_HEADER_LEN);
-    out.extend_from_slice(secret);
+    out.extend_from_slice(token);
     out.push(OP_WATCH);
     out
 }
 
 /// Build a complete [`OP_READ`] request: header followed by the 16-byte body.
 #[must_use]
-pub fn encode_read_request(
-    secret: &[u8; SECRET_LEN],
-    index: u32,
-    offset: u64,
-    len: u32,
-) -> Vec<u8> {
+pub fn encode_read_request(token: &[u8; SECRET_LEN], index: u32, offset: u64, len: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(REQUEST_HEADER_LEN + READ_REQUEST_LEN);
-    out.extend_from_slice(secret);
+    out.extend_from_slice(token);
     out.push(OP_READ);
     out.extend_from_slice(&index.to_le_bytes());
     out.extend_from_slice(&offset.to_le_bytes());
@@ -193,13 +209,13 @@ pub fn encode_read_request(
 ///
 /// # Errors
 /// `payload.len()` exceeds [`MAX_BENCH_ECHO_BYTES`].
-pub fn encode_bench_echo_request(secret: &[u8; SECRET_LEN], payload: &[u8]) -> Result<Vec<u8>> {
+pub fn encode_bench_echo_request(token: &[u8; SECRET_LEN], payload: &[u8]) -> Result<Vec<u8>> {
     let len = u32::try_from(payload.len()).context("echo payload too large for u32")?;
     if len > MAX_BENCH_ECHO_BYTES {
         bail!("echo payload {len} exceeds cap {MAX_BENCH_ECHO_BYTES}");
     }
     let mut out = Vec::with_capacity(REQUEST_HEADER_LEN + BENCH_REQUEST_PREFIX_LEN + payload.len());
-    out.extend_from_slice(secret);
+    out.extend_from_slice(token);
     out.push(OP_BENCH);
     out.push(BENCH_KIND_ECHO);
     out.extend_from_slice(&len.to_le_bytes());
@@ -211,12 +227,12 @@ pub fn encode_bench_echo_request(secret: &[u8; SECRET_LEN], payload: &[u8]) -> R
 ///
 /// # Errors
 /// `len` exceeds [`MAX_BENCH_FILL_BYTES`] or is zero.
-pub fn encode_bench_fill_request(secret: &[u8; SECRET_LEN], len: u32) -> Result<Vec<u8>> {
+pub fn encode_bench_fill_request(token: &[u8; SECRET_LEN], len: u32) -> Result<Vec<u8>> {
     if len == 0 || len > MAX_BENCH_FILL_BYTES {
         bail!("fill length {len} must be in 1..={MAX_BENCH_FILL_BYTES}");
     }
     let mut out = Vec::with_capacity(REQUEST_HEADER_LEN + BENCH_REQUEST_PREFIX_LEN);
-    out.extend_from_slice(secret);
+    out.extend_from_slice(token);
     out.push(OP_BENCH);
     out.push(BENCH_KIND_FILL);
     out.extend_from_slice(&len.to_le_bytes());
@@ -304,10 +320,11 @@ pub fn decode_response_header(prefix: &[u8], requested: u32) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BENCH_ECHO_INTERVAL_SECS, BENCH_KIND_ECHO, BENCH_KIND_FILL, DEFAULT_BENCH_DURATION_SECS,
-        MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES, MAX_DELTA_BYTES, MAX_MANIFEST_BYTES,
-        MAX_OUTBOARD_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_HASH, OP_MANIFEST, OP_READ,
-        OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, WEBRTC_SIGNAL_ALPN, decode_bench_request_prefix,
+        BENCH_ECHO_INTERVAL_SECS, BENCH_KIND_ECHO, BENCH_KIND_FILL, CLOSE_BAD_SECRET,
+        CLOSE_UNAUTHORIZED, DEFAULT_BENCH_DURATION_SECS, MAX_BENCH_ECHO_BYTES,
+        MAX_BENCH_FILL_BYTES, MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_OUTBOARD_BYTES,
+        MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_HASH, OP_MANIFEST, OP_READ, OP_WATCH,
+        REQUEST_HEADER_LEN, SECRET_LEN, WEBRTC_SIGNAL_ALPN, decode_bench_request_prefix,
         decode_hash_request, decode_read_request, decode_response_header,
         encode_bench_echo_request, encode_bench_fill_request, encode_hash_request,
         encode_manifest_request, encode_read_request,
@@ -365,6 +382,11 @@ mod tests {
         assert_eq!(DEFAULT_BENCH_DURATION_SECS, 30);
         assert_eq!(BENCH_ECHO_INTERVAL_SECS, 1);
         assert_eq!(SECRET_LEN, 32);
+        // Close codes. `1` predates the split and keeps its meaning; `2` is the
+        // one a consumer reads as "wrong password", so swapping them would turn
+        // a retryable prompt into a dead end.
+        assert_eq!(CLOSE_BAD_SECRET, 1);
+        assert_eq!(CLOSE_UNAUTHORIZED, 2);
         assert_eq!(MAX_MANIFEST_BYTES, 64 * 1024 * 1024);
         assert_eq!(MAX_READ_LEN, 256 * 1024);
         assert_eq!(MAX_DELTA_BYTES, 8 * 1024 * 1024);

@@ -17,6 +17,7 @@ use agent_share_proto::framing::{
 };
 use agent_share_proto::lookup::LookupOpts;
 use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
+use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
 use fofoca_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle,
@@ -121,9 +122,17 @@ impl ShareProducer {
     /// Start serving a pre-scanned listing from JS:
     /// `{ dirs: string[], files: { rel_path, size, mtime, handle }[] }`.
     ///
+    /// Pass a `password` to protect the share: the ticket then addresses it
+    /// without opening it, so the link is safe to post somewhere the password
+    /// is not. Costs ~100 ms of Argon2id on the main thread, once, here.
+    ///
     /// # Errors
     /// Bad listing shape, bind failure, or empty tree.
-    pub async fn start(listing: JsValue, card: Option<JsValue>) -> Result<ShareProducer, JsValue> {
+    pub async fn start(
+        listing: JsValue,
+        card: Option<JsValue>,
+        password: Option<String>,
+    ) -> Result<ShareProducer, JsValue> {
         console_error_panic_hook::set_once();
         let scanned = parse_listing(&listing)?;
         if scanned.files.is_empty() && scanned.dirs.is_empty() {
@@ -157,6 +166,9 @@ impl ShareProducer {
 
         let mut secret = [0u8; SECRET_LEN];
         getrandom::fill(&mut secret).map_err(|error| err("mint secret", &error))?;
+        // The share's real credential. Without a password it *is* the secret,
+        // so an ordinary browser share is byte-for-byte what it was.
+        let auth = ShareAuth::new(&secret, password.as_deref());
 
         // The mesh's Router owns `accept()` now, and it is up before the
         // ticket exists — so a fast joiner still is not raced. Injecting the
@@ -165,7 +177,7 @@ impl ShareProducer {
         let protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> = vec![
             (
                 MOUNT_ALPN.to_vec(),
-                Box::new(MountHandler::new(Rc::clone(&shared), secret)),
+                Box::new(MountHandler::new(Rc::clone(&shared), auth)),
             ),
             (
                 WEBRTC_SIGNAL_ALPN.to_vec(),
@@ -185,9 +197,19 @@ impl ShareProducer {
             }
             None => crate::mesh::default_card_parts("webrtc", Some("producer".to_owned())),
         };
+        // Minted here so the id can go in the ticket. On a protected share it
+        // carries the verifier fofoca baked in, which is what lets a viewer rule
+        // on its password locally instead of asking this producer — which may
+        // not be running when they try.
+        let mesh_id = crate::mesh::mint_share_mesh_id(&secret, &lookups, password.as_deref())?;
+        let resolved = crate::mesh::resolve_share(crate::mesh::ShareMeshRef {
+            mesh_id: Some(&mesh_id),
+            secret: &secret,
+            lookups: &lookups,
+            password: password.as_deref(),
+        })?;
         let mesh = crate::mesh::MeshPeer::join_share_with(
-            &secret,
-            &lookups,
+            resolved,
             endpoint.clone(),
             handle.clone(),
             protocols,
@@ -203,6 +225,14 @@ impl ShareProducer {
             secret,
             lookups,
             kind: agent_share_proto::ticket::TICKET_KIND_SHARE,
+            flags: if auth.password_protected() {
+                agent_share_proto::ticket::TICKET_FLAG_PASSWORD
+            } else {
+                0
+            },
+            // Only on a protected share: an ordinary one needs no id in its
+            // ticket, because every peer derives the same mesh from the secret.
+            mesh_id: auth.password_protected().then(|| mesh_id.clone()),
         };
         let ticket_str = ticket.encode();
 
@@ -349,14 +379,17 @@ impl ShareProducer {
 #[derive(Clone)]
 pub(crate) struct MountHandler<S> {
     source: send_wrapper::SendWrapper<S>,
-    secret: [u8; SECRET_LEN],
+    /// What an inbound request must present, and how to refuse one that does
+    /// not. Identical to the native producer's, from the same crate — a browser
+    /// tab seeding a share is a producer, not a special case.
+    auth: ShareAuth,
 }
 
 impl<S> MountHandler<S> {
-    pub(crate) fn new(source: S, secret: [u8; SECRET_LEN]) -> Self {
+    pub(crate) fn new(source: S, auth: ShareAuth) -> Self {
         Self {
             source: send_wrapper::SendWrapper::new(source),
-            secret,
+            auth,
         }
     }
 }
@@ -372,9 +405,9 @@ impl<S> std::fmt::Debug for MountHandler<S> {
 impl<S: ServeSource> fofoca::iroh::protocol::ProtocolHandler for MountHandler<S> {
     async fn accept(&self, conn: Connection) -> Result<(), fofoca::iroh::protocol::AcceptError> {
         let source = (*self.source).clone();
-        let secret = self.secret;
+        let auth = self.auth;
         wasm_bindgen_futures::spawn_local(async move {
-            if let Err(error) = serve_mount(conn, secret, source).await {
+            if let Err(error) = serve_mount(conn, auth, source).await {
                 web_sys::console::debug_1(&error);
             }
         });
@@ -489,6 +522,10 @@ impl BenchProducer {
             secret,
             lookups: LookupOpts::public_preset(),
             kind,
+            mesh_id: None,
+            // A bench share is synthetic — no directory, no bytes, nothing
+            // worth protecting — so it never carries a password.
+            flags: 0,
         };
 
         Ok(BenchProducer {
@@ -791,14 +828,14 @@ async fn serve_signal(
 
 async fn serve_mount<S: ServeSource>(
     conn: Connection,
-    secret: [u8; SECRET_LEN],
+    auth: ShareAuth,
     source: S,
 ) -> Result<(), JsValue> {
     while let Ok((send, recv)) = conn.accept_bi().await {
         let conn = conn.clone();
         let source = source.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = serve_stream(&conn, send, recv, &secret, source).await;
+            let _ = serve_stream(&conn, send, recv, &auth, source).await;
         });
     }
     Ok(())
@@ -808,15 +845,17 @@ async fn serve_stream<S: ServeSource>(
     conn: &Connection,
     mut send: fofoca::iroh::endpoint::SendStream,
     mut recv: fofoca::iroh::endpoint::RecvStream,
-    secret: &[u8; SECRET_LEN],
+    auth: &ShareAuth,
     source: S,
 ) -> Result<(), JsValue> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
     if recv.read_exact(&mut header).await.is_err() {
         return Ok(());
     }
-    if &header[..SECRET_LEN] != secret {
-        conn.close(1u32.into(), b"bad secret");
+    if !auth.accepts(&header) {
+        // The close code is how a consumer tells "wrong password, try again"
+        // from "this share refuses to talk". See `ShareAuth::refusal_code`.
+        conn.close(auth.refusal_code().into(), auth.refusal_reason());
         return Ok(());
     }
     match header[SECRET_LEN] {

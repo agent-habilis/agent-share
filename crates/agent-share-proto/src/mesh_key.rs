@@ -1,4 +1,4 @@
-//! The mesh a share belongs to, derived from the share's own secret.
+//! The mesh a share belongs to, derived from the share's own token.
 //!
 //! Everyone holding the link — the producer, a CLI consumer, a browser tab —
 //! computes the same value locally, so co-viewers of a share become peers on
@@ -9,9 +9,16 @@
 //! Two hashes, not one, and the second is the point:
 //!
 //! ```text
-//! share_mesh_key(secret) = hex( SHA256("agent-share/mesh/v1" ‖ secret) )
-//!                          └── fed to the mesh's own topic derivation
+//! share_mesh_key(token) = hex( SHA256("agent-share/mesh/v1" ‖ token) )
+//!                         └── fed to the mesh's own topic derivation
 //! ```
+//!
+//! The input is [`crate::auth::share_token`], not the ticket secret. On an
+//! unprotected share those are the same 32 bytes, so this derivation is
+//! unchanged. On a passworded one they are not, and that is what puts the mesh
+//! behind the password too: someone holding the link without the password
+//! cannot compute this id, so they do not merely fail to *read* the share —
+//! they never find its peers, its tree fingerprint or its serving grid either.
 //!
 //! The mesh engine derives a topic mesh from a *string*, and carries that
 //! string around — into `SetupKind::Topic`, the session state file, and
@@ -21,8 +28,8 @@
 //! the share it belongs to.
 //!
 //! Same trust boundary as the link itself in the other direction: anyone who
-//! can compute this already holds the secret, and the secret already grants
-//! full read access.
+//! can compute this already holds the token, and the token already grants full
+//! read access.
 
 use sha2::{Digest, Sha256};
 
@@ -35,12 +42,14 @@ const SHARE_MESH_LABEL: &[u8] = b"agent-share/mesh/v1";
 /// The topic string identifying a share's mesh, as lowercase hex.
 ///
 /// Feed it to the mesh engine's topic derivation (`runtime::derive_topic_mesh`)
-/// to get the `Mesh` every holder of this ticket agrees on.
+/// to get the `Mesh` every holder of this share's token agrees on. Pass
+/// [`crate::auth::share_token`], not the raw ticket secret — see the module
+/// docs for why the difference is the whole point on a passworded share.
 #[must_use]
-pub fn share_mesh_key(secret: &[u8; SECRET_LEN]) -> String {
+pub fn share_mesh_key(token: &[u8; SECRET_LEN]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(SHARE_MESH_LABEL);
-    hasher.update(secret);
+    hasher.update(token);
     let digest = hasher.finalize();
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {

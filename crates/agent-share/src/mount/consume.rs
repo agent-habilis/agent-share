@@ -21,12 +21,12 @@ use super::nfs;
 use super::nfs::{ByteSource, RemoteFs, TreeIds, build_tree};
 use super::{
     MAX_MANIFEST_BYTES, MAX_OUTBOARD_BYTES, MOUNT_ALPN, OP_HASH, OP_MANIFEST, OP_READ, OP_WATCH,
-    SECRET_LEN,
 };
 // The root type comes from the store, not from this crate: `agent-share` names
 // what `fofoca-blobs` verifies against rather than defining a second one.
 use super::{MountManifest, ReadStatus};
 use super::{WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
+use agent_share_proto::auth::ShareAuth;
 use fofoca_blobs::Root;
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
 
@@ -38,6 +38,78 @@ const RETRY_DELAY: Duration = Duration::from_secs(3);
 /// How long a dead-origin attach waits for a vouching card to arrive over
 /// gossip before giving up on the share entirely.
 const SEEDER_CARDS_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Whether a connection's close is the producer saying "not this credential".
+///
+/// Matched on the application close code the producer chose
+/// ([`agent_share_proto::framing::CLOSE_UNAUTHORIZED`]) rather than on the
+/// reason string, which is a human label and not wire format.
+fn unauthorized_close(reason: &fofoca::iroh::endpoint::ConnectionError) -> bool {
+    matches!(
+        reason,
+        fofoca::iroh::endpoint::ConnectionError::ApplicationClosed(close)
+            if u64::from(close.error_code) == u64::from(agent_share_proto::framing::CLOSE_UNAUTHORIZED)
+    )
+}
+
+/// What a consumer is told when its password does not open the share.
+///
+/// Deliberately says nothing about *who* refused. In the common case nobody
+/// did: `fofoca` compared the password against the verifier in the ticket's
+/// mesh id and ruled locally, with no producer involved — and a share is
+/// designed to outlive its producer, so naming one would be wrong more often
+/// than right. The older path, where a live producer closes the connection with
+/// `CLOSE_UNAUTHORIZED`, reaches the same words.
+pub(super) const WRONG_PASSWORD: &str = "that password does not open this share";
+
+/// Work out what this consumer will present, refusing the mismatches up front.
+///
+/// Both directions are errors rather than warnings. A ticket that wants a
+/// password we do not have cannot succeed, so failing here beats failing as a
+/// dropped connection thirty seconds into discovery. And a password offered to
+/// a ticket that carries no flag almost always means the *ticket* is the wrong
+/// one — silently ignoring it would mount the wrong share and look like it
+/// worked.
+///
+/// # Errors
+/// The ticket is protected and `password` is `None`, or it is not and
+/// `password` is `Some`.
+pub(super) fn redeem_auth(ticket: &MountTicket, password: Option<&str>) -> Result<Redeemed> {
+    match (ticket.password_protected(), password) {
+        (true, None) => bail!(
+            "this share is password-protected — pass --password <PASSWORD> or --password-stdin"
+        ),
+        (false, Some(_)) => bail!(
+            "this ticket is not password-protected, so --password cannot apply to it — check \
+             you have the right ticket"
+        ),
+        (_, password) => Ok(Redeemed {
+            auth: ShareAuth::new(&ticket.secret, password),
+            // The check. On a protected ticket carrying a mesh id, `fofoca`
+            // stretches the password here and compares it against the verifier
+            // the id holds — so a wrong one is named now, locally, rather than
+            // after a dial that may have nobody to answer it.
+            mesh: super::mesh::resolve(
+                ticket.mesh_id.as_deref(),
+                &ticket.secret,
+                &ticket.lookups,
+                password,
+            )?,
+        }),
+    }
+}
+
+/// What redeeming a ticket produces: the mount credential, and the mesh.
+///
+/// Both come out of one call because both cost an Argon2id on a protected
+/// share, and because the mesh resolution is where a wrong password is caught —
+/// a caller that skipped it would dial with a credential nobody accepts and
+/// blame the network. `mirror` learned that the hard way: it took the token
+/// without the mesh and spent ninety seconds on discovery before failing.
+pub(super) struct Redeemed {
+    pub(super) auth: ShareAuth,
+    pub(super) mesh: super::mesh::ShareMeshTarget,
+}
 
 /// [`DISCOVERY_DEADLINE`], overridable for tests and ops.
 ///
@@ -67,43 +139,23 @@ pub(crate) async fn attach(
     no_mount: bool,
     json: bool,
     webrtc_only: bool,
+    password: Option<&str>,
 ) -> Result<()> {
     let ticket = MountTicket::decode(ticket)?;
-    // Pin a key so the WebRTC transport advertises the identity this endpoint
-    // binds — the producer does the same, for the same reason.
-    let mut key_bytes = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
-    let key = fofoca::iroh::SecretKey::from_bytes(&key_bytes);
-    let webrtc = WebRtcHandle::new(fofoca_iroh_webrtc_transport::WebRtcTransport::new(
-        key.public(),
-    ));
-    // `clear_ip` under `--transport webrtc`, for the same reason the bench's
-    // WebRTC arm sets it: a lane is pinned by removing the alternatives, not by
-    // hoping the preferred one wins a race. The address book is seeded with the
-    // producer's IP and relay below (the JSEP dial needs them), iroh fans the
-    // mount Initial across everything it knows, and on one host the direct IP
-    // path answers first — measured, the assertion reports
-    // `paths=["*ip", "relay"]`. The WebRTC lane keeps its own UDP socket, so
-    // ICE is unaffected; the relay stays for rendezvous.
-    let endpoint = build_endpoint(
-        &ticket.lookups,
-        Some(key),
-        None,
-        Vec::new(),
-        Some(webrtc.clone()),
-        webrtc_only,
-    )
-    .await?;
-    add_peer_addr(&endpoint, ticket.addr.clone())?;
-    // Taken before the ticket is moved into the client, and off the ticket
-    // rather than off the local bindings above: the mesh every peer of this
-    // share derives is the one the ticket describes.
-    let secret = ticket.secret;
-    let lookups = ticket.lookups.clone();
+    // Before the endpoint, before the dial: a ticket that wants a password we
+    // do not have is a usage error, and it should read as one rather than as a
+    // connection that mysteriously drops.
+    // Before an endpoint is bound and before a dial is attempted: on a protected
+    // share this is where a wrong password is caught.
+    let Redeemed {
+        auth,
+        mesh: mesh_target,
+    } = redeem_auth(&ticket, password)?;
+    let (endpoint, webrtc) = consumer_endpoint(&ticket, webrtc_only).await?;
     // The template every peer client is built from, and the address half of
     // the dead-origin bootstrap.
     let origin_ticket = ticket.clone();
-    let client = RemoteClient::new(endpoint.clone(), ticket)
+    let client = RemoteClient::new(endpoint.clone(), ticket, auth)
         .with_webrtc(webrtc.clone())
         .webrtc_only(webrtc_only);
 
@@ -114,8 +166,7 @@ pub(crate) async fn attach(
     // to find who else serves the share — so it runs concurrently with the
     // manifest fetch and is awaited only where it is needed.
     let mut mesh_task = Some(tokio::spawn(join_share_mesh(MeshJoin {
-        secret,
-        lookups: lookups.clone(),
+        target: mesh_target,
         endpoint: endpoint.clone(),
         webrtc: webrtc.clone(),
         webrtc_only,
@@ -123,8 +174,15 @@ pub(crate) async fn attach(
     let mut share_mesh: Option<Option<ShareMesh>> = None;
     let manifest = match client.fetch_manifest().await {
         Ok(manifest) => manifest,
+        // The producer refused the credential outright. Nothing else can go
+        // right after that — the mesh is derived from the same token, so the
+        // seeder fallback is looking at an empty mesh — so say the one useful
+        // thing instead of a discovery timeout.
+        Err(error) if client.refused_for_password().await => {
+            return Err(error.context(WRONG_PASSWORD));
+        }
         // The origin is unreachable. Every holder of this link is on the mesh
-        // its secret derives; a peer whose card vouches for the tree can serve
+        // its token derives; a peer whose card vouches for the tree can serve
         // the same manifest — frozen, since the origin alone may mutate it.
         // `--transport webrtc` is exempt: it pins the lane for tests, and the
         // seeder path rides iroh's own transports.
@@ -133,9 +191,32 @@ pub(crate) async fn attach(
                 Some(task) => task.await.unwrap_or(None),
                 None => None,
             };
-            let manifest =
-                bootstrap_from_seeders(mesh.as_ref(), &endpoint, &origin_ticket, &origin_error)
-                    .await?;
+            let manifest = bootstrap_from_seeders(
+                mesh.as_ref(),
+                &endpoint,
+                &origin_ticket,
+                auth,
+                &origin_error,
+            )
+            .await
+            // The cost of having no offline verifier: with the origin down,
+            // "wrong password" and "share is gone" produce the same silence,
+            // because a wrong password derives a mesh id nobody else is on.
+            // Say both rather than pick one.
+            // No password hedge when the ticket carried a mesh id: the password
+            // was ruled on locally before the dial, so reaching here means it
+            // was right and the share is simply unreachable. A protected ticket
+            // *without* an id — minted before that field existed — had nothing
+            // local to check, so there the password is still a candidate.
+            .map_err(|error| {
+                if auth.password_protected() && origin_ticket.mesh_id.is_none() {
+                    error.context(
+                        "the password may be wrong, or the share may no longer be available",
+                    )
+                } else {
+                    error
+                }
+            })?;
             share_mesh = Some(mesh);
             manifest
         }
@@ -158,6 +239,7 @@ pub(crate) async fn attach(
         Arc::clone(&client),
         endpoint.clone(),
         origin_ticket,
+        auth,
         tree_fingerprint.clone(),
         file_count,
         None,
@@ -214,6 +296,46 @@ pub(crate) async fn attach(
     Ok(())
 }
 
+/// Bind the endpoint this consumer dials and meshes on, seeded with the
+/// producer's address.
+///
+/// Pins a key so the `WebRTC` transport advertises the identity the endpoint
+/// binds — the producer does the same, for the same reason.
+///
+/// `webrtc_only` clears IP, for the same reason the bench's `WebRTC` arm does:
+/// a lane is pinned by removing the alternatives, not by hoping the preferred
+/// one wins a race. The address book is still seeded with the producer's IP and
+/// relay (the JSEP dial needs them), iroh fans the mount Initial across
+/// everything it knows, and on one host the direct IP path answers first —
+/// measured, the assertion reports `paths=["*ip", "relay"]`. The `WebRTC` lane
+/// keeps its own UDP socket, so ICE is unaffected, and the relay stays for
+/// rendezvous.
+///
+/// # Errors
+/// The endpoint cannot bind, or the producer address is unusable.
+async fn consumer_endpoint(
+    ticket: &MountTicket,
+    webrtc_only: bool,
+) -> Result<(Endpoint, WebRtcHandle)> {
+    let mut key_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
+    let key = fofoca::iroh::SecretKey::from_bytes(&key_bytes);
+    let webrtc = WebRtcHandle::new(fofoca_iroh_webrtc_transport::WebRtcTransport::new(
+        key.public(),
+    ));
+    let endpoint = build_endpoint(
+        &ticket.lookups,
+        Some(key),
+        None,
+        Vec::new(),
+        Some(webrtc.clone()),
+        webrtc_only,
+    )
+    .await?;
+    add_peer_addr(&endpoint, ticket.addr.clone())?;
+    Ok((endpoint, webrtc))
+}
+
 /// Try the OS mount and report either outcome; `true` when it mounted.
 ///
 /// The bridge keeps serving either way; on a refused mount the user gets the
@@ -264,8 +386,7 @@ async fn mount_and_report(
 /// Owned fields, deliberately: the join runs as a spawned task concurrent
 /// with the manifest fetch, so it cannot borrow from `attach`'s stack.
 struct MeshJoin {
-    secret: [u8; SECRET_LEN],
-    lookups: agent_share_proto::lookup::LookupOpts,
+    target: super::mesh::ShareMeshTarget,
     endpoint: Endpoint,
     webrtc: WebRtcHandle,
     webrtc_only: bool,
@@ -287,8 +408,7 @@ struct MeshJoin {
 /// "no peer counts" and never as "no mount".
 async fn join_share_mesh(join: MeshJoin) -> Option<ShareMesh> {
     let result = super::mesh::join(super::mesh::JoinOpts {
-        secret: &join.secret,
-        lookups: &join.lookups,
+        target: join.target,
         shared: fofoca::runtime::InjectedEndpoint {
             endpoint: join.endpoint.clone(),
             webrtc: join.webrtc.clone(),
@@ -336,6 +456,7 @@ async fn bootstrap_from_seeders(
     mesh: Option<&ShareMesh>,
     endpoint: &Endpoint,
     origin_ticket: &MountTicket,
+    auth: ShareAuth,
     origin_error: &anyhow::Error,
 ) -> Result<MountManifest> {
     let Some(mesh) = mesh else {
@@ -404,8 +525,14 @@ async fn bootstrap_from_seeders(
             secret: origin_ticket.secret,
             lookups: origin_ticket.lookups.clone(),
             kind: origin_ticket.kind,
+            flags: origin_ticket.flags,
+            mesh_id: origin_ticket.mesh_id.clone(),
         };
-        let client = RemoteClient::new(endpoint.clone(), ticket);
+        // The same `auth` the origin dial used. A seeder authenticated with the
+        // password once and now checks the token exactly as the origin did, so
+        // no password reaches this path — which is what lets a mirror re-seed a
+        // protected share without ever holding one.
+        let client = RemoteClient::new(endpoint.clone(), ticket, auth);
         match client.fetch_manifest_bytes().await {
             // The candidate must serve the tree its card claimed: fetched
             // bytes, hashed here, against the majority. A mismatch is
@@ -521,6 +648,10 @@ async fn follow_watch_stream(
 pub(super) struct RemoteClient {
     endpoint: Endpoint,
     ticket: MountTicket,
+    /// What every request header presents. Derived from the ticket secret and
+    /// (when the share is protected) the password, once, at redeem time —
+    /// stretching it per request would cost 100 ms and 19 `MiB` a read.
+    auth: ShareAuth,
     conn: Mutex<Option<Connection>>,
     /// The `WebRTC` lane. Read only when [`Self::webrtc_only`] is set — the
     /// ordinary dial never touches it, so a native pair stays on iroh's own
@@ -532,10 +663,11 @@ pub(super) struct RemoteClient {
 }
 
 impl RemoteClient {
-    pub(super) fn new(endpoint: Endpoint, ticket: MountTicket) -> Self {
+    pub(super) fn new(endpoint: Endpoint, ticket: MountTicket, auth: ShareAuth) -> Self {
         Self {
             endpoint,
             ticket,
+            auth,
             conn: Mutex::new(None),
             webrtc: None,
             webrtc_only: false,
@@ -599,6 +731,23 @@ impl RemoteClient {
         self.ticket.addr.clone()
     }
 
+    /// Whether the last connection died because the producer refused what we
+    /// presented, on a share that says a password is what opens it.
+    ///
+    /// Read *after* a failed request, not before one: the refusal happens when
+    /// the producer reads the first request header, so the dial succeeds and the
+    /// close arrives underneath the error the request returns.
+    pub(super) async fn refused_for_password(&self) -> bool {
+        if !self.auth.password_protected() {
+            return false;
+        }
+        let guard = self.conn.lock().await;
+        guard
+            .as_ref()
+            .and_then(Connection::close_reason)
+            .is_some_and(|reason| unauthorized_close(&reason))
+    }
+
     /// The shared connection, dialing (with the discovery retry loop) when
     /// there is none or the previous one died.
     async fn connection(&self) -> Result<Connection> {
@@ -645,14 +794,14 @@ impl RemoteClient {
         Ok(conn)
     }
 
-    /// Open one request stream and write the `secret ‖ op` header. Retries
+    /// Open one request stream and write the `token ‖ op` header. Retries
     /// once on a fresh connection when the cached one just died.
     async fn request(&self, op: u8) -> Result<(SendStream, RecvStream)> {
         for attempt in 0..2 {
             let conn = self.connection().await?;
             match conn.open_bi().await {
                 Ok((mut send, recv)) => {
-                    send.write_all(&self.ticket.secret).await?;
+                    send.write_all(self.auth.token()).await?;
                     send.write_all(&[op]).await?;
                     return Ok((send, recv));
                 }

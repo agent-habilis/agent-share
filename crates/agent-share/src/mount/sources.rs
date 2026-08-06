@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use fofoca::iroh::{Endpoint, EndpointAddr, TransportAddr};
 
 use agent_share_proto::PeerCard;
+use agent_share_proto::auth::ShareAuth;
 
 use super::MountTicket;
 use super::consume::RemoteClient;
@@ -53,6 +54,11 @@ pub(super) struct SourceSet {
     /// The origin's ticket — the secret and lookups are the template every
     /// peer client is built from; only the address changes.
     ticket: MountTicket,
+    /// What a peer client presents. The mount protocol is symmetric and
+    /// authenticates the token alone, with no binding to who is serving, so the
+    /// bytes that opened the origin open a seeder too — including on a protected
+    /// share, where the password was spent once and never travels again.
+    auth: ShareAuth,
     /// Fingerprint of the manifest this mount is on: guard #1's filter.
     tree: String,
     /// Live slot count, the denominator `serving` ranges decode against.
@@ -73,6 +79,7 @@ impl SourceSet {
         origin: Arc<RemoteClient>,
         endpoint: Endpoint,
         ticket: MountTicket,
+        auth: ShareAuth,
         tree: String,
         total_slots: usize,
         cards: Option<super::mesh::CardBook>,
@@ -82,6 +89,7 @@ impl SourceSet {
             origin,
             endpoint,
             ticket,
+            auth,
             tree,
             total_slots,
             cards: Mutex::new(cards),
@@ -138,7 +146,7 @@ impl SourceSet {
     }
 
     /// A client for `card`'s peer: the origin's ticket with the address
-    /// swapped. Same secret — the mount protocol is symmetric, and every mesh
+    /// swapped. Same token — the mount protocol is symmetric, and every mesh
     /// member holds it by definition.
     fn peer_client(&self, card: &PeerCard) -> Result<Arc<RemoteClient>> {
         let id = card
@@ -150,8 +158,14 @@ impl SourceSet {
             secret: self.ticket.secret,
             lookups: self.ticket.lookups.clone(),
             kind: self.ticket.kind,
+            flags: self.ticket.flags,
+            mesh_id: self.ticket.mesh_id.clone(),
         };
-        Ok(Arc::new(RemoteClient::new(self.endpoint.clone(), ticket)))
+        Ok(Arc::new(RemoteClient::new(
+            self.endpoint.clone(),
+            ticket,
+            self.auth,
+        )))
     }
 
     /// Try every vouching peer for this read, striking the ones that fail.

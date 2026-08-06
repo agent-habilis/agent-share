@@ -5,6 +5,7 @@ use clap::Subcommand;
 
 use super::lookup::PublicLookupArgs;
 use super::output::OutputFormat;
+use super::password::PasswordArgs;
 use crate::protocol::SwarmId;
 
 /// The `agent-share serve` / `bench` actions. The consumer side is the bare
@@ -32,6 +33,11 @@ pub(crate) enum MountAction {
         /// those; naming none (or `--public`) is the all-on public preset.
         #[command(flatten)]
         lookups: PublicLookupArgs,
+        /// Protect the share with a password. The ticket then addresses the
+        /// share without opening it, so the link is safe to post somewhere the
+        /// password is not — and peers must supply both.
+        #[command(flatten)]
+        password: PasswordArgs,
         /// Output format: human (default) — a cargo-style status + hint — or
         /// json, a single direct `agent-share <ticket>` line for machines.
         #[arg(long, default_value = "human")]
@@ -59,6 +65,10 @@ pub(crate) enum MountAction {
         /// the origin says, with the files it does not hold answered as absent.
         #[arg(long = "only", value_name = "PATH")]
         only: Vec<String>,
+        /// Password for a protected share. The copy records what it needs to
+        /// re-serve, so `agent-share serve` on the result asks for nothing.
+        #[command(flatten)]
+        password: PasswordArgs,
         /// Output format: human (default) — a cargo-style progress and summary
         /// — or json, a single `agent-share serve <dir>` line for machines.
         #[arg(long, default_value = "human")]

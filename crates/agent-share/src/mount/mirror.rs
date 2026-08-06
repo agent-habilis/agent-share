@@ -31,6 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
+use agent_share_proto::auth::ShareAuth;
 use anyhow::{Context, Result, bail};
 use fofoca_blobs::{BlobStore, FileId, FsStore};
 
@@ -76,6 +77,33 @@ pub(super) const ORIGIN_MANIFEST: &str = "origin.manifest";
 /// mirror directory is as sensitive as the link that made it.
 pub(super) const ORIGIN_SECRET: &str = "origin.secret";
 
+/// Filename holding the *token* a protected share's password derived, written
+/// only when the share was protected.
+///
+/// Two files rather than one because they answer different questions.
+/// [`ORIGIN_SECRET`] is what goes back into the ticket this copy hands out, so
+/// the link people already have keeps working. This is what a request must
+/// present, and on a protected share the two are not the same bytes.
+///
+/// **Why the token and not the password.** The password is a human secret,
+/// likely reused; the token is a per-share credential that opens this share and
+/// nothing else. Storing the token lets a mirror re-seed unattended — the point
+/// of mirroring — without ever putting the password on disk. It is the same
+/// class of secret [`ORIGIN_SECRET`] already is, written the same way (0600),
+/// and it makes the mirror directory exactly as sensitive as the ticket *plus*
+/// the password that made it.
+pub(super) const ORIGIN_AUTH: &str = "origin.auth";
+
+/// Filename holding the origin's **mesh id**, written only for a protected
+/// share.
+///
+/// A copy has to hand out the id the origin minted, not one of its own: the id
+/// carries the password verifier, and two different ids are two different
+/// meshes — which would split the swarm exactly when seeders are what keeps the
+/// share alive. Not a secret on its own (it opens nothing without the
+/// password), but it is written beside the two that are.
+pub(super) const ORIGIN_MESH: &str = "origin.mesh";
+
 /// Whether `rel_path` was asked for.
 ///
 /// An empty filter means everything, so the ordinary whole-share mirror needs
@@ -96,21 +124,46 @@ fn wanted(only: &[String], rel_path: &str) -> bool {
 /// # Errors
 /// The ticket does not decode, the share is unreachable, `dest` cannot be
 /// written, or a file fails to verify against the root the origin published.
-pub(crate) async fn mirror(ticket: &str, dest: &Path, only: &[String], json: bool) -> Result<()> {
+pub(crate) async fn mirror(
+    ticket: &str,
+    dest: &Path,
+    only: &[String],
+    password: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let ticket = MountTicket::decode(ticket)?;
     // Kept so the copy can be re-served as a source for *this* share rather
     // than as a new one. See `ORIGIN_SECRET`.
     let secret = ticket.secret;
+    // Fails here, before a byte is fetched, if the password is missing or the
+    // ticket does not want one.
+    // Resolves the mesh too, which is what makes a wrong password fail here
+    // rather than after a ninety-second discovery deadline. A mirror never joins
+    // that mesh — it only needs the ruling.
+    let auth = super::consume::redeem_auth(&ticket, password)?.auth;
+    // Kept so the copy re-serves the origin's mesh rather than minting a rival.
+    let mesh_id = ticket.mesh_id.clone();
     let endpoint = build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false).await?;
     add_peer_addr(&endpoint, ticket.addr.clone())?;
-    let client = RemoteClient::new(endpoint.clone(), ticket);
+    let client = RemoteClient::new(endpoint.clone(), ticket, auth);
 
     // Whatever happens below, close the endpoint. Dropping it instead aborts
     // ungracefully and prints an iroh error over the top of ours, which buries
     // the reason a mirror actually failed.
-    let outcome = copy_all(&client, dest, only, secret, json).await;
+    let outcome = copy_all(&client, dest, only, secret, auth, mesh_id.as_deref(), json).await;
+    // Read before the endpoint closes: the close reason lives on the connection
+    // the client is holding, and closing the endpoint takes it with it.
+    let refused = client.refused_for_password().await;
     endpoint.close().await;
-    let tally = outcome?;
+    // A refused credential reaches here as "connection lost / closed by peer",
+    // which reads as a flaky network. Name it, the same way `attach` does.
+    let tally = outcome.map_err(|error| {
+        if refused {
+            error.context(super::consume::WRONG_PASSWORD)
+        } else {
+            error
+        }
+    })?;
     report(&tally, dest, json);
     Ok(())
 }
@@ -121,6 +174,8 @@ async fn copy_all(
     dest: &Path,
     only: &[String],
     secret: [u8; agent_share_proto::framing::SECRET_LEN],
+    auth: ShareAuth,
+    mesh_id: Option<&str>,
     json: bool,
 ) -> Result<Tally> {
     // The *bytes*, not just the decoded struct. A mirror re-serves these
@@ -148,6 +203,17 @@ async fn copy_all(
     std::fs::write(sidecar.join(ORIGIN_MANIFEST), &manifest_bytes)
         .context("recording the origin manifest")?;
     write_secret(&sidecar.join(ORIGIN_SECRET), &secret).context("recording the share secret")?;
+    // Only for a protected share. Its absence is what tells `serve` the secret
+    // alone is the credential, so an ordinary mirror is untouched by any of
+    // this — no extra file, no extra read.
+    if auth.password_protected() {
+        write_secret(&sidecar.join(ORIGIN_AUTH), auth.token())
+            .context("recording the share token")?;
+        if let Some(mesh_id) = mesh_id {
+            std::fs::write(sidecar.join(ORIGIN_MESH), mesh_id)
+                .context("recording the share mesh id")?;
+        }
+    }
 
     let mut tally = Tally::default();
     for (index, file) in manifest.files.iter().enumerate() {
@@ -242,6 +308,27 @@ pub(super) fn origin_secret_for(
 /// is a copy of.
 pub(super) fn origin_manifest_for(root: &Path) -> Option<Vec<u8>> {
     std::fs::read(sidecar_dir(root).join(ORIGIN_MANIFEST)).ok()
+}
+
+/// The credential a mirror of a *protected* share left beside `root`.
+///
+/// `None` for an ordinary mirror, whose secret is its own credential — so
+/// `serve` derives one from [`origin_secret_for`] instead and behaves exactly as
+/// it always has. See [`ORIGIN_AUTH`] for why the token is what is kept.
+pub(super) fn origin_mesh_id_for(root: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(sidecar_dir(root).join(ORIGIN_MESH)).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+/// The credential a mirror of a *protected* share left beside `root`.
+pub(super) fn origin_auth_for(root: &Path) -> Option<ShareAuth> {
+    let bytes = std::fs::read(sidecar_dir(root).join(ORIGIN_AUTH)).ok()?;
+    let token: [u8; agent_share_proto::framing::SECRET_LEN] = bytes.try_into().ok()?;
+    Some(ShareAuth::from_token(token, true))
 }
 
 /// Read a whole file over `OP_READ`, one capped chunk at a time.
