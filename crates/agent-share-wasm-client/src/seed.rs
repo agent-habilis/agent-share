@@ -183,7 +183,12 @@ impl ServeSource for SeederShared {
 /// The store speaks chunk ranges and bao encoding; this maps the byte window
 /// onto chunks, decodes against the bound root, and slices the window back
 /// out. Reading past the end answers the empty vec, matching the origin.
-async fn read_window(store: &IdbStore, file: &FileId, offset: u64, len: u32) -> Result<Vec<u8>> {
+pub(crate) async fn read_window(
+    store: &IdbStore,
+    file: &FileId,
+    offset: u64,
+    len: u32,
+) -> Result<Vec<u8>> {
     if offset >= file.size || len == 0 {
         return Ok(Vec::new());
     }

@@ -14,10 +14,9 @@
  * The numbers are wire bytes on the mount connection, from the QUIC state
  * machine — see `transferStats.ts` for what that includes and excludes.
  *
- * `ReconnectingStatus` is what stands there instead while the session is
- * re-dialling. The two live in one file because they are one slot: whatever
- * occupies it must be exactly `oneRow` tall, and keeping both here is what
- * keeps that invariant in one place.
+ * While the session is re-dialling the slot is simply empty: redialing is
+ * the app's permanent background posture, so it gets no message — the stats
+ * return the moment a connection does.
  */
 
 import { Spinner, Text, oneRow } from 'moonspace-ui'
@@ -211,10 +210,10 @@ function describeRatio(snapshot: TransferSnapshot | null): string {
 
 function describePeers(snapshot: TransferSnapshot | null): string {
   if (!snapshot) return PENDING
-  const peers = peerCounts(snapshot.gossip, snapshot.direct)
+  const peers = peerCounts(snapshot.gossip, snapshot.direct, snapshot.relayPeer)
   return lines(
     `Peers — ${peers.connected} connected of ${peers.known} known`,
-    'Connected: peers holding a direct WebRTC data channel with this tab.',
+    'Connected: peers this tab holds a live connection to — WebRTC data channels plus a relay-carried mount peer.',
     'Known: members on this share’s mesh, not counting this tab.',
     peers.connected === 0 && peers.known > 0
       ? '\nNone direct — this session is riding the relay.'
@@ -226,7 +225,11 @@ export const TransferStatus = component<TransferStatusProps>(function* (props) {
   yield () => {
     const snapshot = props.sample.value
     const total = snapshot?.link.total
-    const peers = peerCounts(snapshot?.gossip ?? 0, snapshot?.direct ?? 0)
+    const peers = peerCounts(
+      snapshot?.gossip ?? 0,
+      snapshot?.direct ?? 0,
+      snapshot?.relayPeer ?? false,
+    )
     /*
       Zeros before the first sample, not dashes.
 
@@ -289,47 +292,4 @@ export const TransferStatus = component<TransferStatusProps>(function* (props) {
   }
 })
 
-/**
- * No media query, unlike `READOUT`.
- *
- * The readout withdraws below 1200px because it wants ~62 cells and there is
- * not room for it, the brand and the actions at once. This wants ~15 and is the
- * more important thing to say, so it stays at every width; the grid's
- * `minmax(0, auto)` middle track and its `overflow: hidden` wrapper handle the
- * extreme case on their own.
- *
- * No fixed width either. `Field` works hard for one because its value changes
- * every second; this string never changes, so the invariant is free.
- */
-const RECONNECTING = css({
-  ...oneRow,
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: raw('1ch'),
-  whiteSpace: 'nowrap',
-})
 
-/**
- * The centre slot while the session is re-dialling.
- *
- * It stands in for the readout rather than joining it. The four numbers are
- * sampled off the connection that just died, so leaving them up shows a healthy
- * page that cannot move a byte — which is the exact shape of the bug the
- * revival loop exists to fix, arriving as a rendering choice.
- *
- * The word is `aria-hidden` and the spinner carries it instead: `Spinner`
- * already renders a `role="status"` region with its label inside, so a screen
- * reader given both hears "reconnecting" twice. Same split as `Field`, where
- * the glyph is hidden and the value is labelled.
- */
-export function ReconnectingStatus() {
-  return (
-    <span title="Reconnecting — the connection dropped, most often a backgrounded tab hitting the transport's idle timeout. The listing is local, so browsing still works; anything that needs the peer waits until it is back.">
-      {Style(RECONNECTING)}
-      <Spinner label="reconnecting" />
-      <Text color="fgMuted" aria-hidden="true">
-        reconnecting
-      </Text>
-    </span>
-  )
-}

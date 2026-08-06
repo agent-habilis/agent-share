@@ -52,6 +52,16 @@ export interface TransferSnapshot {
   gossip: number
   /** `peers_direct` — peers we hold a data channel with. */
   direct: number
+  /**
+   * A live mount connection riding a non-WebRTC path (relay or IP).
+   *
+   * That peer is invisible to `direct` — the session registry only counts
+   * data channels — yet it is the most connected peer this tab has: it is
+   * the one serving the bytes. Without it a producer-less share read
+   * `00/04` while actively downloading, which is how this field earned its
+   * place.
+   */
+  relayPeer: boolean
 }
 
 /**
@@ -131,9 +141,12 @@ export interface PeerCounts {
  * with the mesh down `peers_gossip` is 0 while a direct producer session may
  * still exist, and reporting `2/0` connected-of-known would be nonsense.
  */
-export function peerCounts(gossip: number, direct: number): PeerCounts {
-  const known = Math.max(gossip - 1, direct, 0)
-  return { connected: Math.max(direct, 0), known }
+export function peerCounts(gossip: number, direct: number, relayPeer = false): PeerCounts {
+  // A mount on a WebRTC path already sits in the session registry and so in
+  // `direct`; only the relay/IP-carried mount peer needs adding by hand.
+  const connected = Math.max(direct, 0) + (relayPeer ? 1 : 0)
+  const known = Math.max(gossip - 1, connected, 0)
+  return { connected, known }
 }
 
 /**

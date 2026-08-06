@@ -52,6 +52,9 @@ web-sys = { version = "0.3", features = [
     "console",
     "FileSystemHandle",
     "FileSystemFileHandle",
+    # The manifest locator: a refreshed tab re-arms its seeder from storage,
+    # and localStorage is where the tiny (size, tree) record lives.
+    "Storage",
 ] }
 # Both generations that reach wasm need their browser backend switched on.
 # 0.3+ additionally needs the `getrandom_backend` rustflag — see

@@ -12,20 +12,47 @@ failed with "no peer on the mesh vouches" after the full 30 s card wait,
 while a live seeding tab sat on the same mesh with `tree` + `serving`
 published. Same round, same mesh: one revival recovered fully, one expired.
 
-Mechanism hypothesis: the joiner's mesh membership comes up, but no *live*
-gossip link forms inside the wait — the rendezvous set is dominated by dead
-identities (the killed producer plus every discarded revival client; each
-reconnect mints a fresh endpoint), and dialing corpses eats the window. That
-is the ghost-peer defect (`mesh.rs`) biting a third time: ghosts don't just
-mislead the availability grid, they slow a fresh joiner's link formation.
-Fixing it likely lives in fofoca (prune dead rendezvous entrants, or
-prioritize recently-alive peers) rather than here; reusing one endpoint
-identity across reconnect attempts (already on this list) would shrink the
-corpse pool at the source.
+Mechanism, now **confirmed in fofoca source**: the producer is the mesh's
+*beacon*. Joiners bootstrap by dialing the seed-derived rendezvous identity
+homed at the relay, and that identity is bound by whichever member claims the
+beacon — always the share's first member, i.e. the native producer
+(`CoHostPolicy::Deferred` + `BEACON_COHOST_GRACE_SECS = 10`). Kill it and the
+mesh's front door goes dark: surviving *meshed* tabs only re-probe the vacancy
+on the heal cadence (`RIVAL_RECHECK_MESHED_SECS = 300` plus up to 300 s
+jitter), and a fresh joiner claiming after its own 10 s grace becomes a lone
+island whose merge rides the same slow cadence. Failover therefore lands in
+1–10 minutes, and any client-side wait shorter than that reads as "the share
+is gone". The web app now simply outlasts it: it retries forever with one
+persistent mesh membership (`WAITING_MESHES` in the wasm client). The real
+fix is fofoca-side and still open: **event-driven beacon failover** — probe
+the rendezvous when the link to the beacon dies rather than on the 300 s
+cadence — plus pruning dead rendezvous registrants (the corpse's relay
+registration lingers and makes vacancy probes read "held").
+
+Second-order effect, observed in the 21:40 drill: a joiner that lands during
+a dark window claims the rendezvous itself and becomes a **lone island**; the
+established island only merges into it on the same slow cadence, so that tab
+waits tens of minutes even after the seeders stabilize. Client-side fix worth
+doing regardless of fofoca: a reviving tab already *knows* the endpoints of
+the seeders it lost (its dead connection, the vetted cards) — **redial those
+addresses directly** instead of waiting for the mesh to reintroduce everyone.
+The bytes plane never needed the beacon; only discovery does.
 
 Found by driving the full scenario in Chrome via agent-browse: seed two tabs,
 kill the producer, reconnect + newcomer. `AGENT_SHARE_DISCOVERY_DEADLINE_SECS`
 and the web's `origin_cap_ms` connect param exist for exactly this loop.
+
+## Fixed since: refreshed tabs resurrect a producer-less share
+
+The everyone-refreshed deadlock (bytes survive in IndexedDB, the manifest
+didn't, so nobody could serve or vouch and everyone waited on everyone) is
+closed: `sync`/`refresh_held` persist the origin's manifest bytes into the
+share's `IdbStore` under a reserved `"\0manifest"` slot with a `{size, tree}`
+locator in localStorage, and the dead-origin fallback re-arms the waiting
+membership from that sidecar — serving and vouching before any peer exists.
+The web now has the native mirror's sidecar semantics. Still open: a *single*
+re-armed tab serves others but its own UI waits for a peer — rendering the
+tree offline from the persisted manifest is the follow-up.
 
 ## Overnight `serve` at 100% CPU — the workspace shipped a leaky iroh-gossip
 

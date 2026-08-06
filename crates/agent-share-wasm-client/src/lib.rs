@@ -340,6 +340,20 @@ impl ShareClient {
                 )));
             }
         }
+        // The origin answered, so this connect joined on the shared endpoint —
+        // a membership left waiting by earlier dead-origin attempts is now a
+        // duplicate identity and says goodbye.
+        let waiting =
+            WAITING_MESHES.with(|meshes| meshes.borrow_mut().remove(&share_mesh_key(&secret)));
+        if let Some((peer, _)) = waiting {
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(error) = peer.leave().await {
+                    web_sys::console::debug_1(&JsValue::from_str(&format!(
+                        "[share] leaving the waiting membership failed: {error:?}"
+                    )));
+                }
+            });
+        }
         Ok(client)
     }
 
@@ -770,6 +784,9 @@ impl ShareClient {
             total += body.len() as u64;
         }
 
+        // The sidecar: what lets a refreshed tab stand this share back up
+        // with no live source at all.
+        persist_manifest(&self.secret, &store, &bytes).await;
         // Serving before advertising: the seeder must answer for a slot by
         // the time the card claims it, or a reader lands on `BadIndex`.
         let held = self.held.borrow().clone();
@@ -817,20 +834,16 @@ impl ShareClient {
         let Ok(store) = IdbStore::open(&self.store_name()).await else {
             return Ok(());
         };
-        let mut held = BTreeSet::new();
-        for (index, entry) in manifest.files.iter().enumerate() {
-            if entry.is_tombstone() {
-                continue;
-            }
-            if is_held(&store, &file_id(entry)).await
-                && let Ok(index) = u32::try_from(index)
-            {
-                held.insert(index);
-            }
-        }
+        let held = held_in_store(&store, &manifest).await;
         *self.held.borrow_mut() = held;
         let store = Rc::new(store);
         *self.store.borrow_mut() = Some(Rc::clone(&store));
+        // A tab that seeded in an earlier session re-persists the (possibly
+        // newer) manifest on its next healthy visit, keeping the sidecar
+        // fresh for the next resurrection.
+        if !self.held.borrow().is_empty() {
+            persist_manifest(&self.secret, &store, &bytes).await;
+        }
         // Same order as `sync`: serve first, then advertise.
         let held = self.held.borrow().clone();
         self.seeder
@@ -839,16 +852,9 @@ impl ShareClient {
         Ok(())
     }
 
-    /// Where this share's blocks live.
-    ///
-    /// Keyed by the mesh id, which is a one-way hash of the secret — so two
-    /// shares never share a database, and the secret itself never reaches a
-    /// name that storage inspectors or `about:` pages would display.
+    /// Where this share's blocks live. See [`store_name_for`].
     fn store_name(&self) -> String {
-        format!(
-            "agent-share/{}",
-            &agent_share_proto::mesh_key::share_mesh_key(&self.secret)[..16]
-        )
+        store_name_for(&self.secret)
     }
 
     async fn open_store(&self) -> Result<Rc<IdbStore>, JsValue> {
@@ -1495,14 +1501,135 @@ async fn fetch_manifest_on(
     Ok((bytes, manifest))
 }
 
-/// How long a dead-origin connect waits for peer cards to arrive over gossip.
+/// How long **one attempt** waits for peer cards to arrive over gossip.
 ///
-/// Rendezvous plus a gossip round is a few seconds when the roster is small,
-/// but convergence was *measured* taking longer than 15 s on a mesh carrying
-/// a night's worth of ghost cards — and a fresh load has nothing better to
-/// spend the time on than the one wait that can save the share. Bounded so a
-/// share that truly has nobody left still fails in finite time.
-const SEEDER_CARDS_DEADLINE_MS: f64 = 30_000.0;
+/// Per-attempt, not terminal: the caller retries for as long as the page
+/// lives, and the membership below persists across attempts — so this bound
+/// only decides how often control returns to the caller (which wants to retry
+/// the *origin* too). Sized past the slow case: when the origin was the
+/// mesh's beacon, a surviving peer re-claims the rendezvous on a cadence
+/// measured in minutes, and cards can only flow once somebody has.
+const SEEDER_CARDS_DEADLINE_MS: f64 = 45_000.0;
+
+/// Where a share's blocks live.
+///
+/// Keyed by the mesh id, which is a one-way hash of the secret — so two
+/// shares never share a database, and the secret itself never reaches a
+/// name that storage inspectors or `about:` pages would display. A free
+/// function because the dead-origin re-arm needs it before any client
+/// exists.
+fn store_name_for(secret: &[u8; SECRET_LEN]) -> String {
+    format!("agent-share/{}", &share_mesh_key(secret)[..16])
+}
+
+/// The store's reserved slot for the origin's manifest bytes.
+///
+/// `"\0"` cannot occur in a real `rel_path` — both scanners refuse NUL — so
+/// this name can never collide with a file the share holds.
+const MANIFEST_STORE_KEY: &str = "\0manifest";
+
+/// Where the manifest *locator* lives: `localStorage`, beside the store.
+///
+/// The bytes are in the [`IdbStore`]; this tiny `{ size, tree }` record is
+/// what makes them findable on the next load — reconstructing the store's
+/// `FileId` needs the size, and the fingerprint is the integrity check.
+fn manifest_locator_key(secret: &[u8; SECRET_LEN]) -> String {
+    format!("agent-share/manifest/{}", &share_mesh_key(secret)[..16])
+}
+
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+}
+
+/// Persist the origin's manifest so a refreshed tab can re-arm with no live
+/// source — the web twin of the native mirror's sidecar. Best-effort: a full
+/// quota or private-mode refusal costs resurrection, never the session.
+async fn persist_manifest(secret: &[u8; SECRET_LEN], store: &IdbStore, bytes: &[u8]) {
+    let file = FileId {
+        key: MANIFEST_STORE_KEY.to_owned(),
+        size: bytes.len() as u64,
+        mtime: 0,
+    };
+    if let Err(error) = store.insert_complete(&file, bytes).await {
+        web_sys::console::debug_1(&JsValue::from_str(&format!(
+            "[share] persisting the manifest failed: {error}"
+        )));
+        return;
+    }
+    let locator = serde_json::json!({
+        "size": bytes.len(),
+        "tree": agent_share_proto::manifest::manifest_fingerprint(bytes),
+    });
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(&manifest_locator_key(secret), &locator.to_string());
+    }
+}
+
+/// The persisted manifest, verified against its recorded fingerprint, plus
+/// the store it came from. `None` for a tab that never seeded here, a
+/// cleared storage, or a record that fails its own integrity check — all of
+/// which re-arm nothing and fall back to waiting for a live peer.
+async fn load_persisted_manifest(
+    secret: &[u8; SECRET_LEN],
+) -> Option<(Vec<u8>, MountManifest, Rc<IdbStore>)> {
+    let storage = local_storage()?;
+    let raw = storage.get_item(&manifest_locator_key(secret)).ok()??;
+    let locator: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let size = locator.get("size")?.as_u64()?;
+    let tree = locator.get("tree")?.as_str()?;
+    // Adopt-only: `IdbStore::open` creates on demand, but a tab reaching this
+    // path has a locator, which only a sync in this origin could have written
+    // — so the database exists.
+    let store = Rc::new(IdbStore::open(&store_name_for(secret)).await.ok()?);
+    let file = FileId {
+        key: MANIFEST_STORE_KEY.to_owned(),
+        size,
+        mtime: 0,
+    };
+    let len = u32::try_from(size).ok()?;
+    let bytes = seed::read_window(&store, &file, 0, len).await.ok()?;
+    if agent_share_proto::manifest::manifest_fingerprint(&bytes) != tree {
+        return None;
+    }
+    let manifest = MountManifest::decode(&bytes).ok()?;
+    Some((bytes, manifest, store))
+}
+
+/// Manifest indices the store holds **in full** — what this tab can seed.
+async fn held_in_store(store: &IdbStore, manifest: &MountManifest) -> BTreeSet<u32> {
+    let mut held = BTreeSet::new();
+    for (index, entry) in manifest.files.iter().enumerate() {
+        if entry.is_tombstone() {
+            continue;
+        }
+        if is_held(store, &file_id(entry)).await
+            && let Ok(index) = u32::try_from(index)
+        {
+            held.insert(index);
+        }
+    }
+    held
+}
+
+/// A share-mesh membership waiting for peers, alive across connect attempts.
+type WaitingMesh = (Rc<mesh::MeshPeer>, seed::SeederShared);
+
+thread_local! {
+    /// Memberships owned by no client yet, keyed by the share's mesh key.
+    ///
+    /// The whole point of a dead-origin share is *waiting*: fofoca's own
+    /// healing — a lone joiner's beacon claim, island merges, rendezvous
+    /// failover — runs on cadences up to minutes, and a membership dropped
+    /// after one bounded attempt loses every race and mints a ghost identity
+    /// per retry. So the first attempt joins, and every later attempt reuses
+    /// the same live membership: same identity, warm roster, and a tab that
+    /// waits for new peers exactly the way a native `agent-share` process
+    /// does. A successful connect moves the entry onto the client; an entry
+    /// for a share the user navigated away from lives until the page closes,
+    /// which is the meaning of "as long as the app is open, keep trying".
+    static WAITING_MESHES: RefCell<HashMap<String, WaitingMesh>> =
+        RefCell::new(HashMap::new());
+}
 
 /// How long the origin dial may run before the seeder fallback takes over.
 ///
@@ -1559,28 +1686,74 @@ async fn connect_via_seeder(
 ) -> Result<ShareClient, JsValue> {
     let secret = ticket.secret;
     let lookups = ticket.lookups.clone();
+    let mesh_key = share_mesh_key(&secret);
 
-    // Minted before any client exists so the mesh join can register the mount
-    // handler now; it replaces the client's fresh one below, keeping serving
-    // and advertising on the same handle.
-    let seeder = seed::SeederShared::new();
-    let protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> = vec![(
-        MOUNT_ALPN.to_vec(),
-        Box::new(produce::MountHandler::new(seeder.clone(), secret)),
-    )];
-    let card_parts = match card.as_ref() {
-        Some(value) => mesh::parse_card_parts(value, "relay", Some("consumer".to_owned()))?,
-        None => mesh::default_card_parts("relay", Some("consumer".to_owned())),
+    // One membership per share, alive across attempts — see [`WAITING_MESHES`].
+    let waiting = WAITING_MESHES.with(|meshes| meshes.borrow().get(&mesh_key).cloned());
+    let (mesh_peer, seeder) = match waiting {
+        Some(entry) => entry,
+        None => {
+            // Minted before any client exists so the mesh join can register
+            // the mount handler now; it lands on the client below, keeping
+            // serving and advertising on the same handle.
+            let seeder = seed::SeederShared::new();
+            let protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> =
+                vec![(
+                    MOUNT_ALPN.to_vec(),
+                    Box::new(produce::MountHandler::new(seeder.clone(), secret)),
+                )];
+            let card_parts = match card.as_ref() {
+                Some(value) => {
+                    mesh::parse_card_parts(value, "relay", Some("consumer".to_owned()))?
+                }
+                None => mesh::default_card_parts("relay", Some("consumer".to_owned())),
+            };
+            let peer =
+                mesh::MeshPeer::join_share(&secret, &lookups, None, protocols, card_parts)
+                    .await
+                    .map_err(|mesh_error| {
+                        JsValue::from_str(&format!(
+                            "the origin is unreachable ({}) and the share's mesh could not be \
+                             joined ({})",
+                            describe(origin_error),
+                            describe(&mesh_error),
+                        ))
+                    })?;
+            let entry = (Rc::new(peer), seeder);
+            WAITING_MESHES.with(|meshes| {
+                meshes
+                    .borrow_mut()
+                    .insert(mesh_key.clone(), entry.clone())
+            });
+            entry
+        }
     };
-    let mesh_peer = mesh::MeshPeer::join_share(&secret, &lookups, None, protocols, card_parts)
-        .await
-        .map_err(|mesh_error| {
-            JsValue::from_str(&format!(
-                "the origin is unreachable ({}) and the share's mesh could not be joined ({})",
-                describe(origin_error),
-                describe(&mesh_error),
-            ))
-        })?;
+
+    // A tab that seeded here before re-arms from its own storage *before*
+    // asking anyone: the manifest sidecar plus the blob store are enough to
+    // serve and to vouch. This is what breaks the everyone-refreshed
+    // deadlock — two re-armed tabs are each other's source, and a share can
+    // stand back up with no live source anywhere. Skipped once the seeder
+    // already carries a tree (a reused membership re-armed on an earlier
+    // attempt, or fed by a previous session's sync).
+    {
+        use produce::ServeSource as _;
+        if seeder.manifest_bytes().is_none()
+            && let Some((bytes, manifest, store)) = load_persisted_manifest(&secret).await
+        {
+            let held = held_in_store(&store, &manifest).await;
+            if !held.is_empty() {
+                let fingerprint = agent_share_proto::manifest::manifest_fingerprint(&bytes);
+                let serving = agent_share_proto::serving::encode_serving(
+                    &held.iter().copied().collect::<Vec<u32>>(),
+                    manifest.files.len(),
+                );
+                seeder.update(Rc::new(bytes), &manifest, store, &held);
+                mesh_peer.set_tree(fingerprint).await;
+                mesh_peer.set_serving(serving).await;
+            }
+        }
+    }
 
     // Cards arrive over gossip; poll until somebody vouches or the deadline.
     let started = now_ms();
@@ -1684,8 +1857,11 @@ async fn connect_via_seeder(
                     describe(origin_error),
                     &candidate.endpoint[..8.min(candidate.endpoint.len())],
                 ));
-                client.seeder = seeder;
-                *client.mesh.borrow_mut() = Some(Rc::new(mesh_peer));
+                client.seeder = seeder.clone();
+                // The waiting membership graduates onto the client; it is no
+                // longer ownerless, so the registry lets go of it.
+                WAITING_MESHES.with(|meshes| meshes.borrow_mut().remove(&mesh_key));
+                *client.mesh.borrow_mut() = Some(Rc::clone(&mesh_peer));
                 return Ok(client);
             }
             Ok(_) => {

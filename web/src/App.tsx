@@ -21,7 +21,7 @@ import type { Child, Ctx } from 'visage-dom'
 import { ColumnView } from './ColumnView.tsx'
 import { seedState } from './seeding.ts'
 import { TechInfo } from './TechInfo.tsx'
-import { ReconnectingStatus, TransferStatus } from './TransferStatus.tsx'
+import { TransferStatus } from './TransferStatus.tsx'
 import type { LinkSample, TransferSnapshot } from './transferStats.ts'
 import {
   pickSaveTarget,
@@ -670,6 +670,9 @@ const Session = component<{
       link: current.client.sample_link(),
       gossip: current.client.peers_gossip,
       direct: current.client.peers_direct,
+      // A live mount on the relay (or IP) is a connected peer the direct
+      // count cannot see — the WebRTC-path mount is already inside it.
+      relayPeer: !current.client.closed && current.client.transport !== 'webrtc',
     }
     tick.value = tick.peek() + 1
   })
@@ -798,11 +801,40 @@ const Session = component<{
     })
   }
 
+  /**
+   * Errors no amount of retrying can fix: the ticket itself is unusable.
+   * Everything else — dead origin, empty mesh, relay hiccup — is a share
+   * waiting for a peer, and an open tab waits with it.
+   */
+  function permanentConnectError(error: unknown): boolean {
+    const text = String(error)
+    return (
+      text.includes('decode ticket') ||
+      text.includes('ticket has no relay') ||
+      text.includes('unknown transport')
+    )
+  }
+
   void (async () => {
-    try {
-      await bringUp(pending)
-    } catch (error) {
-      if (!ctx.aborted.aborted) state.value = { phase: 'failed', reason: String(error) }
+    // Literal backoff bounds: the shared constants are declared later in this
+    // body, and this loop starts synchronously — before they initialize.
+    let backoff = 1_000
+    while (!ctx.aborted.aborted) {
+      try {
+        await bringUp(pending)
+        return
+      } catch (error) {
+        if (ctx.aborted.aborted) return
+        if (permanentConnectError(error)) {
+          state.value = { phase: 'failed', reason: String(error) }
+          return
+        }
+        console.debug('[agent-share] connect failed; retrying', error)
+        await new Promise((resolve) => setTimeout(resolve, backoff))
+        backoff = Math.min(backoff * 2, 30_000)
+        release(props.ticket, props.transport, pending)
+        pending = connect(props.ticket, props.transport)
+      }
     }
   })()
 
@@ -819,14 +851,17 @@ const Session = component<{
    * this exists to remove.
    *
    * Started the moment the death is noticed — by the poll below, by the tab
-   * coming back to the foreground, or by an action that needs the peer. The
-   * user therefore never sees a *disconnected* page, only a reconnecting one:
-   * there is no state in which the app knows it is dead and waits to be asked.
+   * coming back to the foreground, or by an action that needs the peer.
    *
-   * Retries rather than failing on the first miss. A single attempt was fine
-   * while revival only ran on a click, but running automatically it would let
-   * one transient miss tear down a session that looks perfectly healthy — and
-   * `FailedBody` offers no way back, so the only exit is a page reload.
+   * **Forever, on purpose.** There is no give-up deadline: an open tab keeps
+   * trying for as long as it lives, exactly like a native `agent-share`
+   * process waiting for peers. The mesh's own healing after its beacon dies
+   * (the producer is always the beacon) runs on cadences measured in
+   * minutes, so any budget short of that concluded "the share is gone" about
+   * a share that was seconds from coming back — measured: a 90 s budget
+   * expired mid-ladder and the very attempt it aborted then landed. The
+   * manifest stays on screen and navigable the whole time; only the two
+   * actions that reach the peer wait.
    */
   function ensureLive(): Promise<void> {
     if (ctx.aborted.aborted) return Promise.resolve()
@@ -839,9 +874,7 @@ const Session = component<{
       // good, so the browser stays on screen and navigable while this runs.
       // Only `reviving` flips, and only the actions that need the peer read it.
       reviving.value = true
-      const deadline = Date.now() + RECONNECT_TIMEOUT_MS
       let backoff = RECONNECT_BACKOFF_START_MS
-      let lastError: unknown = null
       // The dying client, kept ALIVE until its replacement is up. Its mount
       // connection is gone but its serving half is not: the mesh membership,
       // the published card, and the store-backed mount handler all still
@@ -851,49 +884,33 @@ const Session = component<{
       // bootstrap from the *other* tab's retiring client, or even its own
       // (a different endpoint id that happens to hold the bytes).
       //
-      // Retired only on a successful swap. On terminal failure it stays: the
-      // page shows failed, but the bytes this tab holds keep serving — for
-      // the swarm that is strictly better than a card with nothing behind it.
+      // Retired only on a successful swap: while attempts run — however long
+      // that takes — the bytes this tab holds keep serving, which is what
+      // lets its peers (and eventually its own replacement) find the share.
       const retiring = pending
       let evicted = false
       try {
         while (!ctx.aborted.aborted) {
-          const remaining = deadline - Date.now()
-          if (remaining <= 0) break
           try {
             if (!evicted) {
               evicted = evict(props.ticket, props.transport, retiring)
             }
             release(props.ticket, props.transport, pending)
-            // The tight cap: this attempt already knows the origin just died,
-            // and the whole ladder — capped dial, mesh join, card wait,
-            // seeder dial — must fit inside the reconnect budget, twice.
+            // Each attempt is self-terminating (the wasm side caps the origin
+            // dial and bounds its card wait), so no outer race is needed —
+            // control always comes back here to try again.
             pending = connect(props.ticket, props.transport, REVIVAL_ORIGIN_CAP_MS)
-            // Raced against what is left of the budget, not just checked
-            // between attempts: a dial to a producer that is simply gone runs
-            // for far longer than the gap it was started in, so gating only
-            // the *start* of an attempt let the whole thing overrun to twice
-            // the deadline — measured at 126 s against a 60 s budget.
-            await Promise.race([
-              bringUp(pending),
-              new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('reconnect timed out')), remaining),
-              ),
-            ])
+            await bringUp(pending)
             // The swap point: the replacement is up (and re-seeding via
             // `refresh_held`), so the old client may finally say goodbye.
             retire(retiring)
             return
           } catch (error) {
-            lastError = error
             if (ctx.aborted.aborted) return
-            if (Date.now() + backoff >= deadline) break
+            console.debug('[agent-share] reconnect attempt failed; retrying', error)
             await new Promise((resolve) => setTimeout(resolve, backoff))
             backoff = Math.min(backoff * 2, RECONNECT_BACKOFF_MAX_MS)
           }
-        }
-        if (!ctx.aborted.aborted) {
-          state.value = { phase: 'failed', reason: String(lastError) }
         }
       } finally {
         reviving.value = false
@@ -903,21 +920,17 @@ const Session = component<{
     return revivalInFlight
   }
 
-  /**
-   * Give up reconnecting and show the failure page.
-   *
-   * Sized to fit one full dead-origin ladder — capped origin dial (8 s), a
-   * mesh join, the card wait (up to 30 s on a ghost-heavy roster), and the
-   * seeder dial — with slack for the QUIC death to be noticed at all. The
-   * old 60 s budget expired mid-ladder, flashed the failure page, and then
-   * got rescued by the attempt landing late; 90 s matches the native
-   * consumer's `DISCOVERY_DEADLINE`, which faces the same ladder.
-   */
-  const RECONNECT_TIMEOUT_MS = 90_000
   /** Origin-dial slice of a revival attempt — see `connect`'s cap note. */
   const REVIVAL_ORIGIN_CAP_MS = 8_000
   const RECONNECT_BACKOFF_START_MS = 1_000
-  const RECONNECT_BACKOFF_MAX_MS = 8_000
+  /**
+   * Steady-state retry ceiling. Attempts run forever, and each one costs a
+   * mesh identity on the wasm side only until the waiting membership is
+   * established — after that, retries reuse it. 30 s keeps an hour of dead
+   * origin at ~120 polite attempts while still landing within one backoff of
+   * the mesh healing itself.
+   */
+  const RECONNECT_BACKOFF_MAX_MS = 30_000
 
   /**
    * Notice a connection that died while nothing was using it.
@@ -1155,25 +1168,11 @@ const Session = component<{
         : mounted
           ? 'mounted'
           : 'ready'
-    /*
-      Only while a transfer runs, because that is the one case the centre slot
-      cannot speak: it is `null` there so the `ProgressBar` keeps the row, and
-      the actions have collapsed to Cancel, so nothing else on screen would say
-      a word. (`status` is no help — it renders only in the Info pane.) Off the
-      transfer path the centre carries a spinner saying exactly this, and having
-      the crumb repeat it puts "reconnecting" twice in one row.
-
-      It outranks the transfer label rather than sitting beside it: the transfer
-      is what is *waiting*, and naming it here would say "downloading" while
-      nothing is moving.
-    */
-    const crumb = showingInfo
-      ? 'info'
-      : active
-        ? redialling
-          ? 'reconnecting'
-          : transferLabel(active.kind)
-        : 'files'
+    // Never "reconnecting": redialing is the app's permanent background
+    // posture — it is always willing to reach more peers — so naming it in
+    // the chrome would label the normal state of the world. A transfer whose
+    // peer is being re-dialed simply shows its own label until bytes resume.
+    const crumb = showingInfo ? 'info' : active ? transferLabel(active.kind) : 'files'
     const infoButton = (
       <Button variant="ghost" onclick={openInfo}>
         Info
@@ -1296,11 +1295,13 @@ const Session = component<{
             died, so leaving them up draws a page that looks perfectly healthy
             and cannot move a byte.
           */
-          active ? null : redialling ? (
-            <ReconnectingStatus />
-          ) : (
-            <TransferStatus sample={sample} />
-          )
+          /*
+            Always up while the browser is: the numbers are wire truth, and
+            000 KB/s against a dead peer is exactly what is happening. The
+            old blank-while-redialling treatment made the whole bar vanish,
+            which read as a broken page — worse than an honest zero.
+          */
+          active ? null : <TransferStatus sample={sample} />
         }
         trailing={trailing}
         belowBar={belowBar}
