@@ -6,12 +6,16 @@
 import './compat.ts'
 
 import { buildPeerCard } from './peerCard/index.ts'
+import { startProducer as startShareProducer, type ShareProducer } from './produce.ts'
 import { parseShareInput } from './ticket/index.ts'
 import { loadWasm, type WasmModule } from './wasm.ts'
 
 type BenchProducer = Awaited<ReturnType<WasmModule['BenchProducer']['start']>>
 
 let producer: BenchProducer | null = null
+
+/** The file share this tab is serving, and the OPFS directory behind it. */
+let share: { producer: ShareProducer; root: string } | null = null
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id)
@@ -85,6 +89,138 @@ async function stopProducer(
   stopBtn.disabled = true
   copyBtn.disabled = true
   await current.stop()
+  log('stopped')
+}
+
+/**
+ * A folder full of files, with no user gesture.
+ *
+ * `showDirectoryPicker()` is the app's way in and it requires a gesture, which
+ * is why browser-side producing had no automated coverage at all. The origin
+ * private file system is the same File System Access API without the picker:
+ * `navigator.storage.getDirectory()` hands back a real
+ * `FileSystemDirectoryHandle`, and `getFileHandle(…, {create: true})` real
+ * `FileSystemFileHandle`s — which matters, because the wasm checks the type
+ * (`parse_listing` does a `dyn_into::<FileSystemFileHandle>()`), so an object
+ * that merely has `getFile()` is refused.
+ *
+ * The tree deliberately includes a nested directory and a zero-byte file. Both
+ * are shapes the manifest treats specially — a directory entry that has to
+ * survive with nothing under it, and a file whose slot exists with no bytes to
+ * read — and neither appears anywhere in `BenchProducer`'s synthetic stream.
+ *
+ * @returns the directory handle and the name it lives under, so `stop` can
+ * remove it.
+ */
+async function opfsShareRoot(
+  count: number,
+  log: (...parts: unknown[]) => void,
+): Promise<{
+  handle: FileSystemDirectoryHandle
+  name: string
+}> {
+  const storage = navigator.storage
+  if (typeof storage?.getDirectory !== 'function') {
+    throw new Error('this browser has no origin private file system')
+  }
+  // Logged step by step: every one of these can hang or be denied depending on
+  // the profile and the storage policy the browser was launched with, and a
+  // silent stall here is indistinguishable from a slow producer.
+  log('opening the origin private file system…')
+  const opfs = await storage.getDirectory()
+  log('opfs root acquired')
+  // Unique per run, and removed on stop. OPFS is per-origin and outlives a
+  // reload, so a fixed name would accumulate files across runs and quietly
+  // change what a later run serves.
+  const name = `lab-share-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const handle = await opfs.getDirectoryHandle(name, { create: true })
+  log(`directory ${name} created`)
+
+  await writeFile(handle, 'blob.bin', 'x'.repeat(64 * 1024))
+  log('blob.bin written')
+  await writeFile(handle, 'empty.txt', '')
+  const nested = await handle.getDirectoryHandle('nested', { create: true })
+  await writeFile(nested, 'deep.txt', 'nested file\n')
+  for (let index = 0; index < count; index += 1) {
+    await writeFile(handle, `f${String(index).padStart(3, '0')}.txt`, `file ${index}\n`)
+  }
+  return { handle, name }
+}
+
+/** Write `text` to `name` under `dir`, creating it. */
+async function writeFile(
+  dir: FileSystemDirectoryHandle,
+  name: string,
+  text: string,
+): Promise<void> {
+  const file = await dir.getFileHandle(name, { create: true })
+  if (typeof file.createWritable !== 'function') {
+    throw new Error('this browser cannot write to the origin private file system')
+  }
+  const writable = await file.createWritable()
+  await writable.write(text)
+  await writable.close()
+}
+
+/**
+ * Serve a real file share from OPFS.
+ *
+ * Everything after the root comes from the app: `startProducer` scans the
+ * directory and drives the wasm `ShareProducer` exactly as **Add files/folder**
+ * does. Only the origin of the handle differs, which is the point — a test that
+ * built its own producer would prove nothing about the one users get.
+ */
+async function startShare(
+  count: number,
+  password: string,
+  log: (...parts: unknown[]) => void,
+  ticketBox: HTMLTextAreaElement,
+  stopBtn: HTMLButtonElement,
+  copyBtn: HTMLButtonElement,
+): Promise<void> {
+  if (share) {
+    log('already sharing — stop first')
+    return
+  }
+  log(`seeding ${count} files into the origin private file system…`)
+  const { handle, name } = await opfsShareRoot(count, log)
+  log('seeded')
+  log(`ShareProducer.start(${password ? 'with password' : 'no password'})…`)
+  const started = await startShareProducer(handle, password || undefined)
+  share = { producer: started, root: name }
+  ticketBox.value = started.ticket
+  stopBtn.disabled = false
+  copyBtn.disabled = false
+  log(
+    `file share ready — ${started.files} files, ${started.bytes} bytes`,
+    started.passwordProtected ? '(password required)' : '',
+  )
+}
+
+/** Stop the file share and remove the OPFS directory behind it. */
+async function stopShare(
+  log: (...parts: unknown[]) => void,
+  stopBtn: HTMLButtonElement,
+  copyBtn: HTMLButtonElement,
+): Promise<void> {
+  if (!share) {
+    log('not sharing')
+    return
+  }
+  log('stopping…')
+  const current = share
+  share = null
+  stopBtn.disabled = true
+  copyBtn.disabled = true
+  await current.producer.stop()
+  // Best effort: a directory left behind costs disk, not correctness, and
+  // failing the stop over it would be the worse trade.
+  try {
+    const opfs = await navigator.storage.getDirectory()
+    await opfs.removeEntry(current.root, { recursive: true })
+  } catch (error) {
+    log('could not remove the OPFS directory', jsError(error))
+  }
   log('stopped')
 }
 
@@ -219,6 +355,37 @@ function main() {
   const txCopy = el<HTMLButtonElement>('tx-copy')
   const txTransport = el<HTMLSelectElement>('tx-transport')
   const rxRun = el<HTMLButtonElement>('rx-run')
+  const shareLog = logger(el('share-log'))
+  const shareTicket = el<HTMLTextAreaElement>('share-ticket')
+  const shareFiles = el<HTMLInputElement>('share-files')
+  const sharePassword = el<HTMLInputElement>('share-password')
+  const shareStart = el<HTMLButtonElement>('share-start')
+  const shareStop = el<HTMLButtonElement>('share-stop')
+  const shareCopy = el<HTMLButtonElement>('share-copy')
+
+  shareStart.onclick = () => {
+    const count = Number.parseInt(shareFiles.value, 10) || 1
+    void startShare(
+      count,
+      sharePassword.value,
+      shareLog,
+      shareTicket,
+      shareStop,
+      shareCopy,
+    ).catch((error) => {
+      shareLog('FAILED', jsError(error))
+    })
+  }
+  shareStop.onclick = () => {
+    void stopShare(shareLog, shareStop, shareCopy).catch((error) => {
+      shareLog('FAILED', jsError(error))
+    })
+  }
+  shareCopy.onclick = async () => {
+    if (!shareTicket.value) return
+    await navigator.clipboard.writeText(shareTicket.value)
+    shareLog('ticket copied')
+  }
 
   txStart.onclick = () => {
     void startProducer(txTransport.value, txLog, txTicket, txStop, txCopy).catch(

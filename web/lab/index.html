@@ -118,6 +118,32 @@
         <pre id="tx-log"></pre>
       </section>
       <section>
+        <h2>File share</h2>
+        <p class="hint">
+          A real <code>ShareProducer</code> over real files — the same path
+          <b>Add files/folder</b> takes in the app, but the folder comes from the
+          <a href="https://developer.mozilla.org/docs/Web/API/File_System_API/Origin_private_file_system">origin private file system</a>
+          instead of the directory picker. OPFS hands back genuine
+          <code>FileSystemFileHandle</code>s with no user gesture, which is what
+          makes this drivable headlessly.
+        </p>
+        <div class="row">
+          <label>
+            files
+            <input id="share-files" type="number" min="1" max="200" value="3" />
+          </label>
+          <label>
+            password
+            <input id="share-password" type="password" placeholder="(none)" />
+          </label>
+          <button type="button" id="share-start">Start file share</button>
+          <button type="button" id="share-stop" disabled>Stop</button>
+          <button type="button" id="share-copy" disabled>Copy ticket</button>
+        </div>
+        <textarea id="share-ticket" readonly placeholder="ticket appears here"></textarea>
+        <pre id="share-log"></pre>
+      </section>
+      <section>
         <h2>Bench consumer</h2>
         <p class="hint">Paste a ticket and run (30s after connect).</p>
         <textarea id="rx-ticket" placeholder="ticket or http://localhost:3000/#&lt;ticket&gt;"></textarea>
