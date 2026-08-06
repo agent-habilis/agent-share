@@ -40,7 +40,7 @@ workspace = true
 # `iroh-base` alone — no QUIC, no TLS, no DNS, no tokio — so this crate stays
 # wasm-clean, which CI checks with
 # `cargo check --target wasm32-unknown-unknown -p agent-share-proto`.
-fofoca-protocol = { path = "../../../../fofoca-network/fofoca/crates/fofoca-protocol", default-features = false }
+fofoca-protocol = { workspace = true }
 anyhow = "1"
 sha2 = "0.10"
 bs58 = "0.5"

@@ -31,6 +31,18 @@ rust-version = "1.93"
 # `fofoca-network/fofoca` and brings its own, so entries here that nothing
 # names any more can be pruned.
 [workspace.dependencies]
+# The gossip engine and its sibling crates, pinned by **rev** so this workspace
+# and agent-gossip provably build against the same fofoca. Declared here, not in
+# the member manifests, so the rev is stated once -- four crates x two members
+# restating it is the drift this pin exists to prevent.
+#
+# The cost is deliberate: an engine change is now push-then-bump here, where a
+# path dep to a sibling checkout needed no round trip. Keep this rev in step
+# with agent-gossip's.
+fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "e63a481f1626d02f2b39c681f019cf4cd4b05ba5" }
+fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", rev = "e63a481f1626d02f2b39c681f019cf4cd4b05ba5", default-features = false }
+fofoca-blobs = { git = "https://github.com/fofoca-network/fofoca", rev = "e63a481f1626d02f2b39c681f019cf4cd4b05ba5" }
+fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "e63a481f1626d02f2b39c681f019cf4cd4b05ba5" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

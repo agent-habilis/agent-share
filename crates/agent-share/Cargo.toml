@@ -45,15 +45,15 @@ agent-share-proto = { path = "../agent-share-proto" }
 # It lives in the `fofoca-network/fofoca` workspace, not here, because the
 # network layer's other consumers want it too. A sibling-checkout path dep is
 # the interim: swap it for a rev-pinned git dependency once the move is pushed.
-fofoca-blobs = { path = "../../../../fofoca-network/fofoca/crates/fofoca-blobs" }
+fofoca-blobs = { workspace = true }
 # The gossip engine. A share joins a mesh derived from its own ticket secret, so
 # everyone holding the link becomes a peer of everyone else rather than only of
 # the producer. Note this pulls the vendored mesh into `default-members`, which
 # the root manifest previously avoided — it is a real build-time cost.
-fofoca = { path = "../../../../fofoca-network/fofoca/crates/fofoca" }
+fofoca = { workspace = true }
 # The WebRTC lane. `native` here — the browser client takes the same crate with
 # `web` instead.
-fofoca-iroh-webrtc-transport = { path = "../../../../fofoca-network/fofoca/crates/fofoca-iroh-webrtc-transport", features = ["native"] }
+fofoca-iroh-webrtc-transport = { workspace = true, features = ["native"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 clap = { version = "4", features = ["derive"] }
 anstyle = "1"
@@ -92,6 +92,4 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # of its own, so `fofoca/iroh-test-utils` is how an optional iroh feature is
 # turned on without putting a second iroh in the graph. A dev-dependency, so
 # resolver 3 keeps the feature out of a plain build.
-fofoca = { path = "../../../../fofoca-network/fofoca/crates/fofoca", features = [
-    "iroh-test-utils",
-] }
+fofoca = { workspace = true, features = ["iroh-test-utils"] }
