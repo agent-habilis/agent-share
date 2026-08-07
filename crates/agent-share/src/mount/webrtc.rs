@@ -30,7 +30,7 @@
 //! `WebRTC` exists because a browser has no UDP socket and cannot speak QUIC
 //! directly. That is the whole of its justification, and it does not reach two
 //! native peers. Measured on identical request shape, with the transport as the
-//! only variable (`docs/perf/`):
+//! only variable:
 //!
 //! | | plain QUIC | over `WebRTC` |
 //! |---|---:|---:|

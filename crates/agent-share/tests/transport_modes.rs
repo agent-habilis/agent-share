@@ -280,7 +280,7 @@ async fn webrtc_mode_mounts_over_data_channel_only() {
 /// So this sets up the adversarial case: a live, attached `WebRTC` session
 /// *and* a reachable IP path, then dials the ordinary ticket address. The
 /// selected path must be IP. Measured, the alternative is 6× less throughput at
-/// 36× the latency (`docs/perf/`), so a regression here is expensive and
+/// 36× the latency, so a regression here is expensive and
 /// completely silent — every byte still arrives.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_to_native_selects_ip_even_with_a_live_webrtc_session() {

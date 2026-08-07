@@ -110,7 +110,7 @@ WebRTC exists because a browser has no UDP socket and cannot speak QUIC
 directly. That is the whole of its justification, so it never carries bytes
 between two native peers: measured with the transport as the only variable, the
 data channel gives **6× less throughput at 36× the latency** and an order of
-magnitude more run-to-run variance than plain QUIC (`docs/perf/`).
+magnitude more run-to-run variance than plain QUIC.
 
 The two ends behave differently when the preferred path fails, and both are
 deliberate. A **browser** falls back to the iroh relay when ICE fails, so it
