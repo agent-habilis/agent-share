@@ -1844,14 +1844,43 @@ async fn probe_read(
                 ));
             }
         };
-    if got == 0 {
-        return Err(JsValue::from_str("probe read answered empty"));
+    // The full request or nothing: callers size `len` to what the file can
+    // serve (`probe_target`), so a shorter answer proves less than asked —
+    // under the old any-bytes rule a 1 KiB file "passed" a 256 KiB probe.
+    if got < len {
+        return Err(JsValue::from_str(&format!(
+            "probe read answered {got} of {len} bytes: too short to prove bulk"
+        )));
     }
     let mut source = StreamChunks {
         recv,
         buf: vec![0u8; PROBE_CHUNK_LEN],
     };
     drain_with_stall_deadline(&mut source, got as usize, || wait_ms(PROBE_STALL_MS)).await
+}
+
+/// Which file the bulk probe reads, and how much: the **largest** live file,
+/// asking for everything it can serve up to one `MAX_READ_LEN` window.
+///
+/// Largest, not first. The seeder clamps a read to the file's size, so a
+/// small file ahead of the payload would shrink the probe to nothing — a
+/// share fronted by a 1 KiB README once green-lit the channel with a 1 KiB
+/// read and then froze on the first real 256 KiB frame, exactly the stall
+/// the probe exists to catch. The largest file is what the transfer will
+/// actually do to the channel; if even that is small, the share's real reads
+/// are small too and the probe stays honest. `None` when every entry is a
+/// tombstone or empty — nothing bulk will ever be read.
+fn probe_target(files: &[agent_share_proto::manifest::FileEntry]) -> Option<(u32, u32)> {
+    files
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.is_tombstone() && entry.size > 0)
+        .max_by_key(|(_, entry)| entry.size)
+        .map(|(index, entry)| {
+            let want =
+                u32::try_from(entry.size.min(u64::from(MAX_READ_LEN))).unwrap_or(MAX_READ_LEN);
+            (u32::try_from(index).unwrap_or(0), want)
+        })
 }
 
 /// The probe's chunk supply — a seam so the rolling-deadline drain can run
@@ -2389,16 +2418,23 @@ async fn connect_via_seeder(
                 // A webrtc mount that stalls is closed and redialled over
                 // the relay — bytes beat purity — and that replacement is
                 // trusted the same way any relay connection is.
-                if via_data_channel
-                    && let Some(index) = manifest
-                        .files
-                        .iter()
-                        .position(|entry| !entry.is_tombstone() && entry.size > 0)
-                {
-                    let index = u32::try_from(index).unwrap_or(0);
-                    if let Err(probe_error) =
-                        probe_read(&connection, &token, index, MAX_READ_LEN).await
-                    {
+                let target = if via_data_channel {
+                    let target = probe_target(&manifest.files);
+                    if target.is_none() {
+                        // Rare enough to say out loud: an unprobed channel
+                        // carrying a manifest with no readable bytes is fine
+                        // today, but silence here would read as "probed and
+                        // passed" in a log.
+                        web_sys::console::log_1(&JsValue::from_str(
+                            "[share] bulk probe skipped: the manifest holds no readable bytes",
+                        ));
+                    }
+                    target
+                } else {
+                    None
+                };
+                if let Some((index, want)) = target {
+                    if let Err(probe_error) = probe_read(&connection, &token, index, want).await {
                         web_sys::console::log_1(&JsValue::from_str(&format!(
                             "[share] seeder path failed the bulk probe ({}); trying the relay",
                             describe(&probe_error)
@@ -3397,5 +3433,42 @@ mod tests {
             outcome.is_err(),
             "a stream that ends early must not pass the probe"
         );
+    }
+
+    fn entry(rel_path: &str, size: u64) -> agent_share_proto::manifest::FileEntry {
+        agent_share_proto::manifest::FileEntry {
+            rel_path: rel_path.to_owned(),
+            size,
+            mode: 0o644,
+            mtime: 0,
+        }
+    }
+
+    /// A 1 KiB README ahead of a 1 MiB payload used to green-light the
+    /// channel: the seeder clamps a read to file size, the first live file
+    /// was 1 KiB, and any non-empty answer passed — so the "bulk" probe
+    /// moved 1 KiB and the first real 256 KiB frame froze. The probe must
+    /// pick the largest file and ask for the full window it can serve.
+    #[test]
+    fn probe_reads_the_largest_file_not_the_first() {
+        let files = [entry("README", 1024), entry("payload.bin", 1024 * 1024)];
+        assert_eq!(super::probe_target(&files), Some((1, 256 * 1024)));
+    }
+
+    /// When every file is small the request shrinks to match — and
+    /// `probe_read` then demands exactly that much back, so a short answer
+    /// can never masquerade as a pass.
+    #[test]
+    fn probe_request_clamps_to_the_largest_file() {
+        let files = [entry("", 0), entry("small", 4096)];
+        assert_eq!(super::probe_target(&files), Some((1, 4096)));
+    }
+
+    /// All tombstones or empty files: nothing to prove, and the caller says
+    /// so in the log instead of skipping silently.
+    #[test]
+    fn no_probe_target_on_a_manifest_with_no_bytes() {
+        let files = [entry("", 0), entry("emptied", 0)];
+        assert_eq!(super::probe_target(&files), None);
     }
 }
