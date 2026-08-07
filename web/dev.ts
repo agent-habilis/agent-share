@@ -36,6 +36,7 @@ import { fileURLToPath } from 'node:url'
 import index from './index.html'
 import lab from './lab/index.html'
 import {
+  syncGlue,
   tryWasmAsset,
   wasmResponse,
   withGzip,
@@ -89,7 +90,10 @@ async function writeCurrentPath(): Promise<WasmAsset | null> {
 // Before binding: `tasks/src/bench/browser.rs` reads the generated path back
 // out the moment this server reports a URL, and `src/wasm.ts` imports it.
 // Going through `writeCurrentPath` rather than a bare read leaves the cache
-// warm, so the first page load does not hash 7 MB a second time.
+// warm, so the first page load does not hash 7 MB a second time. The glue
+// mirror must be current before the first bundle for the same reason the
+// path must: `src/wasm.ts` imports both.
+await syncGlue()
 const initial = await writeCurrentPath()
 if (!initial) {
   // The same bail `wasmAsset()` makes, taken here because this is the one
@@ -137,17 +141,24 @@ const server = Bun.serve({
 // the file — a watch on the path itself follows the old inode into the bin.
 // Debounced because wasm-bindgen writes in stages, and hashing a half-written
 // file would publish a path for a build that never existed.
+//
+// The sibling glue files are watched too — the LinkError this heals: the
+// glue is bundled from the `src/wasm-glue/` mirror, and without a re-sync
+// here a rebuilt binary met glue cached at server start, failing to
+// instantiate on a binding only one side knew about.
 try {
   let pending: ReturnType<typeof setTimeout> | null = null
   watch(dirname(WASM_FILE), (_event, filename) => {
     // `null` filename (some platforms report only that *something* changed) is
-    // taken as a maybe and re-checked; the sibling `.js` glue is not.
-    if (filename && filename !== WASM_NAME) return
+    // taken as a maybe and re-checked.
+    if (filename && filename !== WASM_NAME && !filename.startsWith('agent_share_wasm_client.'))
+      return
     if (pending) clearTimeout(pending)
     pending = setTimeout(() => {
       pending = null
-      void writeCurrentPath().then((asset) => {
+      void Promise.all([writeCurrentPath(), syncGlue()]).then(([asset, glueMoved]) => {
         console.log(asset ? `  wasm ${asset.name}` : '  wasm missing')
+        if (glueMoved) console.log('  glue re-synced into src/wasm-glue/')
       })
     }, 150)
   }).unref()

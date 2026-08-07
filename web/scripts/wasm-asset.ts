@@ -159,6 +159,52 @@ export function wasmResponse(
   return new Response(body as unknown as BodyInit, { headers })
 }
 
+/** The glue files wasm-bindgen leaves beside the binary. The `.d.ts` rides
+ * along so the type-only import in `src/wasm.ts` resolves against the same
+ * mirror the runtime import uses. */
+const GLUE_SOURCES = ['agent_share_wasm_client.js', 'agent_share_wasm_client.d.ts'] as const
+
+/** Where the glue lands inside `src/` — generated, gitignored. */
+const GLUE_DIR = new URL('src/wasm-glue/', WEB_ROOT)
+
+/** The directory the glue is mirrored from. */
+const DIST_DIR = new URL(`${WASM_SOURCE}/../`, WEB_ROOT)
+
+/**
+ * Mirror the JS glue into `src/`, if it changed. Returns whether it wrote.
+ *
+ * The binary heals itself through the content-addressed URL, but the glue
+ * used to be imported straight out of `dist/` — which sits outside `web/`,
+ * where the dev bundler's watcher never looks. `cargo task web-wasm`
+ * mid-session therefore produced a page whose *wasm* was fresh and whose
+ * *glue* was whatever the bundler cached at server start; the mismatch
+ * surfaces as `LinkError: … function import requires a callable` naming a
+ * binding only one side knows about. Mirroring into `src/` puts the glue
+ * where the watcher already is, the same move `writeWasmPath` makes for the
+ * path. Content-guarded for the same reason: an unconditional write would
+ * rebundle on every start.
+ */
+export async function syncGlue(): Promise<boolean> {
+  let wrote = false
+  for (const name of GLUE_SOURCES) {
+    const source = Bun.file(new URL(name, DIST_DIR))
+    let text: string
+    try {
+      if (!(await source.exists())) continue
+      text = await source.text()
+    } catch {
+      // Mid-rebuild, like the binary: wasm-bindgen replaces these files in
+      // stages, and a half-written glue must not take the mirror down.
+      continue
+    }
+    const target = Bun.file(new URL(name, GLUE_DIR))
+    if ((await target.exists()) && (await target.text()) === text) continue
+    await Bun.write(new URL(name, GLUE_DIR), text)
+    wrote = true
+  }
+  return wrote
+}
+
 /**
  * Write the generated path module, if it changed.
  *

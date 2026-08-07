@@ -249,6 +249,17 @@ fn new_share_client(
     mesh_endpoint: Option<MeshEndpoint>,
     endpoint: Endpoint,
 ) -> ShareClient {
+    // A webrtc-carried mount gets a health watcher on its underlying
+    // RtcPeerConnection. Without one, a dead channel (Wi-Fi→cellular
+    // handoff, laptop wake) is only noticed when QUIC gives up on the idle
+    // connection — tens of seconds of a tab that looks connected and fails
+    // every read. The watcher closes the mount as soon as the channel is
+    // beyond saving, and the app's liveness poll takes it from there.
+    if data_path == "webrtc"
+        && let Some(hub) = hub.as_ref()
+    {
+        watch_channel_health(Arc::clone(hub), connection.clone());
+    }
     ShareClient {
         connection,
         token,
@@ -276,6 +287,97 @@ fn new_share_client(
         from_origin: true,
         pinned_tree: None,
     }
+}
+
+/// How long the channel-health watcher lets `disconnected` stand before
+/// declaring the channel dead.
+///
+/// `disconnected` is the one recoverable state — ICE flaps through it on a
+/// brief radio blip and often comes back on its own — so it gets a grace
+/// window. `failed` and `closed` are terminal (this stack has no
+/// renegotiation path: JSEP here is one envelope each way, so nothing can
+/// drive a `restartIce` to completion) and are acted on immediately.
+const CHANNEL_DISCONNECT_GRACE_MS: f64 = 10_000.0;
+
+/// What the channel-health watcher should do about one observation.
+#[derive(Debug, PartialEq, Eq)]
+enum ChannelVerdict {
+    /// The channel is fine (or recovered); clear any pending grace window.
+    Healthy,
+    /// Disconnected, but inside the grace window — keep watching.
+    Wait,
+    /// Beyond saving: close the mount so recovery starts now.
+    Kill(&'static str),
+}
+
+/// Pure judgment for one poll tick: the peer connection's state plus how
+/// long a disconnect has been standing. Split from the loop so the grace
+/// hysteresis is testable without an `RtcPeerConnection`.
+fn judge_channel(
+    state: web_sys::RtcPeerConnectionState,
+    disconnected_for_ms: Option<f64>,
+) -> ChannelVerdict {
+    use web_sys::RtcPeerConnectionState as State;
+    match state {
+        State::Failed => ChannelVerdict::Kill("the data channel's ICE failed"),
+        State::Closed => ChannelVerdict::Kill("the peer connection closed under the mount"),
+        State::Disconnected => match disconnected_for_ms {
+            Some(elapsed) if elapsed >= CHANNEL_DISCONNECT_GRACE_MS => {
+                ChannelVerdict::Kill("the data channel stayed disconnected past the grace window")
+            }
+            _ => ChannelVerdict::Wait,
+        },
+        _ => ChannelVerdict::Healthy,
+    }
+}
+
+/// Watch a webrtc-carried mount's peer connection and close the mount the
+/// moment the channel is beyond saving.
+///
+/// Nothing else observes ICE at all — the transport reads it once during
+/// setup and never again — so without this the only signal is QUIC's idle
+/// timeout, noticed by the app's 1 s `closed` poll long after the wire went
+/// dark. A poll rather than a `connectionstatechange` listener on purpose:
+/// a listener would race the transport for the handler slot (or leak a
+/// forgotten closure per reconnect), while reading a property once a second
+/// costs nothing and ends itself with the connection.
+fn watch_channel_health(hub: Arc<BrowserHubTransport>, connection: Connection) {
+    let remote = connection.remote_id();
+    wasm_bindgen_futures::spawn_local(async move {
+        let mut disconnected_since: Option<f64> = None;
+        loop {
+            wait_ms(1_000).await;
+            if connection.close_reason().is_some() {
+                return;
+            }
+            let Some(peer_connection) = hub.peer_connection(&remote) else {
+                // The transport dropped the session: the channel is gone and
+                // nothing will rebuild it in place.
+                connection.close(0u32.into(), b"data channel session detached");
+                return;
+            };
+            let state = peer_connection.connection_state();
+            let elapsed = disconnected_since.map(|since| now_ms() - since);
+            match judge_channel(state, elapsed) {
+                ChannelVerdict::Healthy => disconnected_since = None,
+                ChannelVerdict::Wait => {
+                    if disconnected_since.is_none() {
+                        disconnected_since = Some(now_ms());
+                        web_sys::console::log_1(&JsValue::from_str(
+                            "[share] data channel disconnected; giving ICE its grace window",
+                        ));
+                    }
+                }
+                ChannelVerdict::Kill(reason) => {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "[share] {reason}; closing the mount so recovery starts now"
+                    )));
+                    connection.close(0u32.into(), b"data channel died");
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// A manifest fetched ahead of the first request — see the field on
@@ -3500,7 +3602,10 @@ fn pinned_ladder() -> Vec<fofoca::iroh::RelayUrl> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeChunkSource, RaceOutcome, drain_with_stall_deadline, first_success};
+    use super::{
+        CHANNEL_DISCONNECT_GRACE_MS, ProbeChunkSource, RaceOutcome, drain_with_stall_deadline,
+        first_success,
+    };
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
 
@@ -3707,5 +3812,52 @@ mod tests {
         let outcome = first_success(attempts, Box::pin(sleep(2_000)), &mut refusals).await;
         assert!(matches!(outcome, RaceOutcome::AllFailed));
         assert_eq!(refusals.len(), 2);
+    }
+
+    /// The states nothing ever observed: `failed` is terminal and must kill
+    /// immediately — before this watcher existed, a failed channel sat
+    /// behind a connected-looking tab until QUIC's idle timeout gave up.
+    #[test]
+    fn failed_ice_kills_without_grace() {
+        use web_sys::RtcPeerConnectionState as State;
+        assert!(matches!(
+            super::judge_channel(State::Failed, None),
+            super::ChannelVerdict::Kill(_)
+        ));
+        assert!(matches!(
+            super::judge_channel(State::Closed, None),
+            super::ChannelVerdict::Kill(_)
+        ));
+    }
+
+    /// `disconnected` is the one recoverable state: inside the grace window
+    /// it only waits, past it the channel is declared dead.
+    #[test]
+    fn disconnected_gets_grace_then_dies() {
+        use super::{CHANNEL_DISCONNECT_GRACE_MS, ChannelVerdict, judge_channel};
+        use web_sys::RtcPeerConnectionState as State;
+        assert_eq!(
+            judge_channel(State::Disconnected, None),
+            ChannelVerdict::Wait
+        );
+        assert_eq!(
+            judge_channel(State::Disconnected, Some(CHANNEL_DISCONNECT_GRACE_MS / 2.0)),
+            ChannelVerdict::Wait
+        );
+        assert!(matches!(
+            judge_channel(State::Disconnected, Some(CHANNEL_DISCONNECT_GRACE_MS)),
+            ChannelVerdict::Kill(_)
+        ));
+    }
+
+    /// A recovery mid-grace clears the window: connected reports healthy no
+    /// matter how long the previous disconnect stood.
+    #[test]
+    fn recovery_resets_the_grace_window() {
+        use web_sys::RtcPeerConnectionState as State;
+        assert_eq!(
+            super::judge_channel(State::Connected, Some(CHANNEL_DISCONNECT_GRACE_MS * 2.0)),
+            super::ChannelVerdict::Healthy
+        );
     }
 }

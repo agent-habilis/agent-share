@@ -55,6 +55,12 @@ web-sys = { version = "0.3", features = [
     # The manifest locator: a refreshed tab re-arms its seeder from storage,
     # and localStorage is where the tiny (size, tree) record lives.
     "Storage",
+    # The channel-health watcher reads `connectionState` off the transport's
+    # RtcPeerConnection (`BrowserHubTransport::peer_connection`) to notice a
+    # dead data channel in seconds instead of waiting out the QUIC idle
+    # timeout.
+    "RtcPeerConnection",
+    "RtcPeerConnectionState",
 ] }
 # Both generations that reach wasm need their browser backend switched on.
 # 0.3+ additionally needs the `getrandom_backend` rustflag — see

@@ -8,9 +8,16 @@
  *
  * The path is content-addressed and generated — see `scripts/wasm-asset.ts`
  * for why a fixed name was not survivable.
+ *
+ * The glue is imported from `./wasm-glue/`, a generated mirror of the
+ * crate's `dist/web/`, not from `dist/` itself: the dev bundler only
+ * invalidates modules inside `web/`, so glue imported from outside it went
+ * stale across `cargo task web-wasm` and met the fresh binary as
+ * `LinkError: … function import requires a callable`. `wasm-asset.ts`'s
+ * `syncGlue` keeps the mirror current.
  */
 
-import type * as WasmExports from '../../crates/agent-share-wasm-client/dist/web/agent_share_wasm_client.js'
+import type * as WasmExports from './wasm-glue/agent_share_wasm_client.js'
 import { WASM_PATH } from './wasm-path.ts'
 
 export type WasmModule = typeof WasmExports
@@ -33,9 +40,7 @@ let wasmModule: Promise<WasmModule> | null = null
 
 export function loadWasm(): Promise<WasmModule> {
   if (!wasmModule) {
-    wasmModule = import(
-      '../../crates/agent-share-wasm-client/dist/web/agent_share_wasm_client.js'
-    ).then(async (module) => {
+    wasmModule = import('./wasm-glue/agent_share_wasm_client.js').then(async (module) => {
       await module.default({ module_or_path: WASM_PATH })
       return module
     })

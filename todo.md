@@ -114,6 +114,23 @@ membership holds and mint the ghost roster entries the overnight-CPU entry
 already tracks. The swap is the risky half: reads in flight hold the old
 `Connection`, so the exchange needs a seam where nothing is mid-stream.
 
+## ICE restart needs transport renegotiation (fofoca-side)
+
+The wasm client now watches a webrtc mount's `connectionState` through
+`BrowserHubTransport::peer_connection` and closes the mount on `failed` /
+`closed` at once, or after a 10 s grace on `disconnected` — recovery starts
+in seconds instead of waiting out QUIC's idle timeout behind a
+connected-looking tab. But the *cheap* recovery is still unreachable:
+`restartIce()` re-gathers candidates in about a second where the rebuild
+pays a full teardown, JSEP round and candidate race — and calling it is
+useless without a renegotiation lane, because the transport's JSEP is one
+envelope each way per session (`negotiate` builds a new session; nothing
+carries a second offer on an existing one). Fixing that is fofoca work in
+`fofoca-iroh-webrtc-transport`: accept a re-offer for an existing session
+(`iceRestart: true`), or expose a renegotiation hook the client can drive.
+While there, expose `connectionstatechange` as an event instead of the 1 s
+property poll the client runs today.
+
 ## Fixed since: producer-less browser swarms are true P2P
 
 The dead-origin fallback now builds the full WebRTC shape: the waiting
@@ -189,6 +206,19 @@ regardless of timer drift.
 ---
 
 ## Fixed since this file was written
+
+- **The dev server serving stale JS glue against a fresh wasm.** The reverse
+  twin of the stale-`.wasm` entry below: the binary healed itself through the
+  content-addressed URL, but the glue was bundled straight out of the crate's
+  `dist/web/` — outside `web/`, where bun's watcher never looks — so a
+  `cargo task web-wasm` mid-session paired new wasm with old glue and died at
+  `LinkError: … __wbg_connectionState… function import requires a callable`
+  (caught 2026-08-07 while validating the channel-health watcher; the error
+  names whichever binding only one side knows about, not the real problem).
+  The glue is now mirrored into `src/wasm-glue/` (generated, gitignored) by
+  `scripts/wasm-asset.ts:syncGlue`, `src/wasm.ts` imports the mirror, and
+  `dev.ts`'s rebuild watcher re-syncs it beside the wasm re-hash — a rebuild
+  heals the whole pair without a server restart.
 
 - **`cargo task ci` being red at HEAD**, in two independent places, both
   pre-existing rather than regressions. The clippy errors in
