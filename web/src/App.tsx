@@ -19,6 +19,7 @@ import {
 import { component, computed, interval, signal } from 'visage-dom'
 import type { Child } from 'visage-dom'
 
+import { jittered } from './backoff.ts'
 import { ColumnView } from './ColumnView.tsx'
 import { seedState } from './seeding.ts'
 import { TechInfo } from './TechInfo.tsx'
@@ -793,7 +794,14 @@ const Session = component<{
     const current = state.peek()
     if (current.phase !== 'ready') return
     // getStats, for the per-peer rows and the ICE addresses behind them.
-    void current.client.refresh_peer_ips()
+    // Per-peer round-trips on the main thread, competing with the bulk
+    // transfer — and the wasm side asks for a slower cadence. With the Info
+    // pane open it runs every tick (it is what the pane renders); closed,
+    // every fifth is enough to keep the cached addresses warm for the
+    // pane's first paint.
+    if (props.view === 'info' || tick.peek() % 5 === 0) {
+      void current.client.refresh_peer_ips()
+    }
     // QUIC, for the whole connection — the half that answers on the relay path,
     // where there is no candidate pair to ask.
     sample.value = {
@@ -990,7 +998,7 @@ const Session = component<{
           return
         }
         console.debug('[agent-share] connect failed; retrying', error)
-        await new Promise((resolve) => setTimeout(resolve, backoff))
+        await new Promise((resolve) => setTimeout(resolve, jittered(backoff)))
         backoff = Math.min(backoff * 2, 30_000)
         release(props.ticket, props.transport, pending)
         pending = connect(props.ticket, props.transport, undefined, password)
@@ -1079,7 +1087,7 @@ const Session = component<{
           } catch (error) {
             if (ctx.aborted.aborted) return
             console.debug('[agent-share] reconnect attempt failed; retrying', error)
-            await new Promise((resolve) => setTimeout(resolve, backoff))
+            await new Promise((resolve) => setTimeout(resolve, jittered(backoff)))
             backoff = Math.min(backoff * 2, RECONNECT_BACKOFF_MAX_MS)
           }
         }
