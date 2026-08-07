@@ -28,6 +28,20 @@
 //! relay and running a second relay at the ICE layer would mean operating two
 //! systems for one job. Under `dynamic` a failed ICE simply uses that relay for
 //! mount bytes; under `webrtc` it fails loudly.
+//!
+//! # There is no upgrade watcher
+//!
+//! A mount that settles on the relay keeps the relay for that connection's
+//! life. Nothing promotes it to a data channel that becomes viable later —
+//! and nothing ever did; the watcher named in old comments and todo entries
+//! was never built. In-place upgrade is impossible (see above: iroh stops
+//! fanning out once the remote selects a path), so an upgrade means a redial
+//! plus a connection swap, and the only redial today is the natural
+//! reconnect, which runs the webrtc-first dial again. Whoever builds
+//! upgrade-by-redial: scope it by pairing — only browser↔browser bulk ever
+//! stalled (see `probe_read`), a relay win against a native peer is safe to
+//! retire — and reuse the waiting membership's hubs, or the redial drops
+//! every channel the membership holds.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -2358,8 +2372,17 @@ async fn connect_via_seeder(
         .filter(|card| card.tree.as_deref() == Some(majority.as_str()))
         .collect();
     // Native peers first: they serve at line rate and are reachable without
-    // any browser in the path.
-    candidates.sort_by_key(|card| (card.transport != "unicast", card.endpoint.clone()));
+    // any browser in the path. Within a class the order is random on
+    // purpose: ghost cards from departed peers survive on the roster, and a
+    // fixed order would march every attempt through the same ghosts ahead
+    // of the live seeder — random sampling lets a retry land on it. Cached
+    // keys, or the comparator would re-roll mid-sort.
+    candidates.sort_by_cached_key(|card| {
+        (
+            card.transport != "unicast",
+            js_sys::Math::random().to_bits(),
+        )
+    });
 
     let relays: Vec<TransportAddr> = seeder_relays(&ticket)
         .into_iter()
@@ -2371,175 +2394,143 @@ async fn connect_via_seeder(
         ));
     }
 
+    // Ghost cards from departed peers cannot answer a dial but cost a full
+    // budget finding out — the JSEP wait alone is `SEEDER_CHANNEL_WAIT_MS`,
+    // and the roster can hold dozens of ghosts per live seeder. Serially
+    // that was minutes of "connecting" against a share that was up, so the
+    // attempts race: staggered launches keep the native-first preference
+    // (an earlier candidate that answers promptly wins before a later one
+    // even starts), the width caps the JSEP and relay fan-out, and the
+    // deadline bounds the whole attempt. The caller retries forever, and
+    // every retry re-samples the roster.
     let mut refusals = Vec::new();
-    for candidate in candidates {
+    let waiting_ref = &waiting;
+    let relays_ref = &relays;
+    let token_ref = &token;
+    let majority_ref = majority.as_str();
+    let mut attempts: Vec<
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<VettedSeeder, String>> + '_>>,
+    > = Vec::new();
+    for (slot, candidate) in candidates.iter().take(SEEDER_RACE_WIDTH).enumerate() {
         let Ok(id) = candidate
             .endpoint
             .parse::<fofoca::protocol::iroh_base::EndpointId>()
         else {
             continue;
         };
-        // WebRTC first — the whole point of a swarm of browsers is that
-        // bytes flow tab-to-tab, not through the relay. The relay stays as
-        // the honest fallback lane it always was. Which arm won decides
-        // whether the bulk probe below runs: only the data channel is
-        // suspect, and provenance says it more cheaply and more precisely
-        // than re-reading the settled path.
-        let (connection, via_data_channel) = match seeder_webrtc_dial(&waiting, id, &relays).await {
-            Ok(connection) => (connection, true),
-            Err(webrtc_error) => {
-                let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
-                match waiting.endpoint.connect(addr, MOUNT_ALPN).await {
-                    Ok(connection) => (connection, false),
-                    Err(error) => {
-                        refusals.push(format!(
-                            "{}: webrtc: {}; relay: {error}",
-                            &candidate.endpoint[..8],
-                            describe(&webrtc_error),
-                        ));
-                        continue;
-                    }
-                }
+        let endpoint = candidate.endpoint.clone();
+        let delay = i32::try_from(slot).unwrap_or(0) * SEEDER_RACE_STAGGER_MS;
+        attempts.push(Box::pin(async move {
+            if delay > 0 {
+                wait_ms(delay).await;
             }
-        };
-        // The candidate must serve the tree its card claimed — fetched bytes,
-        // hashed here, against the card. A mismatch is disqualifying, not
-        // retryable: it lied once.
-        match fetch_manifest_on(&connection, &token).await {
-            Ok((bytes, manifest))
-                if agent_share_proto::manifest::manifest_fingerprint(&bytes) == majority =>
-            {
-                // Prove the path moves bulk before trusting it with the
-                // share; see `probe_read`. Only a data-channel connection is
-                // suspect — bulk never stalled on the relay or a direct ip,
-                // so probing those lanes would only gate healthy seeders
-                // behind a timer (and a failed relay probe used to close and
-                // redial the *same relay*, paying twice to lose the seeder).
-                // A webrtc mount that stalls is closed and redialled over
-                // the relay — bytes beat purity — and that replacement is
-                // trusted the same way any relay connection is.
-                let target = if via_data_channel {
-                    let target = probe_target(&manifest.files);
-                    if target.is_none() {
-                        // Rare enough to say out loud: an unprobed channel
-                        // carrying a manifest with no readable bytes is fine
-                        // today, but silence here would read as "probed and
-                        // passed" in a log.
-                        web_sys::console::log_1(&JsValue::from_str(
-                            "[share] bulk probe skipped: the manifest holds no readable bytes",
-                        ));
-                    }
-                    target
-                } else {
-                    None
-                };
-                if let Some((index, want)) = target {
-                    if let Err(probe_error) = probe_read(&connection, &token, index, want).await {
-                        web_sys::console::log_1(&JsValue::from_str(&format!(
-                            "[share] seeder path failed the bulk probe ({}); trying the relay",
-                            describe(&probe_error)
-                        )));
-                        connection.close(0u32.into(), b"failed the bulk probe");
-                        let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
-                        match waiting.endpoint.connect(addr, MOUNT_ALPN).await {
-                            Ok(relay_conn) => {
-                                let mut client = new_share_client(
-                                    relay_conn,
-                                    token,
-                                    "relay".to_owned(),
-                                    Some(Arc::clone(&waiting.mount_hub)),
-                                    None,
-                                    None,
-                                    waiting.endpoint.clone(),
-                                );
-                                client.lookups = lookups;
-                                client.connected_at_ms = now_ms();
-                                client.from_origin = false;
-                                client.pinned_tree = Some(majority.clone());
-                                *client.fallback_reason.borrow_mut() = Some(format!(
-                                    "origin unreachable ({}); reading from seeder {} over the relay (data channel failed the bulk probe)",
-                                    describe(origin_error),
-                                    &candidate.endpoint[..8.min(candidate.endpoint.len())],
-                                ));
-                                client.seeder = waiting.seeder.clone();
-                                *client.mesh.borrow_mut() =
-                                    MeshSlot::Joined(Rc::clone(&waiting.peer));
-                                // The vetting fetch already paid for these
-                                // bytes; the first manifest call reuses them.
-                                *client.prefetched_manifest.borrow_mut() = Some((bytes, manifest));
-                                return Ok(client);
-                            }
-                            Err(error) => {
-                                refusals.push(format!(
-                                    "{}: relay redial after failed probe: {error}",
-                                    &candidate.endpoint[..8]
-                                ));
-                                continue;
-                            }
-                        }
-                    }
-                }
-                // Report the wire, not the intent: the settled path says
-                // whether the channel or the relay carried the win.
-                let data_path = settled_path_label(&connection)
-                    .await
-                    .unwrap_or_else(|| "relay".to_owned());
-                // No upgrade watcher for a relay-carried win, deliberately:
-                // until the transport's browser↔browser bulk path is fixed
-                // (see `probe_read`), a data channel that *forms* still
-                // cannot carry reads, so retiring a working relay mount for
-                // it would trade bytes for a stall. The probe at the next
-                // natural reconnect re-evaluates the lane.
-                let mut client = new_share_client(
-                    connection,
-                    token,
-                    data_path,
-                    Some(Arc::clone(&waiting.mount_hub)),
-                    None,
-                    None,
-                    waiting.mount_endpoint.clone(),
-                );
-                client.lookups = lookups;
-                client.connected_at_ms = now_ms();
-                client.from_origin = false;
-                client.pinned_tree = Some(majority.clone());
-                *client.fallback_reason.borrow_mut() = Some(format!(
-                    "origin unreachable ({}); reading from seeder {}",
-                    describe(origin_error),
-                    &candidate.endpoint[..8.min(candidate.endpoint.len())],
-                ));
-                client.seeder = waiting.seeder.clone();
-                // The membership stays in the registry even as it graduates
-                // onto the client: its hubs hold the live sessions, and a
-                // revival (the upgrade watcher's included) must reuse them —
-                // a fresh identity per redial would drop every channel it
-                // just built. `leave_mesh` is what finally purges it.
-                *client.mesh.borrow_mut() = MeshSlot::Joined(Rc::clone(&waiting.peer));
-                // The vetting fetch already paid for these bytes; the first
-                // manifest call reuses them instead of re-paying the RTT.
-                *client.prefetched_manifest.borrow_mut() = Some((bytes, manifest));
-                return Ok(client);
-            }
-            Ok(_) => {
-                refusals.push(format!(
-                    "{}: served a different tree than its card claimed",
-                    &candidate.endpoint[..8]
-                ));
-            }
-            Err(error) => {
-                refusals.push(format!(
-                    "{}: {}",
-                    &candidate.endpoint[..8],
-                    describe(&error)
-                ));
-            }
-        }
+            vet_seeder_candidate(
+                waiting_ref,
+                endpoint,
+                id,
+                relays_ref,
+                token_ref,
+                majority_ref,
+            )
+            .await
+        }));
     }
-    Err(JsValue::from_str(&format!(
-        "the origin is unreachable ({}) and no seeder could serve the share: {}",
-        describe(origin_error),
-        refusals.join("; "),
-    )))
+    if attempts.is_empty() {
+        return Err(JsValue::from_str(&format!(
+            "the origin is unreachable ({}) and no vouching card carries a dialable endpoint",
+            describe(origin_error),
+        )));
+    }
+    if candidates.len() > attempts.len() {
+        web_sys::console::log_1(&JsValue::from_str(&format!(
+            "[share] racing {} of {} candidates; the rest wait for the next attempt",
+            attempts.len(),
+            candidates.len(),
+        )));
+    }
+    let vetted = match first_success(
+        attempts,
+        Box::pin(wait_ms(SEEDER_RACE_DEADLINE_MS)),
+        &mut refusals,
+    )
+    .await
+    {
+        RaceOutcome::Winner(vetted) => vetted,
+        RaceOutcome::AllFailed => {
+            return Err(JsValue::from_str(&format!(
+                "the origin is unreachable ({}) and no seeder could serve the share: {}",
+                describe(origin_error),
+                refusals.join("; "),
+            )));
+        }
+        RaceOutcome::DeadlineExpired => {
+            return Err(JsValue::from_str(&format!(
+                "the origin is unreachable ({}) and no seeder answered inside {} s: {}",
+                describe(origin_error),
+                SEEDER_RACE_DEADLINE_MS / 1_000,
+                refusals.join("; "),
+            )));
+        }
+    };
+
+    // Report the wire, not the intent: the settled path says whether the
+    // channel or the relay carried the win — except a demotion, which
+    // already knows it rides the relay.
+    let data_path = if vetted.demoted {
+        "relay".to_owned()
+    } else {
+        settled_path_label(&vetted.connection)
+            .await
+            .unwrap_or_else(|| "relay".to_owned())
+    };
+    // A relay-carried win stays on the relay for this connection's whole
+    // life. There is no upgrade watcher — none was ever built, here or
+    // anywhere (the module doc explains why in-place upgrade is impossible;
+    // upgrading means redialling) — so the lane is only re-evaluated when a
+    // natural reconnect runs the webrtc-first dial again. If relay wins
+    // ever need to be temporary, that is a new upgrade-by-redial task:
+    // scope it by pairing (only browser↔browser bulk ever stalled — see
+    // `probe_read`) and reuse this membership's hubs, per the comment below.
+    let short = vetted.endpoint[..8.min(vetted.endpoint.len())].to_owned();
+    let mut client = new_share_client(
+        vetted.connection,
+        token,
+        data_path,
+        Some(Arc::clone(&waiting.mount_hub)),
+        None,
+        None,
+        if vetted.demoted {
+            waiting.endpoint.clone()
+        } else {
+            waiting.mount_endpoint.clone()
+        },
+    );
+    client.lookups = lookups;
+    client.connected_at_ms = now_ms();
+    client.from_origin = false;
+    client.pinned_tree = Some(majority.clone());
+    *client.fallback_reason.borrow_mut() = Some(if vetted.demoted {
+        format!(
+            "origin unreachable ({}); reading from seeder {short} over the relay (data channel failed the bulk probe)",
+            describe(origin_error),
+        )
+    } else {
+        format!(
+            "origin unreachable ({}); reading from seeder {short}",
+            describe(origin_error),
+        )
+    });
+    client.seeder = waiting.seeder.clone();
+    // The membership stays in the registry even as it graduates onto the
+    // client: its hubs hold the live sessions, and any revival — a future
+    // upgrade-by-redial included — must reuse them, because a fresh
+    // identity per redial would drop every channel it just built.
+    // `leave_mesh` finally purges it.
+    *client.mesh.borrow_mut() = MeshSlot::Joined(Rc::clone(&waiting.peer));
+    // The vetting fetch already paid for these bytes; the first manifest
+    // call reuses them instead of re-paying the RTT.
+    *client.prefetched_manifest.borrow_mut() = Some((vetted.bytes, vetted.manifest));
+    Ok(client)
 }
 
 /// Reach `seeder`'s mount over the data channel: reuse the session the hub
@@ -2614,6 +2605,178 @@ async fn seeder_webrtc_dial(
             ));
         }
         wait_ms(1_000).await;
+    }
+}
+
+/// How many seeder candidates one attempt dials at once. Enough that a
+/// handful of ghost cards cannot monopolize an attempt, small enough that
+/// the JSEP and relay fan-out stays polite; candidates past the width wait
+/// for the caller's next retry, which re-samples the roster.
+const SEEDER_RACE_WIDTH: usize = 6;
+
+/// Launch spacing inside the race. The stagger is what preserves the
+/// native-first sort as a *preference*: an earlier candidate that answers
+/// promptly wins before a later one has started, while a dead one only
+/// costs the race this delay instead of its whole budget.
+const SEEDER_RACE_STAGGER_MS: i32 = 2_000;
+
+/// The whole attempt's bound. Sized past one full JSEP wait
+/// (`SEEDER_CHANNEL_WAIT_MS`) plus a relay fallback, so the first candidate
+/// is never cut short — and low enough that a roster full of ghosts hands
+/// control back to the forever-retrying caller in about a minute, not tens
+/// of them. The caller's card poll (`SEEDER_CARDS_DEADLINE_MS`) plus this is
+/// the ceiling on one silent "connecting" stretch.
+const SEEDER_RACE_DEADLINE_MS: i32 = 60_000;
+
+/// Everything the winning candidate hands back: a vetted connection plus
+/// the manifest bytes the vetting already paid for.
+struct VettedSeeder {
+    connection: Connection,
+    /// The candidate's endpoint string, for user-facing messages.
+    endpoint: String,
+    bytes: Vec<u8>,
+    manifest: MountManifest,
+    /// The data channel failed the bulk probe and `connection` is the relay
+    /// replacement: label it "relay" and home the client on the
+    /// relay-bearing endpoint.
+    demoted: bool,
+}
+
+/// One candidate, dialled and vetted end to end. WebRTC first — the whole
+/// point of a swarm of browsers is that bytes flow tab-to-tab, not through
+/// the relay, which stays the honest fallback lane. The manifest is fetched
+/// and hashed against the card's claim, and a data-channel win is
+/// bulk-probed and demoted to a fresh relay connection if it stalls. `Err`
+/// is the refusal line for the attempt log.
+async fn vet_seeder_candidate(
+    waiting: &WaitingMesh,
+    endpoint: String,
+    id: fofoca::protocol::iroh_base::EndpointId,
+    relays: &[TransportAddr],
+    token: &[u8; SECRET_LEN],
+    majority: &str,
+) -> Result<VettedSeeder, String> {
+    let short = endpoint[..8.min(endpoint.len())].to_owned();
+    // Which arm won decides whether the bulk probe below runs: only the
+    // data channel is suspect, and provenance says it more cheaply and more
+    // precisely than re-reading the settled path.
+    let (connection, via_data_channel) = match seeder_webrtc_dial(waiting, id, relays).await {
+        Ok(connection) => (connection, true),
+        Err(webrtc_error) => {
+            let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
+            match waiting.endpoint.connect(addr, MOUNT_ALPN).await {
+                Ok(connection) => (connection, false),
+                Err(error) => {
+                    return Err(format!(
+                        "{short}: webrtc: {}; relay: {error}",
+                        describe(&webrtc_error),
+                    ));
+                }
+            }
+        }
+    };
+    // The candidate must serve the tree its card claimed — fetched bytes,
+    // hashed here, against the card. A mismatch is disqualifying, not
+    // retryable: it lied once.
+    let (bytes, manifest) = match fetch_manifest_on(&connection, token).await {
+        Ok((bytes, manifest))
+            if agent_share_proto::manifest::manifest_fingerprint(&bytes) == majority =>
+        {
+            (bytes, manifest)
+        }
+        Ok(_) => {
+            return Err(format!(
+                "{short}: served a different tree than its card claimed"
+            ));
+        }
+        Err(error) => return Err(format!("{short}: {}", describe(&error))),
+    };
+    // Prove the path moves bulk before trusting it with the share; see
+    // `probe_read`. Only a data-channel connection is suspect — bulk never
+    // stalled on the relay or a direct ip, so probing those lanes would
+    // only gate healthy seeders behind a timer. A webrtc mount that stalls
+    // is closed and redialled over the relay — bytes beat purity — and that
+    // replacement is trusted the same way any relay connection is.
+    let target = if via_data_channel {
+        let target = probe_target(&manifest.files);
+        if target.is_none() {
+            // Rare enough to say out loud: an unprobed channel carrying a
+            // manifest with no readable bytes is fine today, but silence
+            // here would read as "probed and passed" in a log.
+            web_sys::console::log_1(&JsValue::from_str(
+                "[share] bulk probe skipped: the manifest holds no readable bytes",
+            ));
+        }
+        target
+    } else {
+        None
+    };
+    if let Some((index, want)) = target
+        && let Err(probe_error) = probe_read(&connection, token, index, want).await
+    {
+        web_sys::console::log_1(&JsValue::from_str(&format!(
+            "[share] seeder path failed the bulk probe ({}); trying the relay",
+            describe(&probe_error)
+        )));
+        connection.close(0u32.into(), b"failed the bulk probe");
+        let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
+        return match waiting.endpoint.connect(addr, MOUNT_ALPN).await {
+            Ok(relay_conn) => Ok(VettedSeeder {
+                connection: relay_conn,
+                endpoint,
+                bytes,
+                manifest,
+                demoted: true,
+            }),
+            Err(error) => Err(format!("{short}: relay redial after failed probe: {error}")),
+        };
+    }
+    Ok(VettedSeeder {
+        connection,
+        endpoint,
+        bytes,
+        manifest,
+        demoted: false,
+    })
+}
+
+/// How a candidate race ended; [`first_success`] is the driver.
+enum RaceOutcome<Winner> {
+    Winner(Winner),
+    /// Every attempt returned a refusal.
+    AllFailed,
+    /// The deadline fired with attempts still in flight.
+    DeadlineExpired,
+}
+
+/// Drive `attempts` until one succeeds, every one fails, or `deadline`
+/// fires. Refusals land in `refusals` as they happen; a win drops the
+/// still-running attempts, which cancels them mid-dial — the same
+/// cancellation an abandoned connect always had. A seam like
+/// [`drain_with_stall_deadline`]: generic so tests can script the futures.
+async fn first_success<Winner, Attempt, Deadline>(
+    mut pending: Vec<Attempt>,
+    mut deadline: Deadline,
+    refusals: &mut Vec<String>,
+) -> RaceOutcome<Winner>
+where
+    Attempt: std::future::Future<Output = Result<Winner, String>> + Unpin,
+    Deadline: std::future::Future<Output = ()> + Unpin,
+{
+    loop {
+        if pending.is_empty() {
+            return RaceOutcome::AllFailed;
+        }
+        match futures::future::select(futures::future::select_all(pending), &mut deadline).await {
+            futures::future::Either::Left(((outcome, _which, rest), _)) => match outcome {
+                Ok(winner) => return RaceOutcome::Winner(winner),
+                Err(refusal) => {
+                    refusals.push(refusal);
+                    pending = rest;
+                }
+            },
+            futures::future::Either::Right(((), _)) => return RaceOutcome::DeadlineExpired,
+        }
     }
 }
 
@@ -3337,7 +3500,7 @@ fn pinned_ladder() -> Vec<fofoca::iroh::RelayUrl> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeChunkSource, drain_with_stall_deadline};
+    use super::{ProbeChunkSource, RaceOutcome, drain_with_stall_deadline, first_success};
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
 
@@ -3470,5 +3633,79 @@ mod tests {
     fn no_probe_target_on_a_manifest_with_no_bytes() {
         let files = [entry("", 0), entry("emptied", 0)];
         assert_eq!(super::probe_target(&files), None);
+    }
+
+    type Attempt = std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, String>>>>;
+
+    /// The ghost-card scenario, and the reason the candidate loop races:
+    /// serially, a dead candidate ahead of the live seeder consumed its
+    /// whole budget before the live one was even dialled — twenty ghosts
+    /// meant ten minutes of "connecting" against a share that was up. Raced,
+    /// a hung attempt cannot block a winner.
+    #[test]
+    async fn race_winner_beats_a_hanging_candidate() {
+        let attempts: Vec<Attempt> = vec![
+            Box::pin(async {
+                std::future::pending::<()>().await;
+                Err("ghost".to_owned())
+            }),
+            Box::pin(async {
+                sleep(50).await;
+                Ok(7)
+            }),
+        ];
+        let mut refusals = Vec::new();
+        let outcome = first_success(attempts, Box::pin(sleep(2_000)), &mut refusals).await;
+        assert!(
+            matches!(outcome, RaceOutcome::Winner(7)),
+            "a hung candidate must not block a live one"
+        );
+        assert!(refusals.is_empty(), "nobody refused: {refusals:?}");
+    }
+
+    /// A refusal removes one runner and the race keeps going.
+    #[test]
+    async fn race_survives_refusals() {
+        let attempts: Vec<Attempt> = vec![
+            Box::pin(async { Err("dead on arrival".to_owned()) }),
+            Box::pin(async {
+                sleep(50).await;
+                Ok(1)
+            }),
+        ];
+        let mut refusals = Vec::new();
+        let outcome = first_success(attempts, Box::pin(sleep(2_000)), &mut refusals).await;
+        assert!(matches!(outcome, RaceOutcome::Winner(1)));
+        assert_eq!(refusals, vec!["dead on arrival".to_owned()]);
+    }
+
+    /// Nothing but ghosts: the deadline hands control back to the caller's
+    /// retry loop instead of hanging the attempt forever.
+    #[test]
+    async fn race_deadline_bounds_an_all_ghost_roster() {
+        let attempts: Vec<Attempt> = vec![Box::pin(async {
+            std::future::pending::<()>().await;
+            Err("ghost".to_owned())
+        })];
+        let mut refusals = Vec::new();
+        let outcome = first_success(attempts, Box::pin(sleep(100)), &mut refusals).await;
+        assert!(matches!(outcome, RaceOutcome::DeadlineExpired));
+    }
+
+    /// Every candidate refusing is its own terminal state, with all the
+    /// refusals collected for the error message.
+    #[test]
+    async fn race_reports_when_everyone_refuses() {
+        let attempts: Vec<Attempt> = vec![
+            Box::pin(async { Err("one".to_owned()) }),
+            Box::pin(async {
+                sleep(20).await;
+                Err("two".to_owned())
+            }),
+        ];
+        let mut refusals = Vec::new();
+        let outcome = first_success(attempts, Box::pin(sleep(2_000)), &mut refusals).await;
+        assert!(matches!(outcome, RaceOutcome::AllFailed));
+        assert_eq!(refusals.len(), 2);
     }
 }
