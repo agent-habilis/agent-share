@@ -724,8 +724,22 @@ impl ShareClient {
             // attempts is now a duplicate identity and says goodbye, relay
             // registrations included: dropping it unclosed fed the ghost
             // roster every time a reconnecting tab won its origin race.
-            let waiting =
-                WAITING_MESHES.with(|meshes| meshes.borrow_mut().remove(&share_mesh_key(&token)));
+            //
+            // Unless somebody is still living on it. A revival keeps the
+            // dying client alive precisely so its serving half outlasts the
+            // swap, and if that client came from the seeder lane it is homed
+            // on *these* endpoints — closing them here would cut its peers'
+            // downloads mid-stream and stop it serving before the
+            // replacement re-arms. Left registered, it stays reusable and
+            // `leave_mesh`/`shutdown_mesh` retire it when it really is idle.
+            let waiting = WAITING_MESHES.with(|meshes| {
+                let mut meshes = meshes.borrow_mut();
+                let key = share_mesh_key(&token);
+                match meshes.get(&key) {
+                    Some(entry) if !safe_to_retire(Rc::strong_count(&entry.peer)) => None,
+                    _ => meshes.remove(&key),
+                }
+            });
             if let Some(waiting) = waiting {
                 waiting.retire(true).await;
             }
@@ -2349,6 +2363,26 @@ impl WaitingMesh {
         self.mount_endpoint.close().await;
         self.mount_hub.detach_all();
     }
+}
+
+/// References to a waiting membership's peer when nothing but the registry
+/// holds it. [`adopt_vetted`] hands each adopting client another (its
+/// `MeshSlot::Joined`), and an attempt in flight holds one for as long as it
+/// runs, so anything above this baseline means somebody is still living on
+/// these endpoints.
+const REGISTRY_ONLY_PEER_REFS: usize = 1;
+
+/// Whether a waiting membership may be closed out from under whoever else
+/// might hold it.
+///
+/// `Endpoint` clones share one `Arc`'d socket, so `close()` on any clone
+/// takes down every holder at once — a seeder-lane client adopted from this
+/// entry serves its peers over the very same endpoints. Counting references
+/// rather than tracking a flag means a client releasing itself restores the
+/// membership's retirability for free, and it fails in the safe direction:
+/// an unexpected clone postpones a cleanup instead of severing a live peer.
+fn safe_to_retire(peer_refs: usize) -> bool {
+    peer_refs <= REGISTRY_ONLY_PEER_REFS
 }
 
 thread_local! {
@@ -4330,6 +4364,33 @@ mod tests {
     }
 
     type Dial = std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, JsValue>>>>;
+
+    /// A waiting membership that a client is homed on must survive another
+    /// connect's cleanup. The origin-win path used to close it regardless,
+    /// which cut the retiring client's peers off mid-download — `Endpoint`
+    /// clones share one socket — and stopped it serving before its
+    /// replacement had re-armed. Reference counting also has to *release*:
+    /// a client that lets go must leave the membership retirable again, or
+    /// the cleanup this guards would never run at all.
+    #[test]
+    fn a_membership_a_client_lives_on_is_never_closed() {
+        use std::rc::Rc;
+        let peer = Rc::new(());
+        assert!(
+            super::safe_to_retire(Rc::strong_count(&peer)),
+            "nothing but the registry holds it: this is the case cleanup exists for"
+        );
+        let adopted = Rc::clone(&peer);
+        assert!(
+            !super::safe_to_retire(Rc::strong_count(&peer)),
+            "a client is homed on these endpoints; closing them cuts its peers off"
+        );
+        drop(adopted);
+        assert!(
+            super::safe_to_retire(Rc::strong_count(&peer)),
+            "the client let go, so the membership is collectable again"
+        );
+    }
 
     /// A cap this module chooses for itself has to clear the cold dial a
     /// live origin was measured needing, or a healthy producer is
