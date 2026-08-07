@@ -504,10 +504,7 @@ impl ShareClient {
             clippy::cast_possible_truncation,
             reason = "a dial cap in ms is far inside i32"
         )]
-        let cap_ms = origin_cap_ms.map_or_else(
-            || default_origin_cap_ms(&token),
-            |ms| (ms as i32).max(1_000),
-        );
+        let cap_ms = origin_cap_ms.map_or_else(default_origin_cap_ms, |ms| (ms as i32).max(1_000));
         let dialed = match mode {
             TransportMode::Relay => {
                 capped_origin_dial(Box::pin(connect_relay(ticket, token)), cap_ms, None).await
@@ -2387,25 +2384,39 @@ thread_local! {
 /// pins the lane for tests and keeps failing at its own pace.
 const ORIGIN_DIAL_CAP_MS: i32 = 30_000;
 
-/// The origin cap for a tab whose `localStorage` holds a manifest locator —
-/// proof it seeded this share before. Such a tab re-arms from its own
-/// sidecar and serves itself while the seeder lane races, so waiting out
-/// the patient cap against an origin that is very likely gone buys nothing;
-/// mirrors the App's revival cap. The measured ~20 s honest-slow cold dial
-/// loses this race on purpose — the next App retry reaches the origin again.
-const FORMER_SEEDER_ORIGIN_CAP_MS: i32 = 8_000;
+/// The honest cold dial this side has actually *measured*: JSEP, STUN, and a
+/// cold relay handshake against a producer that is alive and answering. Any
+/// cap this module picks for itself has to clear it, or a healthy origin is
+/// unreachable by construction — see [`default_origin_cap_ms`].
+const MEASURED_COLD_ORIGIN_DIAL_MS: i32 = 20_000;
 
-/// [`ORIGIN_DIAL_CAP_MS`] for a first visit, [`FORMER_SEEDER_ORIGIN_CAP_MS`]
-/// once the sidecar proves this tab seeded the share here.
-fn default_origin_cap_ms(token: &[u8; SECRET_LEN]) -> i32 {
-    let seeded_here = local_storage()
-        .and_then(|storage| storage.get_item(&manifest_locator_key(token)).ok().flatten())
-        .is_some();
-    if seeded_here {
-        FORMER_SEEDER_ORIGIN_CAP_MS
-    } else {
-        ORIGIN_DIAL_CAP_MS
-    }
+const _: () = assert!(
+    ORIGIN_DIAL_CAP_MS >= MEASURED_COLD_ORIGIN_DIAL_MS,
+    "the patient origin cap must outlast a dial that was measured succeeding",
+);
+
+/// The cap for a connect whose caller named none: always the patient one.
+///
+/// A tab holding a manifest locator — proof it seeded this share before —
+/// used to get 8 s here instead, on the theory that it serves itself from
+/// its sidecar while the seeder lane races, so a long wait against a
+/// probably-dead origin bought nothing. The theory had no way back. Nothing
+/// ages or removes the locator, so the discount was permanent, and the
+/// escape hatch it named ("the next retry reaches the origin again") did not
+/// exist: every attempt re-read the same locator and re-applied the same 8 s.
+/// A former seeder facing an origin that answers in the measured 6-20 s
+/// therefore never connected — and if the browser evicted `IndexedDB` while
+/// keeping `localStorage`, it took the discount without even having a
+/// sidecar to serve from.
+///
+/// Deleting it costs the failure path alone. A seeder win does not wait for
+/// the origin to give up (the lanes race, and `select` returns on the first
+/// winner), and a seeder that answers now cuts the dial short on its own
+/// evidence — see [`MeshCanServe`]. All the cap decides is how long a
+/// doomed attempt takes to say so, and the App is retrying underneath a page
+/// that already renders the persisted tree.
+fn default_origin_cap_ms() -> i32 {
+    ORIGIN_DIAL_CAP_MS
 }
 
 /// How long the origin dial runs alone before the seeder lane joins the race
@@ -4319,6 +4330,21 @@ mod tests {
     }
 
     type Dial = std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, JsValue>>>>;
+
+    /// A cap this module chooses for itself has to clear the cold dial a
+    /// live origin was measured needing, or a healthy producer is
+    /// unreachable no matter how often the App retries — every attempt
+    /// re-derives the same too-short cap from the same inputs. A former
+    /// seeder used to get 8 s here for the rest of the tab's life.
+    #[test]
+    fn a_self_chosen_origin_cap_clears_an_honest_cold_dial() {
+        assert!(
+            super::default_origin_cap_ms() >= super::MEASURED_COLD_ORIGIN_DIAL_MS,
+            "a self-chosen cap of {} ms cuts off a dial measured at {} ms",
+            super::default_origin_cap_ms(),
+            super::MEASURED_COLD_ORIGIN_DIAL_MS,
+        );
+    }
 
     /// A card is a claim; only a dial that landed is proof. The rule the
     /// concession runs on must ignore everything short of one, however long

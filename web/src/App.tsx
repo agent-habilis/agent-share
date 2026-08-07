@@ -19,7 +19,7 @@ import {
 import { component, computed, interval, signal } from 'visage-dom'
 import type { Child } from 'visage-dom'
 
-import { jittered } from './backoff.ts'
+import { jittered, revivalOriginCapMs } from './backoff.ts'
 import { ColumnView } from './ColumnView.tsx'
 import { seedState } from './seeding.ts'
 import { TechInfo } from './TechInfo.tsx'
@@ -1080,6 +1080,7 @@ const Session = component<{
       // Only `reviving` flips, and only the actions that need the peer read it.
       reviving.value = true
       let backoff = RECONNECT_BACKOFF_START_MS
+      let attempt = 0
       // The dying client, kept ALIVE until its replacement is up. Its mount
       // connection is gone but its serving half is not: the mesh membership,
       // the published card, and the store-backed mount handler all still
@@ -1104,7 +1105,12 @@ const Session = component<{
             // Each attempt is self-terminating (the wasm side caps the origin
             // dial and bounds its card wait), so no outer race is needed —
             // control always comes back here to try again.
-            pending = connect(props.ticket, props.transport, REVIVAL_ORIGIN_CAP_MS, password)
+            pending = connect(
+              props.ticket,
+              props.transport,
+              revivalOriginCapMs(attempt),
+              password,
+            )
             await bringUp(pending)
             // The swap point: the replacement is up (and re-seeding via
             // `refresh_held`), so the old client may finally say goodbye.
@@ -1113,6 +1119,7 @@ const Session = component<{
           } catch (error) {
             if (ctx.aborted.aborted) return
             console.debug('[agent-share] reconnect attempt failed; retrying', error)
+            attempt += 1
             await new Promise((resolve) => setTimeout(resolve, jittered(backoff)))
             backoff = Math.min(backoff * 2, RECONNECT_BACKOFF_MAX_MS)
           }
@@ -1125,8 +1132,6 @@ const Session = component<{
     return revivalInFlight
   }
 
-  /** Origin-dial slice of a revival attempt — see `connect`'s cap note. */
-  const REVIVAL_ORIGIN_CAP_MS = 8_000
   const RECONNECT_BACKOFF_START_MS = 1_000
   /**
    * Steady-state retry ceiling. Attempts run forever, and each one costs a
