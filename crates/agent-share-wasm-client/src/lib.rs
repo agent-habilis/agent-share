@@ -730,13 +730,16 @@ impl ShareClient {
             // swap, and if that client came from the seeder lane it is homed
             // on *these* endpoints — closing them here would cut its peers'
             // downloads mid-stream and stop it serving before the
-            // replacement re-arms. Left registered, it stays reusable and
-            // `leave_mesh`/`shutdown_mesh` retire it when it really is idle.
+            // replacement re-arms. So the finding is recorded instead, and
+            // `leave_mesh` collects the entry when its last holder lets go.
             let waiting = WAITING_MESHES.with(|meshes| {
                 let mut meshes = meshes.borrow_mut();
                 let key = share_mesh_key(&token);
                 match meshes.get(&key) {
-                    Some(entry) if !safe_to_retire(Rc::strong_count(&entry.peer)) => None,
+                    Some(entry) if !safe_to_retire(Rc::strong_count(&entry.peer)) => {
+                        entry.duplicate.set(true);
+                        None
+                    }
                     _ => meshes.remove(&key),
                 }
             });
@@ -957,6 +960,35 @@ impl ShareClient {
                 .is_some_and(|waiting| Rc::ptr_eq(&waiting.peer, &peer))
         });
         if shared {
+            // Letting go is the point, and it has to happen before the count
+            // below can mean anything.
+            drop(peer);
+            // If an origin win already marked this membership a duplicate,
+            // this client was the reason it could not be collected then.
+            // Finish the job now, or the spare identity, its card and its
+            // two relay registrations sit on the mesh until the page closes.
+            // An *unmarked* membership is left alone on purpose: it is this
+            // tab still seeding a share the user merely navigated away from.
+            let collectable = WAITING_MESHES.with(|meshes| {
+                let mut meshes = meshes.borrow_mut();
+                let key = share_mesh_key(&self.token);
+                match meshes.get(&key) {
+                    Some(entry)
+                        if collect_duplicate_now(
+                            entry.duplicate.get(),
+                            Rc::strong_count(&entry.peer),
+                        ) =>
+                    {
+                        meshes.remove(&key)
+                    }
+                    _ => None,
+                }
+            });
+            if let Some(waiting) = collectable {
+                wasm_bindgen_futures::spawn_local(async move {
+                    waiting.retire(true).await;
+                });
+            }
             return;
         }
         wasm_bindgen_futures::spawn_local(async move {
@@ -2412,6 +2444,13 @@ struct WaitingMesh {
     /// The mount lane's session registry: outbound seeder sessions attach
     /// here; `has_session` is what turns a retry into a free dial.
     mount_hub: Arc<BrowserHubTransport>,
+    /// Set when a connect of this tab's has joined the share's mesh under
+    /// *another* identity, which makes this one a duplicate: two cards and
+    /// two relay registrations for one tab on one share. It cannot always be
+    /// collected the moment that is discovered, because a client may still
+    /// be homed on it, so the finding is recorded here and acted on by
+    /// whoever lets go last — see [`collect_duplicate_now`].
+    duplicate: Rc<Cell<bool>>,
 }
 
 impl WaitingMesh {
@@ -2457,6 +2496,18 @@ const REGISTRY_ONLY_PEER_REFS: usize = 1;
 /// an unexpected clone postpones a cleanup instead of severing a live peer.
 fn safe_to_retire(peer_refs: usize) -> bool {
     peer_refs <= REGISTRY_ONLY_PEER_REFS
+}
+
+/// Whether a membership already found to be a duplicate may be collected.
+///
+/// The mark is what keeps this narrow. A membership nobody is using is not
+/// by itself garbage: a tab that navigated away from a share keeps serving
+/// it from exactly such an entry, which is how a swarm keeps its copies
+/// after everyone has closed the tab. Only a membership this tab has since
+/// re-joined under another identity is waste, and only once its last holder
+/// has let go.
+fn collect_duplicate_now(marked_duplicate: bool, peer_refs: usize) -> bool {
+    marked_duplicate && safe_to_retire(peer_refs)
 }
 
 thread_local! {
@@ -2759,6 +2810,7 @@ async fn connect_via_seeder(
                 signal_endpoint,
                 mount_endpoint,
                 mount_hub,
+                duplicate: Rc::new(Cell::new(false)),
             };
             WAITING_MESHES
                 .with(|meshes| meshes.borrow_mut().insert(mesh_key.clone(), entry.clone()));
@@ -4529,6 +4581,25 @@ mod tests {
         assert!(
             super::safe_to_retire(Rc::strong_count(&peer)),
             "the client let go, so the membership is collectable again"
+        );
+    }
+
+    /// Idle is not the same as garbage. A tab that navigated away from a
+    /// share keeps serving it from a membership nobody is homed on, which is
+    /// how a swarm keeps copies alive after the viewers are gone — so only a
+    /// membership an origin win found to be a *duplicate* may be collected,
+    /// and only once its last holder has let go.
+    #[test]
+    fn only_a_duplicate_membership_is_ever_collected() {
+        use super::collect_duplicate_now;
+        assert!(collect_duplicate_now(true, 1), "a duplicate nobody holds");
+        assert!(
+            !collect_duplicate_now(true, 2),
+            "a duplicate is still off limits while a client is homed on it"
+        );
+        assert!(
+            !collect_duplicate_now(false, 1),
+            "an idle membership is this tab still seeding, not garbage"
         );
     }
 
