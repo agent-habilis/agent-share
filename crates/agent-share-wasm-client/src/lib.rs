@@ -2221,16 +2221,90 @@ fn store_known_seeders(token: &[u8; SECRET_LEN], list: &[KnownSeeder]) {
     }
 }
 
-fn remember_known_seeder(token: &[u8; SECRET_LEN], endpoint: &str, tree: &str) {
+/// Record a seeder the mesh vouched for. The [`MajorityTree`] is the whole
+/// admission ticket: a caller that adopted on its own memory rather than on
+/// a vote has none to offer, and so cannot refresh the record's clock.
+fn remember_known_seeder(token: &[u8; SECRET_LEN], endpoint: &str, tree: &MajorityTree) {
     let list = upsert_known_seeder(
         load_known_seeders(token),
         KnownSeeder {
             endpoint: endpoint.to_owned(),
-            tree: tree.to_owned(),
+            tree: tree.as_str().to_owned(),
             seen_ms: now_ms(),
         },
     );
     store_known_seeders(token, &list);
+}
+
+/// A tree the mesh actually voted for, as opposed to one this tab merely
+/// remembers. Only [`majority_tree`] mints it, and [`remember_known_seeder`]
+/// demands it — so a lane that skipped the vote cannot write to the roster,
+/// which is what stops a record from renewing its own 24 h life every time
+/// it wins and outliving the tree it names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MajorityTree(String);
+
+impl MajorityTree {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The tree the most cards vouch for, or `None` when nobody vouches.
+///
+/// With the origin gone, agreement is the only manifest authority left.
+/// Ghost cards from departed peers vote too — a known defect of the roster —
+/// but a ghost that voted *for* the majority costs nothing, and one that
+/// formed a majority alone still cannot answer a dial. That tolerance is why
+/// callers may use this to *choose*, and why [`judge_adopted_tree`] only
+/// lets it demote a record rather than tear down a working connection.
+fn majority_tree(cards: &[agent_share_proto::PeerCard]) -> Option<MajorityTree> {
+    let mut votes: HashMap<&str, usize> = HashMap::new();
+    for card in cards {
+        if let Some(tree) = card.tree.as_deref() {
+            *votes.entry(tree).or_default() += 1;
+        }
+    }
+    votes
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(tree, _)| MajorityTree(tree.to_owned()))
+}
+
+/// What the roster thinks of a tree this tab already adopted.
+#[derive(Debug, PartialEq, Eq)]
+enum TreeVerdict {
+    /// Nobody vouches yet: the roster has nothing to say.
+    Unknown,
+    Agrees,
+    /// The mesh has moved on, and this tab's memory of who serves what is
+    /// what led it here.
+    Disagrees,
+}
+
+/// Judge the tree a known-seeder redial pinned against the roster that
+/// arrived afterwards.
+///
+/// The redial lane trades the majority vote for speed: it dials the peers
+/// this tab remembers and pins whichever tree they serve, so a seeder frozen
+/// on an outdated tree is adopted with nobody to contradict it. This is the
+/// contradiction, arriving late. `own` is this tab's own mesh id, whose card
+/// vouches for the tree it just adopted and would otherwise vote for itself.
+fn judge_adopted_tree(
+    cards: &[agent_share_proto::PeerCard],
+    own: &str,
+    pinned: &str,
+) -> TreeVerdict {
+    let others: Vec<agent_share_proto::PeerCard> = cards
+        .iter()
+        .filter(|card| card.endpoint != own && card.tree.is_some() && card.serving.is_some())
+        .cloned()
+        .collect();
+    match majority_tree(&others) {
+        None => TreeVerdict::Unknown,
+        Some(majority) if majority.as_str() == pinned => TreeVerdict::Agrees,
+        Some(_) => TreeVerdict::Disagrees,
+    }
 }
 
 /// Drop the endpoints a redial lane dialled without a win, so a roster of
@@ -2773,21 +2847,7 @@ async fn connect_via_seeder(
         wait_ms(500).await;
     };
 
-    // The majority tree is the manifest authority. Ghost cards from departed
-    // peers vote too — a known defect of the roster — but a ghost that voted
-    // *for* the majority costs nothing, and one that formed a majority alone
-    // still cannot answer a dial, which fails over to the next candidate.
-    let mut votes: HashMap<&str, usize> = HashMap::new();
-    for card in &vouching {
-        if let Some(tree) = card.tree.as_deref() {
-            *votes.entry(tree).or_default() += 1;
-        }
-    }
-    let majority = votes
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(tree, _)| tree.to_owned())
-        .expect("vouching is non-empty");
+    let majority = majority_tree(&vouching).expect("vouching cards all carry a tree");
 
     let mut candidates: Vec<&agent_share_proto::PeerCard> = vouching
         .iter()
@@ -2894,7 +2954,15 @@ async fn connect_via_seeder(
     // The winner earned its record: the next reconnect redials it directly
     // instead of waiting for gossip to reintroduce it.
     remember_known_seeder(&token, &vetted.endpoint, &majority);
-    Ok(adopt_vetted(vetted, &waiting, token, lookups, &majority, origin_error).await)
+    Ok(adopt_vetted(
+        vetted,
+        &waiting,
+        token,
+        lookups,
+        majority.as_str(),
+        origin_error,
+    )
+    .await)
 }
 
 /// The redial lane's whole budget. One channel try plus the relay fallback
@@ -2991,8 +3059,26 @@ async fn redial_known_seeders(
                 &vetted.endpoint[..8.min(vetted.endpoint.len())],
             )));
             let tree = agent_share_proto::manifest::manifest_fingerprint(&vetted.bytes);
-            remember_known_seeder(token, &vetted.endpoint, &tree);
-            Some(adopt_vetted(vetted, waiting, *token, ticket.lookups.clone(), &tree, origin_error).await)
+            // Note what is *not* here: a `remember_known_seeder` call. Its
+            // fresh `seen_ms` would restart the 24 h TTL, and a record that
+            // renews itself every time it wins can never expire — a seeder
+            // frozen on an outdated tree would be re-adopted, re-recorded and
+            // re-adopted for the life of the tab, with the majority vote it
+            // bypasses never getting a turn. Leaving the timestamp alone
+            // turns the TTL into what it reads as: how long this tab trusts
+            // its own memory before making the mesh vote again.
+            let endpoint = vetted.endpoint.clone();
+            let client = adopt_vetted(
+                vetted,
+                waiting,
+                *token,
+                ticket.lookups.clone(),
+                &tree,
+                origin_error,
+            )
+            .await;
+            challenge_adopted_tree(waiting, *token, endpoint, tree);
+            Some(client)
         }
         RaceOutcome::AllFailed | RaceOutcome::DeadlineExpired => {
             forget_known_seeders(token, &dialled);
@@ -3005,6 +3091,60 @@ async fn redial_known_seeders(
             None
         }
     }
+}
+
+/// How long to keep asking the roster about a tree the redial lane pinned.
+/// Long enough to outlast the card wait that the lane skipped, since that is
+/// how long cards were budgeted to take in the first place.
+const TREE_CHALLENGE_WINDOW_MS: f64 = 45_000.0;
+
+/// Let the mesh contradict a tree the redial lane pinned without a vote.
+///
+/// The lane's speed comes from trusting this tab's own record instead of
+/// waiting for cards, so the cards arrive after the client is already
+/// serving. When they disagree, the record that led us here is the thing at
+/// fault: forget it, and the next connect takes the card path and votes.
+///
+/// It deliberately stops there. Tearing the connection down on a card count
+/// would hand every departed peer a vote to disconnect live tabs with —
+/// ghosts hold whichever tree they last published, so a share that moved on
+/// leaves a ghost majority for the *old* tree behind it. Dropping a record
+/// costs one card wait if the vote was wrong; killing a mount on the same
+/// evidence would cost a working share.
+fn challenge_adopted_tree(
+    waiting: &WaitingMesh,
+    token: [u8; SECRET_LEN],
+    endpoint: String,
+    pinned: String,
+) {
+    // Weak on purpose. A strong clone held for the whole window would count
+    // as a live holder to [`safe_to_retire`], quietly postponing the
+    // origin-win cleanup for as long as this watcher runs — and a watcher
+    // outliving the membership it watches has nothing left to say anyway.
+    let peer = Rc::downgrade(&waiting.peer);
+    wasm_bindgen_futures::spawn_local(async move {
+        let started = now_ms();
+        while now_ms() - started < TREE_CHALLENGE_WINDOW_MS {
+            wait_ms(1_000).await;
+            let Some(peer) = peer.upgrade() else {
+                return;
+            };
+            let own = peer.hub().local_id().to_string();
+            match judge_adopted_tree(&peer.known_cards(), &own, &pinned) {
+                TreeVerdict::Unknown => continue,
+                TreeVerdict::Agrees => return,
+                TreeVerdict::Disagrees => {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "[share] the mesh serves a different tree than seeder {} did; \
+                         forgetting it so the next connect votes",
+                        &endpoint[..8.min(endpoint.len())],
+                    )));
+                    forget_known_seeders(&token, std::slice::from_ref(&endpoint));
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// Graduate a race's winner into a [`ShareClient`] homed on the waiting
@@ -4495,6 +4635,82 @@ mod tests {
         assert!(
             message.as_string().unwrap_or_default().contains("timed out"),
             "the error must name the timeout: {message:?}"
+        );
+    }
+
+    fn card(endpoint: &str, tree: Option<&str>) -> agent_share_proto::PeerCard {
+        agent_share_proto::PeerCard {
+            endpoint: endpoint.to_owned(),
+            app: "agent-share".to_owned(),
+            version: "0".to_owned(),
+            runtime: "test".to_owned(),
+            transport: "webrtc".to_owned(),
+            client: "test".to_owned(),
+            role: Some("consumer".to_owned()),
+            tree: tree.map(str::to_owned),
+            serving: tree.map(|_| "AA".to_owned()),
+        }
+    }
+
+    /// The vote the card path picks a candidate with: most cards win, a
+    /// card with no tree does not vote, and nobody vouching is `None`
+    /// rather than a panic.
+    #[test]
+    fn the_majority_tree_is_the_one_most_cards_carry() {
+        let roster = [
+            card("a", Some("tree1")),
+            card("b", Some("tree2")),
+            card("c", Some("tree2")),
+            card("d", None),
+        ];
+        assert_eq!(
+            super::majority_tree(&roster)
+                .as_ref()
+                .map(super::MajorityTree::as_str),
+            Some("tree2")
+        );
+        assert_eq!(super::majority_tree(&[card("a", None)]), None);
+        assert_eq!(super::majority_tree(&[]), None);
+    }
+
+    /// The redial lane skips the vote to go fast, so the vote has to be able
+    /// to catch up with it. A seeder frozen on the tree this tab happens to
+    /// remember used to be adopted, re-recorded and re-adopted forever, with
+    /// the mesh never getting a say.
+    #[test]
+    fn a_roster_on_another_tree_contradicts_what_the_redial_pinned() {
+        use super::TreeVerdict;
+        let moved_on = [card("b", Some("tree2")), card("c", Some("tree2"))];
+        assert_eq!(
+            super::judge_adopted_tree(&moved_on, "me", "tree1"),
+            TreeVerdict::Disagrees
+        );
+        assert_eq!(
+            super::judge_adopted_tree(&moved_on, "me", "tree2"),
+            TreeVerdict::Agrees
+        );
+    }
+
+    /// Silence is not disagreement. A roster that is empty, that holds only
+    /// cards which cannot vouch, or that holds nothing but this tab's own
+    /// card must leave the adoption alone — otherwise the first connect on a
+    /// quiet mesh would throw away the record that made it fast.
+    #[test]
+    fn a_silent_roster_never_contradicts_anything() {
+        use super::TreeVerdict;
+        assert_eq!(
+            super::judge_adopted_tree(&[], "me", "tree1"),
+            TreeVerdict::Unknown
+        );
+        assert_eq!(
+            super::judge_adopted_tree(&[card("b", None)], "me", "tree1"),
+            TreeVerdict::Unknown
+        );
+        // This tab publishes its own card for the tree it just adopted;
+        // counting it would let the adoption vouch for itself.
+        assert_eq!(
+            super::judge_adopted_tree(&[card("me", Some("tree1"))], "me", "tree1"),
+            TreeVerdict::Unknown
         );
     }
 
