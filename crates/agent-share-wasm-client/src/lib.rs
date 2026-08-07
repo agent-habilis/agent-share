@@ -430,6 +430,34 @@ impl ShareClient {
     /// takes over; omit it for [`ORIGIN_DIAL_CAP_MS`]. The revival path
     /// passes a tight one — it already knows the origin just died, and its
     /// whole attempt has to fit the App's reconnect budget.
+    /// The tree this tab last seeded for `ticket`, straight from its own
+    /// storage — no dial, no mesh, no peer. Lets the page render the share
+    /// while a reconnect grinds underneath; the manifest is the same
+    /// fingerprint-checked sidecar the seeder re-arm trusts. `undefined`
+    /// when this tab never seeded here, storage was cleared, or the record
+    /// fails its integrity check.
+    ///
+    /// On a protected share the password gates the peek the same way it
+    /// gates a dial: a wrong one derives a different token, whose storage
+    /// keys hold nothing.
+    ///
+    /// # Errors
+    /// The ticket is malformed, or the share wants a password that was not
+    /// supplied.
+    #[wasm_bindgen]
+    pub async fn peek_persisted_manifest(
+        ticket: String,
+        password: Option<String>,
+    ) -> Result<JsValue, JsValue> {
+        console_error_panic_hook::set_once();
+        let ticket = MountTicket::decode(&ticket).map_err(|error| err("decode ticket", &error))?;
+        let auth = redeem_auth(&ticket, password.as_deref())?;
+        match load_persisted_manifest(auth.token()).await {
+            Some((_, manifest, _)) => serde_wasm(&manifest),
+            None => Ok(JsValue::UNDEFINED),
+        }
+    }
+
     pub async fn connect(
         ticket: String,
         transport: Option<String>,
@@ -476,10 +504,13 @@ impl ShareClient {
             clippy::cast_possible_truncation,
             reason = "a dial cap in ms is far inside i32"
         )]
-        let cap_ms = origin_cap_ms.map_or(ORIGIN_DIAL_CAP_MS, |ms| (ms as i32).max(1_000));
+        let cap_ms = origin_cap_ms.map_or_else(
+            || default_origin_cap_ms(&token),
+            |ms| (ms as i32).max(1_000),
+        );
         let dialed = match mode {
             TransportMode::Relay => {
-                capped_origin_dial(Box::pin(connect_relay(ticket, token)), cap_ms).await
+                capped_origin_dial(Box::pin(connect_relay(ticket, token)), cap_ms, None).await
             }
             TransportMode::WebRtc => {
                 connect_webrtc(ticket, token, /*allow_relay_fallback=*/ false).await
@@ -493,11 +524,16 @@ impl ShareClient {
             // [`WAITING_MESHES`] either way, so a lost race costs no
             // identity churn.
             TransportMode::Dynamic => {
+                // The lane coupling: the seeder lane sets this the moment a
+                // card vouches, and the origin dial concedes rather than
+                // running out its cap against an outvoted origin.
+                let cards_seen = Rc::new(Cell::new(false));
                 let origin = Box::pin(capped_origin_dial(
                     Box::pin(connect_webrtc(
                         ticket, token, /*allow_relay_fallback=*/ true,
                     )),
                     cap_ms,
+                    Some((Rc::clone(&cards_seen), ORIGIN_CONCEDE_FLOOR_MS)),
                 ));
                 let race_ticket = fallback_ticket.clone();
                 let race_card = card.clone();
@@ -513,6 +549,7 @@ impl ShareClient {
                         race_password.as_deref(),
                         race_card,
                         &origin_status,
+                        Some(cards_seen),
                     )
                     .await
                 });
@@ -572,6 +609,7 @@ impl ShareClient {
                     mesh_password.as_deref(),
                     card.clone(),
                     &origin_error,
+                    None,
                 )
                 .await?;
                 client.mount_mode = mode.as_str().to_owned();
@@ -685,15 +723,13 @@ impl ShareClient {
             }
             // The origin answered, so this connect joined on the shared
             // endpoint — a membership left waiting by earlier dead-origin
-            // attempts is now a duplicate identity and says goodbye.
+            // attempts is now a duplicate identity and says goodbye, relay
+            // registrations included: dropping it unclosed fed the ghost
+            // roster every time a reconnecting tab won its origin race.
             let waiting =
                 WAITING_MESHES.with(|meshes| meshes.borrow_mut().remove(&share_mesh_key(&token)));
-            if let Some(waiting) = waiting
-                && let Err(error) = waiting.peer.leave().await
-            {
-                web_sys::console::debug_1(&JsValue::from_str(&format!(
-                    "[share] leaving the waiting membership failed: {error:?}"
-                )));
+            if let Some(waiting) = waiting {
+                waiting.retire(true).await;
             }
         });
         // Prefetch the manifest so the page's first call skips its round
@@ -918,15 +954,30 @@ impl ShareClient {
 
     /// Leave for real: purge the waiting-mesh registry and broadcast the
     /// departure. The page-death path (`pagehide`) — nothing after this can
-    /// reuse the membership, so nothing is kept.
+    /// reuse the membership, so nothing is kept, and the waiting entry's
+    /// endpoints get their closing handshake instead of an abort-by-drop.
     pub fn shutdown_mesh(&self) {
-        WAITING_MESHES.with(|meshes| meshes.borrow_mut().remove(&share_mesh_key(&self.token)));
+        let waiting =
+            WAITING_MESHES.with(|meshes| meshes.borrow_mut().remove(&share_mesh_key(&self.token)));
         let previous = std::mem::replace(&mut *self.mesh.borrow_mut(), MeshSlot::Left);
-        let MeshSlot::Joined(peer) = previous else {
-            return;
+        let own = match previous {
+            MeshSlot::Joined(peer) => Some(peer),
+            MeshSlot::Pending | MeshSlot::Left => None,
         };
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = peer.leave().await;
+            // One goodbye per membership: a dead-origin client's own
+            // membership *is* the waiting one, and its retire below carries
+            // the leave.
+            if let Some(peer) = &own
+                && !waiting
+                    .as_ref()
+                    .is_some_and(|shared| Rc::ptr_eq(&shared.peer, peer))
+            {
+                let _ = peer.leave().await;
+            }
+            if let Some(waiting) = waiting {
+                waiting.retire(true).await;
+            }
         });
     }
 
@@ -2060,10 +2111,12 @@ where
 /// Per-attempt, not terminal: the caller retries for as long as the page
 /// lives, and the membership below persists across attempts — so this bound
 /// only decides how often control returns to the caller (which wants to retry
-/// the *origin* too). Sized past the slow case: when the origin was the
-/// mesh's beacon, a surviving peer re-claims the rendezvous on a cadence
-/// measured in minutes, and cards can only flow once somebody has.
-const SEEDER_CARDS_DEADLINE_MS: f64 = 45_000.0;
+/// the *origin* too). Cards keep accumulating on the persistent membership
+/// while the App backs off, so a short attempt loses nothing; it just hands
+/// the origin its turn sooner. Sized past fofoca's fast recovery lanes (the
+/// 6 s beacon-reclaim window, the 10 s empty-mesh claim grace) while leaving
+/// the slow island-merge cadence (~30–60 s) to the *next* attempt.
+const SEEDER_CARDS_DEADLINE_MS: f64 = 12_000.0;
 
 /// Where a share's blocks live.
 ///
@@ -2093,6 +2146,87 @@ fn manifest_locator_key(token: &[u8; SECRET_LEN]) -> String {
 
 fn local_storage() -> Option<web_sys::Storage> {
     web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+}
+
+/// A seeder this tab once **vetted** — manifest hashed against its claim,
+/// data channel bulk-probed — recorded so the next reconnect can redial it
+/// directly instead of waiting for the mesh to reintroduce everyone. Never
+/// written from raw cards, which may be ghosts.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct KnownSeeder {
+    endpoint: String,
+    /// The manifest fingerprint the endpoint served when it won; the redial
+    /// re-verifies against this, so a stale record is refused, not trusted.
+    tree: String,
+    seen_ms: f64,
+}
+
+/// Where the vetted-seeder records live: `localStorage`, beside the manifest
+/// locator, under the same hashed-name privacy rationale. The values are
+/// endpoint ids — public keys — so nothing secret lands in a name or value a
+/// storage inspector would display.
+fn known_seeders_key(token: &[u8; SECRET_LEN]) -> String {
+    format!("agent-share/seeders/{}", &share_mesh_key(token)[..16])
+}
+
+/// Roster ceiling: enough for every live peer of a small share, small enough
+/// that a redial lane full of corpses stays cheap.
+const KNOWN_SEEDERS_CAP: usize = 4;
+
+/// Records older than this are corpses with near certainty — a browser
+/// endpoint identity does not survive a reload, let alone a day.
+const KNOWN_SEEDER_TTL_MS: f64 = 24.0 * 60.0 * 60.0 * 1_000.0;
+
+/// Decode a stored roster, dropping expired entries and anything past the
+/// cap. Tolerant of garbage: an unparseable record reads as empty.
+fn decode_known_seeders(raw: &str, now: f64) -> Vec<KnownSeeder> {
+    let mut list: Vec<KnownSeeder> = serde_json::from_str(raw).unwrap_or_default();
+    list.retain(|entry| now - entry.seen_ms < KNOWN_SEEDER_TTL_MS);
+    list.truncate(KNOWN_SEEDERS_CAP);
+    list
+}
+
+/// Newest first, one record per endpoint, capped.
+fn upsert_known_seeder(mut list: Vec<KnownSeeder>, entry: KnownSeeder) -> Vec<KnownSeeder> {
+    list.retain(|known| known.endpoint != entry.endpoint);
+    list.insert(0, entry);
+    list.truncate(KNOWN_SEEDERS_CAP);
+    list
+}
+
+fn load_known_seeders(token: &[u8; SECRET_LEN]) -> Vec<KnownSeeder> {
+    local_storage()
+        .and_then(|storage| storage.get_item(&known_seeders_key(token)).ok().flatten())
+        .map(|raw| decode_known_seeders(&raw, now_ms()))
+        .unwrap_or_default()
+}
+
+/// Best-effort, like every `localStorage` write here: a refusal costs the
+/// fast lane on the next reconnect, never the session.
+fn store_known_seeders(token: &[u8; SECRET_LEN], list: &[KnownSeeder]) {
+    if let (Some(storage), Ok(raw)) = (local_storage(), serde_json::to_string(list)) {
+        let _ = storage.set_item(&known_seeders_key(token), &raw);
+    }
+}
+
+fn remember_known_seeder(token: &[u8; SECRET_LEN], endpoint: &str, tree: &str) {
+    let list = upsert_known_seeder(
+        load_known_seeders(token),
+        KnownSeeder {
+            endpoint: endpoint.to_owned(),
+            tree: tree.to_owned(),
+            seen_ms: now_ms(),
+        },
+    );
+    store_known_seeders(token, &list);
+}
+
+/// Drop the endpoints a redial lane dialled without a win, so a roster of
+/// corpses is paid for at most once per generation.
+fn forget_known_seeders(token: &[u8; SECRET_LEN], failed: &[String]) {
+    let mut list = load_known_seeders(token);
+    list.retain(|entry| !failed.contains(&entry.endpoint));
+    store_known_seeders(token, &list);
 }
 
 /// Persist the origin's manifest so a refreshed tab can re-arm with no live
@@ -2194,6 +2328,31 @@ struct WaitingMesh {
     mount_hub: Arc<BrowserHubTransport>,
 }
 
+impl WaitingMesh {
+    /// Graceful farewell for a membership nothing will reuse. `leave` says
+    /// whether the mesh goodbye is still owed — a caller that already left
+    /// through this same `peer` must not broadcast twice.
+    ///
+    /// The closes are the point. iroh's `Drop` aborts without the closing
+    /// handshake, so a dropped membership leaves its relay registrations
+    /// (two of them — the mesh identity and the signal half) and its peers'
+    /// connections to time out on their own. Those corpses are what make
+    /// rendezvous vacancy probes read "held" and pad rosters with ghosts
+    /// that the candidate race then pays to rule out. The origin path has
+    /// always closed its endpoints on farewell; this is the waiting lane
+    /// catching up. Endpoints first — the close frames ride any live data
+    /// channels — then the hub lets go of the peer connections themselves.
+    async fn retire(self, leave: bool) {
+        if leave {
+            let _ = self.peer.leave().await;
+        }
+        self.endpoint.close().await;
+        self.signal_endpoint.close().await;
+        self.mount_endpoint.close().await;
+        self.mount_hub.detach_all();
+    }
+}
+
 thread_local! {
     /// Memberships owned by no client yet, keyed by the share's mesh key.
     ///
@@ -2227,6 +2386,27 @@ thread_local! {
 /// pins the lane for tests and keeps failing at its own pace.
 const ORIGIN_DIAL_CAP_MS: i32 = 30_000;
 
+/// The origin cap for a tab whose `localStorage` holds a manifest locator —
+/// proof it seeded this share before. Such a tab re-arms from its own
+/// sidecar and serves itself while the seeder lane races, so waiting out
+/// the patient cap against an origin that is very likely gone buys nothing;
+/// mirrors the App's revival cap. The measured ~20 s honest-slow cold dial
+/// loses this race on purpose — the next App retry reaches the origin again.
+const FORMER_SEEDER_ORIGIN_CAP_MS: i32 = 8_000;
+
+/// [`ORIGIN_DIAL_CAP_MS`] for a first visit, [`FORMER_SEEDER_ORIGIN_CAP_MS`]
+/// once the sidecar proves this tab seeded the share here.
+fn default_origin_cap_ms(token: &[u8; SECRET_LEN]) -> i32 {
+    let seeded_here = local_storage()
+        .and_then(|storage| storage.get_item(&manifest_locator_key(token)).ok().flatten())
+        .is_some();
+    if seeded_here {
+        FORMER_SEEDER_ORIGIN_CAP_MS
+    } else {
+        ORIGIN_DIAL_CAP_MS
+    }
+}
+
 /// How long the origin dial runs alone before the seeder lane joins the race
 /// (`dynamic` mode).
 ///
@@ -2236,21 +2416,55 @@ const ORIGIN_DIAL_CAP_MS: i32 = 30_000;
 /// [`ORIGIN_DIAL_CAP_MS`] before card collection begins.
 const SEEDER_RACE_HEAD_START_MS: i32 = 3_000;
 
+/// How long the origin dial must have run before a vouching card is allowed
+/// to concede it. Protects a healthy share with a slow origin: cards cannot
+/// realistically arrive earlier anyway (the seeder lane's head start, the
+/// join, and a gossip round stack up to about this), so the floor only bites
+/// when it should.
+const ORIGIN_CONCEDE_FLOOR_MS: f64 = 5_000.0;
+
 /// Race an origin dial against [`ORIGIN_DIAL_CAP_MS`].
 ///
 /// On timeout the dial future is dropped — its endpoints abort un-`close()`d,
 /// which is acceptable for a producer we are about to give up on — and the
 /// synthesized error routes the caller into the seeder fallback.
-async fn capped_origin_dial(
-    dial: std::pin::Pin<Box<dyn std::future::Future<Output = Result<ShareClient, JsValue>>>>,
+///
+/// `concede` is the dynamic-mode lane coupling: the seeder lane sets the
+/// flag the moment a peer's card vouches for the share, and this dial gives
+/// up (after `floor_ms`) rather than running out its cap against an origin
+/// the mesh has already outvoted. Matters most when the seeder lane *fails*
+/// after cards were seen — the caller then awaits this future, which now
+/// resolves in one watcher tick instead of the cap's remainder.
+/// Generic over the dial's winner for the same reason [`first_success`] is:
+/// tests script the dial with a scalar instead of a [`ShareClient`].
+async fn capped_origin_dial<Winner>(
+    dial: std::pin::Pin<Box<dyn std::future::Future<Output = Result<Winner, JsValue>>>>,
     cap_ms: i32,
-) -> Result<ShareClient, JsValue> {
-    match futures::future::select(dial, Box::pin(wait_ms(cap_ms))).await {
+    concede: Option<(Rc<Cell<bool>>, f64)>,
+) -> Result<Winner, JsValue> {
+    let concession = Box::pin(async move {
+        let Some((cards_seen, floor_ms)) = concede else {
+            return std::future::pending::<()>().await;
+        };
+        let started = now_ms();
+        loop {
+            if cards_seen.get() && now_ms() - started >= floor_ms {
+                return;
+            }
+            wait_ms(250).await;
+        }
+    });
+    let give_up = futures::future::select(Box::pin(wait_ms(cap_ms)), concession);
+    match futures::future::select(dial, give_up).await {
         futures::future::Either::Left((dialed, _)) => dialed,
-        futures::future::Either::Right(((), _)) => Err(JsValue::from_str(&format!(
-            "origin dial timed out after {} s",
-            cap_ms / 1000
-        ))),
+        futures::future::Either::Right((futures::future::Either::Left(((), _)), _)) => Err(
+            JsValue::from_str(&format!("origin dial timed out after {} s", cap_ms / 1000)),
+        ),
+        futures::future::Either::Right((futures::future::Either::Right(((), _)), _)) => {
+            Err(JsValue::from_str(
+                "origin dial conceded: a peer on the mesh already vouches for the share",
+            ))
+        }
     }
 }
 
@@ -2274,6 +2488,7 @@ async fn connect_via_seeder(
     password: Option<&str>,
     card: Option<JsValue>,
     origin_error: &JsValue,
+    cards_seen: Option<Rc<Cell<bool>>>,
 ) -> Result<ShareClient, JsValue> {
     let token = *auth.token();
     let secret = ticket.secret;
@@ -2415,6 +2630,15 @@ async fn connect_via_seeder(
         }
     }
 
+    // Before waiting on gossip at all, try the seeders this tab vetted on an
+    // earlier connect. When they are still alive this stands the share back
+    // up in seconds while a beacon-less mesh is still healing; when they are
+    // corpses the lane is bounded and prunes them, and the card path below
+    // proceeds unchanged.
+    if let Some(client) = redial_known_seeders(&waiting, &ticket, &token, origin_error).await {
+        return Ok(client);
+    }
+
     // Cards arrive over gossip; poll until somebody vouches or the deadline.
     let started = now_ms();
     let vouching = loop {
@@ -2428,6 +2652,11 @@ async fn connect_via_seeder(
             })
             .collect();
         if !vouching.is_empty() {
+            // Tell the racing origin dial the mesh can serve this share; it
+            // concedes instead of running out its cap against a corpse.
+            if let Some(flag) = &cards_seen {
+                flag.set(true);
+            }
             break vouching;
         }
         if now_ms() - started > SEEDER_CARDS_DEADLINE_MS {
@@ -2533,6 +2762,7 @@ async fn connect_via_seeder(
                 relays_ref,
                 token_ref,
                 majority_ref,
+                SEEDER_CHANNEL_WAIT_MS,
             )
             .await
         }));
@@ -2575,6 +2805,135 @@ async fn connect_via_seeder(
         }
     };
 
+    // The winner earned its record: the next reconnect redials it directly
+    // instead of waiting for gossip to reintroduce it.
+    remember_known_seeder(&token, &vetted.endpoint, &majority);
+    Ok(adopt_vetted(vetted, &waiting, token, lookups, &majority, origin_error).await)
+}
+
+/// The redial lane's whole budget. One channel try plus the relay fallback
+/// per candidate must fit inside it; sized so a roster of corpses delays
+/// the card path by at most this before being pruned.
+const KNOWN_SEEDER_REDIAL_DEADLINE_MS: i32 = 10_000;
+
+/// The channel wait inside the redial lane — much tighter than
+/// [`SEEDER_CHANNEL_WAIT_MS`], so the webrtc try and the relay fallback
+/// both fit the lane's deadline.
+const KNOWN_SEEDER_CHANNEL_WAIT_MS: f64 = 6_000.0;
+
+/// Launch spacing inside the redial lane; tighter than the card race's
+/// because there are at most [`KNOWN_SEEDERS_CAP`] candidates and every one
+/// was live recently.
+const KNOWN_SEEDER_STAGGER_MS: i32 = 500;
+
+/// Redial the seeders this tab vetted on an earlier connect, straight from
+/// `localStorage`, skipping the card wait. A reviving tab already knows who
+/// served it, and the bytes plane never needed the mesh's beacon — only
+/// discovery does — so when those peers are still alive this lane connects
+/// while a producer-less mesh is still healing its rendezvous.
+///
+/// Every safeguard the card path applies still runs per candidate: the
+/// manifest must hash to the *recorded* tree (a stale record is refused,
+/// and the card path's majority vote takes over), and a data-channel win is
+/// bulk-probed with relay demotion. `None` means fall through to the card
+/// path; every endpoint dialled without a win is forgotten first.
+async fn redial_known_seeders(
+    waiting: &WaitingMesh,
+    ticket: &MountTicket,
+    token: &[u8; SECRET_LEN],
+    origin_error: &JsValue,
+) -> Option<ShareClient> {
+    let entries = load_known_seeders(token);
+    if entries.is_empty() {
+        return None;
+    }
+    let relays: Vec<TransportAddr> = seeder_relays(ticket)
+        .into_iter()
+        .map(TransportAddr::Relay)
+        .collect();
+    if relays.is_empty() {
+        return None;
+    }
+    // A same-session revival reuses the waiting membership's identity, so
+    // this tab's own record — it may have vouched for itself — is skippable
+    // by id rather than by luck.
+    let own = waiting.peer.hub().local_id().to_string();
+    let relays_ref = &relays;
+    let mut dialled: Vec<String> = Vec::new();
+    let mut attempts: Vec<
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<VettedSeeder, String>> + '_>>,
+    > = Vec::new();
+    for entry in entries.iter().filter(|entry| entry.endpoint != own) {
+        let Ok(id) = entry
+            .endpoint
+            .parse::<fofoca::protocol::iroh_base::EndpointId>()
+        else {
+            continue;
+        };
+        dialled.push(entry.endpoint.clone());
+        let endpoint = entry.endpoint.clone();
+        let tree = entry.tree.clone();
+        let delay = i32::try_from(attempts.len()).unwrap_or(0) * KNOWN_SEEDER_STAGGER_MS;
+        attempts.push(Box::pin(async move {
+            if delay > 0 {
+                wait_ms(delay).await;
+            }
+            vet_seeder_candidate(
+                waiting,
+                endpoint,
+                id,
+                relays_ref,
+                token,
+                &tree,
+                KNOWN_SEEDER_CHANNEL_WAIT_MS,
+            )
+            .await
+        }));
+    }
+    if attempts.is_empty() {
+        return None;
+    }
+    let mut refusals = Vec::new();
+    match first_success(
+        attempts,
+        Box::pin(wait_ms(KNOWN_SEEDER_REDIAL_DEADLINE_MS)),
+        &mut refusals,
+    )
+    .await
+    {
+        RaceOutcome::Winner(vetted) => {
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "[share] known seeder {} answered ahead of the card wait",
+                &vetted.endpoint[..8.min(vetted.endpoint.len())],
+            )));
+            let tree = agent_share_proto::manifest::manifest_fingerprint(&vetted.bytes);
+            remember_known_seeder(token, &vetted.endpoint, &tree);
+            Some(adopt_vetted(vetted, waiting, *token, ticket.lookups.clone(), &tree, origin_error).await)
+        }
+        RaceOutcome::AllFailed | RaceOutcome::DeadlineExpired => {
+            forget_known_seeders(token, &dialled);
+            if !refusals.is_empty() {
+                web_sys::console::log_1(&JsValue::from_str(&format!(
+                    "[share] known-seeder redial found nobody home ({}); waiting for cards",
+                    refusals.join("; "),
+                )));
+            }
+            None
+        }
+    }
+}
+
+/// Graduate a race's winner into a [`ShareClient`] homed on the waiting
+/// membership. Shared by the known-seeder redial lane and the card race —
+/// the winner is adopted identically no matter which lane vetted it.
+async fn adopt_vetted(
+    vetted: VettedSeeder,
+    waiting: &WaitingMesh,
+    token: [u8; SECRET_LEN],
+    lookups: LookupOpts,
+    majority: &str,
+    origin_error: &JsValue,
+) -> ShareClient {
     // Report the wire, not the intent: the settled path says whether the
     // channel or the relay carried the win — except a demotion, which
     // already knows it rides the relay.
@@ -2610,7 +2969,7 @@ async fn connect_via_seeder(
     client.lookups = lookups;
     client.connected_at_ms = now_ms();
     client.from_origin = false;
-    client.pinned_tree = Some(majority.clone());
+    client.pinned_tree = Some(majority.to_owned());
     *client.fallback_reason.borrow_mut() = Some(if vetted.demoted {
         format!(
             "origin unreachable ({}); reading from seeder {short} over the relay (data channel failed the bulk probe)",
@@ -2632,7 +2991,7 @@ async fn connect_via_seeder(
     // The vetting fetch already paid for these bytes; the first manifest
     // call reuses them instead of re-paying the RTT.
     *client.prefetched_manifest.borrow_mut() = Some((vetted.bytes, vetted.manifest));
-    Ok(client)
+    client
 }
 
 /// Reach `seeder`'s mount over the data channel: reuse the session the hub
@@ -2643,15 +3002,33 @@ async fn connect_via_seeder(
 /// How long to wait for a data channel to `seeder` before conceding relay.
 ///
 /// Two lanes race to build one: our own JSEP round below, and fofoca's mesh
-/// negotiation, which retries on its own schedule and was *measured* landing
-/// a session about a minute after two freshly-reloaded tabs meet — long
-/// after a single-shot attempt has given up. This wait watches both.
-const SEEDER_CHANNEL_WAIT_MS: f64 = 30_000.0;
+/// negotiation, which retries on its own schedule. A session was once
+/// *measured* landing a minute after two freshly-reloaded tabs meet, but
+/// that predates fofoca's beacon-failover fixes; conceding to the relay at
+/// 15 s keeps the attempt moving, and the App's retry redials webrtc. Do
+/// not cut further without drill data: a demotion to relay is permanent for
+/// the connection, so a too-sharp wait converts webrtc wins into relay
+/// sessions.
+const SEEDER_CHANNEL_WAIT_MS: f64 = 15_000.0;
+
+/// Whether another JSEP offer is due: one at entry, one more once half the
+/// wait has passed with no session — STUN can lose a round transiently, and
+/// one retry was the difference measured. Keeping the re-offer at the
+/// halfway mark by construction lets the wait shrink without re-deriving
+/// the schedule.
+fn reoffer_due(offers: u32, elapsed: f64, wait: f64) -> bool {
+    match offers {
+        0 => true,
+        1 => elapsed > wait / 2.0,
+        _ => false,
+    }
+}
 
 async fn seeder_webrtc_dial(
     waiting: &WaitingMesh,
     seeder: fofoca::protocol::iroh_base::EndpointId,
     relays: &[TransportAddr],
+    wait: f64,
 ) -> Result<Connection, JsValue> {
     let webrtc_only =
         EndpointAddr::from_parts(seeder, [TransportAddr::Custom(custom_addr(seeder))]);
@@ -2673,15 +3050,7 @@ async fn seeder_webrtc_dial(
                     err("dial the mount ALPN over the seeder's data channel", &error)
                 });
         }
-        // First pass, and once more halfway through the wait: STUN can lose
-        // a round transiently, and one retry was the difference measured.
-        let elapsed = now_ms() - started;
-        let due = match offers {
-            0 => true,
-            1 => elapsed > SEEDER_CHANNEL_WAIT_MS / 2.0,
-            _ => false,
-        };
-        if due {
+        if reoffer_due(offers, now_ms() - started, wait) {
             offers += 1;
             let addr = EndpointAddr::from_parts(seeder, relays.iter().cloned());
             match negotiate(
@@ -2701,7 +3070,7 @@ async fn seeder_webrtc_dial(
                 ))),
             }
         }
-        if now_ms() - started > SEEDER_CHANNEL_WAIT_MS {
+        if now_ms() - started > wait {
             return Err(JsValue::from_str(
                 "no data channel formed inside the wait; conceding to the relay",
             ));
@@ -2723,12 +3092,13 @@ const SEEDER_RACE_WIDTH: usize = 6;
 const SEEDER_RACE_STAGGER_MS: i32 = 2_000;
 
 /// The whole attempt's bound. Sized past one full JSEP wait
-/// (`SEEDER_CHANNEL_WAIT_MS`) plus a relay fallback, so the first candidate
-/// is never cut short — and low enough that a roster full of ghosts hands
-/// control back to the forever-retrying caller in about a minute, not tens
-/// of them. The caller's card poll (`SEEDER_CARDS_DEADLINE_MS`) plus this is
-/// the ceiling on one silent "connecting" stretch.
-const SEEDER_RACE_DEADLINE_MS: i32 = 60_000;
+/// (`SEEDER_CHANNEL_WAIT_MS`) plus a relay fallback plus a bulk-probe stall
+/// (`PROBE_STALL_MS`) with margin, so the first candidate is never cut
+/// short — and low enough that a roster full of ghosts hands control back
+/// to the forever-retrying caller in about half a minute. The caller's card
+/// poll (`SEEDER_CARDS_DEADLINE_MS`) plus this is the ceiling on one silent
+/// "connecting" stretch.
+const SEEDER_RACE_DEADLINE_MS: i32 = 35_000;
 
 /// Everything the winning candidate hands back: a vetted connection plus
 /// the manifest bytes the vetting already paid for.
@@ -2757,12 +3127,14 @@ async fn vet_seeder_candidate(
     relays: &[TransportAddr],
     token: &[u8; SECRET_LEN],
     majority: &str,
+    channel_wait: f64,
 ) -> Result<VettedSeeder, String> {
     let short = endpoint[..8.min(endpoint.len())].to_owned();
     // Which arm won decides whether the bulk probe below runs: only the
     // data channel is suspect, and provenance says it more cheaply and more
     // precisely than re-reading the settled path.
-    let (connection, via_data_channel) = match seeder_webrtc_dial(waiting, id, relays).await {
+    let (connection, via_data_channel) =
+        match seeder_webrtc_dial(waiting, id, relays, channel_wait).await {
         Ok(connection) => (connection, true),
         Err(webrtc_error) => {
             let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
@@ -3176,9 +3548,16 @@ async fn is_held(store: &IdbStore, file: &FileId) -> bool {
 }
 
 async fn wait_ms(millis: i32) {
+    // `setTimeout` off the global rather than the `Window`: identical in a
+    // page, and it keeps this future resolvable in the node test runner,
+    // where there is no `Window` and a window-bound timer would hang every
+    // future built on this one.
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis);
+        use wasm_bindgen::JsCast as _;
+        let global = js_sys::global();
+        if let Ok(set_timeout) = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout")) {
+            let set_timeout: js_sys::Function = set_timeout.unchecked_into();
+            let _ = set_timeout.call2(&global, &resolve, &JsValue::from(millis));
         }
     });
     let _ = JsFuture::from(promise).await;
@@ -3858,6 +4237,114 @@ mod tests {
         assert_eq!(
             super::judge_channel(State::Connected, Some(CHANNEL_DISCONNECT_GRACE_MS * 2.0)),
             super::ChannelVerdict::Healthy
+        );
+    }
+
+    /// One offer at entry, one more past the halfway mark, never a third —
+    /// and the halfway mark tracks the wait, so cutting the wait keeps the
+    /// re-offer schedule coherent by construction.
+    #[test]
+    fn reoffer_schedule_is_entry_then_halfway() {
+        assert!(super::reoffer_due(0, 0.0, 15_000.0));
+        assert!(!super::reoffer_due(1, 7_000.0, 15_000.0));
+        assert!(super::reoffer_due(1, 7_501.0, 15_000.0));
+        assert!(!super::reoffer_due(2, 14_999.0, 15_000.0));
+        assert!(super::reoffer_due(1, 3_001.0, 6_000.0));
+    }
+
+    type Dial = std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, JsValue>>>>;
+
+    /// The dynamic-mode lane coupling: once the seeder lane has seen a
+    /// vouching card, a hung origin dial concedes instead of running out
+    /// its whole cap.
+    #[test]
+    async fn origin_dial_concedes_once_cards_vouch() {
+        let flag = std::rc::Rc::new(std::cell::Cell::new(true));
+        let dial: Dial = Box::pin(async {
+            std::future::pending::<()>().await;
+            unreachable!("the dial never resolves")
+        });
+        let outcome = super::capped_origin_dial(dial, 5_000, Some((flag, 0.0))).await;
+        let message = outcome.expect_err("a vouched-for share must concede the dial");
+        assert!(
+            message.as_string().unwrap_or_default().contains("conceded"),
+            "the error must name the concession: {message:?}"
+        );
+    }
+
+    /// The floor guards a healthy share with a slow origin: a card that
+    /// arrives early cannot concede a dial that is about to win.
+    #[test]
+    async fn origin_dial_win_beats_an_early_card() {
+        let flag = std::rc::Rc::new(std::cell::Cell::new(true));
+        let dial: Dial = Box::pin(async {
+            sleep(50).await;
+            Ok(9)
+        });
+        let outcome = super::capped_origin_dial(dial, 5_000, Some((flag, 2_000.0))).await;
+        assert!(
+            matches!(outcome, Ok(9)),
+            "a dial resolving inside the floor must win"
+        );
+    }
+
+    /// With no cards the cap still governs, exactly as before the flag
+    /// existed.
+    #[test]
+    async fn origin_dial_times_out_with_no_cards() {
+        let flag = std::rc::Rc::new(std::cell::Cell::new(false));
+        let dial: Dial = Box::pin(async {
+            std::future::pending::<()>().await;
+            unreachable!("the dial never resolves")
+        });
+        let outcome = super::capped_origin_dial(dial, 100, Some((flag, 0.0))).await;
+        let message = outcome.expect_err("the cap must fire");
+        assert!(
+            message.as_string().unwrap_or_default().contains("timed out"),
+            "the error must name the timeout: {message:?}"
+        );
+    }
+
+    fn seeder(endpoint: &str, seen_ms: f64) -> super::KnownSeeder {
+        super::KnownSeeder {
+            endpoint: endpoint.to_owned(),
+            tree: "aaaa".to_owned(),
+            seen_ms,
+        }
+    }
+
+    /// The stored roster survives a round trip, drops entries past the TTL,
+    /// and reads garbage as empty rather than failing the connect.
+    #[test]
+    fn known_seeders_decode_prunes_and_tolerates_garbage() {
+        let now = super::KNOWN_SEEDER_TTL_MS * 2.0;
+        let stored = vec![
+            seeder("fresh", now - 1_000.0),
+            seeder("stale", now - super::KNOWN_SEEDER_TTL_MS),
+        ];
+        let raw = serde_json::to_string(&stored).expect("the roster encodes");
+        let decoded = super::decode_known_seeders(&raw, now);
+        assert_eq!(decoded, vec![seeder("fresh", now - 1_000.0)]);
+        assert!(super::decode_known_seeders("not json", now).is_empty());
+    }
+
+    /// Newest first, one record per endpoint, never past the cap.
+    #[test]
+    fn known_seeders_upsert_dedupes_and_caps() {
+        let mut list = Vec::new();
+        for n in 0..6 {
+            list = super::upsert_known_seeder(list, seeder(&format!("peer-{n}"), f64::from(n)));
+        }
+        assert_eq!(list.len(), super::KNOWN_SEEDERS_CAP);
+        assert_eq!(list[0].endpoint, "peer-5");
+        // Re-recording an endpoint moves it to the front instead of
+        // duplicating it.
+        list = super::upsert_known_seeder(list, seeder("peer-3", 100.0));
+        assert_eq!(list.len(), super::KNOWN_SEEDERS_CAP);
+        assert_eq!(list[0].endpoint, "peer-3");
+        assert_eq!(
+            list.iter().filter(|entry| entry.endpoint == "peer-3").count(),
+            1
         );
     }
 }

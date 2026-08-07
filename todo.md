@@ -32,11 +32,15 @@ registration lingers and makes vacancy probes read "held").
 Second-order effect, observed in the 21:40 drill: a joiner that lands during
 a dark window claims the rendezvous itself and becomes a **lone island**; the
 established island only merges into it on the same slow cadence, so that tab
-waits tens of minutes even after the seeders stabilize. Client-side fix worth
-doing regardless of fofoca: a reviving tab already *knows* the endpoints of
-the seeders it lost (its dead connection, the vetted cards) — **redial those
-addresses directly** instead of waiting for the mesh to reintroduce everyone.
-The bytes plane never needed the beacon; only discovery does.
+waits tens of minutes even after the seeders stabilize. The client-side
+mitigation for this **landed 2026-08-07**: every vetted race winner is
+recorded in localStorage (`known_seeders_key`, ≤4 entries, 24 h TTL), and
+`redial_known_seeders` in the wasm client dials them directly *before* the
+card wait — same fingerprint + bulk-probe vetting, one 10 s lane, failures
+pruned. The bytes plane never needed the beacon; only discovery does. Note
+the honest bound: browser identities are per-page-load, so this only bites
+when the recorded seeders did not themselves reload (the live-tab revival
+case); an everyone-reloaded mesh still rides the card path.
 
 Found by driving the full scenario in Chrome via agent-browse: seed two tabs,
 kill the producer, reconnect + newcomer. `AGENT_SHARE_DISCOVERY_DEADLINE_SECS`
@@ -52,14 +56,29 @@ goes: a full patient origin dial against a corpse, then the card wait, then
 the JSEP round — serial stages, each sized for the worst case, all paid on
 the happy path too.
 
-Levers, none needing fofoca changes: a reloaded seeder tab *knows* the
-origin from its sidecar era — pass the tight `originCapMs` the revival path
-already uses instead of the patient default; a tab re-armed from storage
-could render its tree offline immediately (the open item above) and let the
-mesh catch up underneath; and the newcomer's origin dial could concede as
-soon as the first vouching card lands instead of running its full budget —
-cards arriving are proof the share moved on. Worth re-measuring after each:
-the drill is reproducible end to end with the picker stubbed to OPFS.
+All three levers **landed 2026-08-07**, none needing fofoca changes: a tab
+whose localStorage holds a manifest locator gets `FORMER_SEEDER_ORIGIN_CAP_MS
+= 8 s` instead of the patient 30 s default; the page renders the tree
+offline from the persisted manifest (`ShareClient.peek_persisted_manifest` +
+the `offlineManifest` signal in the `connecting` phase) while the dial
+grinds; and the dynamic-mode origin dial concedes once the seeder lane sees
+a vouching card (`cards_seen` flag into `capped_origin_dial`, 5 s floor).
+The worst-case constants were also cut with the fofoca mitigations now in
+the pinned rev: card wait 45 → 12 s, channel wait 30 → 15 s (re-offer
+extracted to `reoffer_due`, still at wait/2), race deadline 60 → 35 s, web
+backoff ceilings 30 → 10 s.
+
+Re-measured in the 2026-08-07 drill (two seeded tabs + newcomer, producer
+SIGKILLed, real Chrome via agent-browse): a live tab whose connection was
+killed was **re-ready in 5 s** (noticed in ≤1 s, known-seeder redial won);
+a reloaded tab whose peers stayed alive reconnected in **2–9 s**; a fresh
+newcomer rendered and was ready in **38 s** (was ~80 s); and both-tabs
+-reloaded showed the tree in **~1 s** from the offline peek (was ~60 s of
+blank "connecting") with the byte lane ready at ~96 s — that last figure is
+fofoca's island-merge cadence (both identities re-minted, no `NeighborDown`
+for either), which no client change can cut; the client no longer stacks
+its own waits on top of it. The download-through-seeders zip completed
+(1.5 MB in ~2 s, stubbed picker).
 
 ## Fixed since: refreshed tabs resurrect a producer-less share
 
@@ -113,6 +132,20 @@ exactly the stall the probe guards. Reuse the waiting membership's hubs
 membership holds and mint the ghost roster entries the overnight-CPU entry
 already tracks. The swap is the risky half: reads in flight hold the old
 `Connection`, so the exchange needs a seam where nothing is mid-stream.
+
+## The mount lane's second identity exists to dodge one shared hub
+
+A waiting membership binds three endpoints — mesh, signal, mount — and two of
+them register on the relay. The separate mount identity is a workaround, and
+`produce.rs`'s `serve_signal` says so: a tab's mount lane and mesh lane share
+one `BrowserHubTransport`, so whichever lane reaches a peer first wins the
+session and the registry refuses the second. Splitting the hubs per lane
+(mount sessions in one, mesh sessions in the other) would let both lanes hold
+a session to the same peer under one identity — deleting the signal/mount
+endpoint pair, one relay registration per tab instead of two, and half the
+farewell that `WaitingMesh::retire` now performs. A refactor across
+`produce.rs`, the waiting-mesh setup and the JSEP attach paths, so it wants
+its own session.
 
 ## ICE restart needs transport renegotiation (fofoca-side)
 

@@ -757,6 +757,14 @@ const Session = component<{
    * peer are held back.
    */
   const reviving = signal(false)
+  /**
+   * The tree this tab last seeded, read from its own storage while the dial
+   * is still grinding. Rendered only inside the `connecting` phase — never a
+   * phase of its own, so every `phase === 'ready'` guard stays correct — and
+   * cleared the moment a live connection takes over. Browsing works; the two
+   * actions that need a peer stay disabled.
+   */
+  const offlineManifest = signal<Manifest | null>(null)
   /** Non-null while a host directory is mounted for this session. */
   const mountSession = signal<MountSession | null>(null)
   /**
@@ -902,6 +910,22 @@ const Session = component<{
   let pending = connect(props.ticket, props.transport, undefined, password)
   ctx.aborted.addEventListener('abort', () => release(props.ticket, props.transport, pending))
 
+  // A tab that seeded this share before can show its tree in about a second:
+  // the peek reads this tab's own fingerprint-checked sidecar, no peer
+  // involved. Best-effort and racing the dial on purpose — a fast connect
+  // flips the phase first and the result is simply never shown.
+  void loadWasm()
+    .then((wasm) => wasm.ShareClient.peek_persisted_manifest(props.ticket, password))
+    .then((manifest) => {
+      if (ctx.aborted.aborted || !manifest) return
+      if (state.peek().phase === 'connecting') {
+        offlineManifest.value = manifest as Manifest
+      }
+    })
+    .catch(() => {
+      // A malformed ticket fails the dial too, with a better message.
+    })
+
   // Announce departure while the page still exists. Without this the tab
   // lingers on every peer's roster until the silence sweeper evicts it —
   // which showed up immediately in testing as a share reporting more
@@ -933,6 +957,8 @@ const Session = component<{
     if (ctx.aborted.aborted) return
     path.value = prunePath(path.peek(), manifest)
     state.value = { phase: 'ready', client, manifest }
+    // The live tree owns the screen now; the peeked one has done its job.
+    offlineManifest.value = null
     // What survived a previous visit. Reads storage without creating any, so
     // a tab that only browses leaves nothing behind. Inside `bringUp` rather
     // than beside the first call, so a revived connection re-reads it too —
@@ -999,7 +1025,7 @@ const Session = component<{
         }
         console.debug('[agent-share] connect failed; retrying', error)
         await new Promise((resolve) => setTimeout(resolve, jittered(backoff)))
-        backoff = Math.min(backoff * 2, 30_000)
+        backoff = Math.min(backoff * 2, 10_000)
         release(props.ticket, props.transport, pending)
         pending = connect(props.ticket, props.transport, undefined, password)
       }
@@ -1105,11 +1131,12 @@ const Session = component<{
   /**
    * Steady-state retry ceiling. Attempts run forever, and each one costs a
    * mesh identity on the wasm side only until the waiting membership is
-   * established — after that, retries reuse it. 30 s keeps an hour of dead
-   * origin at ~120 polite attempts while still landing within one backoff of
-   * the mesh healing itself.
+   * established — after that, retries reuse it. With the wasm side's card
+   * wait cut to ~12 s, a 30 s gap between attempts would dominate the
+   * ladder; 10 s keeps the duty cycle near half while an hour of dead
+   * origin still costs only polite, membership-reusing attempts.
    */
-  const RECONNECT_BACKOFF_MAX_MS = 30_000
+  const RECONNECT_BACKOFF_MAX_MS = 10_000
 
   /**
    * Notice a connection that died while nothing was using it.
@@ -1303,6 +1330,38 @@ const Session = component<{
   yield () => {
     const current = state.value
     if (current.phase === 'connecting') {
+      const offline = offlineManifest.value
+      if (offline) {
+        // The tab's own copy, browsable while the dial grinds. The two
+        // actions that reach a peer stay disabled; everything else is local.
+        const offlineBuilt = buildTree(offline)
+        return (
+          <SessionChrome
+            crumb="connecting"
+            belowBar={
+              offlineBuilt.skipped > 0 ? (
+                <Text color="warning" class="selectable">
+                  {offlineBuilt.skipped} entries hidden — unsafe paths in the peer&apos;s
+                  manifest
+                </Text>
+              ) : null
+            }
+          >
+            <ColumnView
+              root={offlineBuilt.root}
+              path={path.value}
+              onPathChange={(next) => {
+                path.value = next
+              }}
+              onDownload={() => undefined}
+              downloadDisabled
+              held={held.value}
+              onSeed={() => undefined}
+              seedDisabled
+            />
+          </SessionChrome>
+        )
+      }
       return (
         <SessionChrome>
           <LoadingBody label="connecting…" />
