@@ -10,7 +10,7 @@
  * `scripts/wasm-asset.ts`.
  */
 
-import { wasmAsset, writeWasmPath } from './scripts/wasm-asset.ts'
+import { brotli, wasmAsset, writeWasmPath } from './scripts/wasm-asset.ts'
 
 await Bun.$`rm -rf dist`
 
@@ -35,8 +35,33 @@ if (!result.success) {
 // and `dist/` has to mirror it or a static host answers the app's fetch with
 // whatever its own not-found rule says — for an SPA, `index.html`.
 await Bun.write(`./dist${asset.path}`, asset.bytes)
+// Precompressed siblings for hosts (and `preview.ts`) that can serve them —
+// the binary is the connect path's largest download by an order of magnitude.
+await Bun.write(`./dist${asset.path}.br`, await brotli(asset.bytes))
+await Bun.write(`./dist${asset.path}.gz`, Bun.gzipSync(asset.bytes, { level: 9 }))
+
+// No `<link rel="preload">` for the binary, deliberately: Safari does not
+// match an `as="fetch"` preload to the glue's later `fetch()` (measured —
+// two resource-timing entries, `link` then `fetch`), so on a cold cache it
+// downloads the binary twice. The eager `loadWasm()` in `src/main.tsx`
+// starts the real fetch within ~25 ms of where the preload would, in every
+// browser, with nothing to mismatch.
+//
+// Bun writes chunk URLs relative to the page, but the SPA shell is served
+// for every route — under `/files/<ticket>` a `./chunk-…` resolves to
+// `/files/chunk-…` and 404s, which is a blank page. Absolute URLs cost
+// nothing and hold on any route depth. Lab keeps its `../` (it is only ever
+// served at `/lab`).
+{
+  const page = './dist/index.html'
+  const html = await Bun.file(page).text()
+  await Bun.write(
+    page,
+    html.replaceAll('src="./', 'src="/').replaceAll('href="./', 'href="/'),
+  )
+}
 
 for (const output of result.outputs) {
   console.log(`  ${output.path}`)
 }
-console.log(`  dist${asset.path}`)
+console.log(`  dist${asset.path} (+.br, +.gz)`)

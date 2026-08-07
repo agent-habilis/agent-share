@@ -38,6 +38,7 @@ import lab from './lab/index.html'
 import {
   tryWasmAsset,
   wasmResponse,
+  withGzip,
   writeWasmPath,
   WASM_SOURCE,
   type WasmAsset,
@@ -66,8 +67,10 @@ async function currentAsset(): Promise<WasmAsset | null> {
   }
   if (cached?.key === key) return cached.asset
   const asset = await tryWasmAsset()
-  cached = asset ? { key, asset } : null
-  return asset
+  // gzip, not brotli: ~2.5 MB instead of ~2 MB, but fast enough to pay on
+  // every rebuild. The production build precompresses brotli.
+  cached = asset ? { key, asset: withGzip(asset) } : null
+  return cached?.asset ?? null
 }
 
 /**
@@ -109,7 +112,9 @@ const server = Bun.serve({
     ),
     '/wasm/:name': async (req) => {
       const current = await currentAsset()
-      if (current && req.params.name === current.name) return wasmResponse(current)
+      if (current && req.params.name === current.name) {
+        return wasmResponse(current, req.headers.get('accept-encoding'))
+      }
       // Never fall through to the SPA shell here. A page asking for a hash we
       // do not have is stale, and saying so is worth more than 7 MB of the
       // wrong answer or 750 bytes of HTML.

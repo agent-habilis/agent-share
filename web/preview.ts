@@ -50,6 +50,29 @@ const server = Bun.serve({
       return new Response(distFile('/lab/index.html'))
     }
 
+    // The wasm negotiates its precompressed siblings, like a static host
+    // with precompressed-asset support would. `content-type` stays
+    // `application/wasm` so `instantiateStreaming` engages.
+    if (pathname.startsWith('/wasm/') && (await distFile(pathname).exists())) {
+      const accepted = req.headers.get('accept-encoding') ?? ''
+      const headers: Record<string, string> = {
+        'content-type': 'application/wasm',
+        'cache-control': 'public, max-age=31536000, immutable',
+        vary: 'accept-encoding',
+      }
+      for (const [token, suffix] of [
+        ['br', '.br'],
+        ['gzip', '.gz'],
+      ] as const) {
+        if (!new RegExp(`\\b${token}\\b`).test(accepted)) continue
+        const compressed = distFile(pathname + suffix)
+        if (!(await compressed.exists())) continue
+        headers['content-encoding'] = token
+        return new Response(compressed, { headers })
+      }
+      return new Response(distFile(pathname), { headers })
+    }
+
     const candidate = pathname === '/' ? '/index.html' : pathname
     const file = distFile(candidate)
     if (await file.exists()) {

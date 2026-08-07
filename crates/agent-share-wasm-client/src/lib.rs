@@ -29,7 +29,7 @@
 //! systems for one job. Under `dynamic` a failed ICE simply uses that relay for
 //! mount bytes; under `webrtc` it fails loudly.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -98,13 +98,20 @@ pub struct ShareClient {
     connection: Connection,
     token: [u8; SECRET_LEN],
     /// `"webrtc"` or `"relay"` — the path that actually carries mount bytes.
-    data_path: String,
+    ///
+    /// A shared cell because on a dynamic WebRTC connect the label is
+    /// provisional until path selection settles, and the settle happens in the
+    /// background join task *after* `connect` has already handed the client to
+    /// JS — the 3 s settle wait bought nothing but a label and does not belong
+    /// on the connect path. `info_json` prefers the live selected path anyway.
+    data_path: Rc<RefCell<String>>,
     /// Requested connect mode (`webrtc` / `relay` / `dynamic`).
     mount_mode: String,
     /// Why `dynamic` ended up on the relay, when it did. `None` on a clean
     /// connect. Surfaced on the info pane: a fallback that only warns to the
-    /// console is a fallback nobody can diagnose from the UI.
-    fallback_reason: Option<String>,
+    /// console is a fallback nobody can diagnose from the UI. Shared for the
+    /// same reason as `data_path`.
+    fallback_reason: Rc<RefCell<Option<String>>>,
     /// Relay URLs of the *signal* endpoint, captured before it moves into the
     /// mesh. The mount endpoint is relay-free on the WebRTC path, so this is
     /// the only place the rendezvous relay is still observable.
@@ -158,7 +165,34 @@ pub struct ShareClient {
     /// panic: `leave_mesh` takes `borrow_mut` and fires from `pagehide` or a
     /// revival at any moment. Cloning the `Rc` out first ends the borrow before
     /// the await, the same move [`Self::refresh_peer_ips`] makes with the hub.
-    mesh: RefCell<Option<Rc<mesh::MeshPeer>>>,
+    ///
+    /// Tri-state rather than `Option` because the join runs in a background
+    /// task after `connect` resolves: `Pending` means the join is (possibly)
+    /// still in flight, and `Left` records a client released *before* it
+    /// landed — the join task observes `Left` and leaves the fresh membership
+    /// instead of installing it, so a mid-join release cannot leak one.
+    mesh: Rc<RefCell<MeshSlot>>,
+    /// The last manifest fingerprint this client learned, kept so the
+    /// background join can publish `set_tree` even when the first manifest
+    /// fetch beat it — otherwise a browse-only tab's card would never carry a
+    /// tree and seeder vouching would regress.
+    last_tree: Rc<RefCell<Option<String>>>,
+    /// Whether the background join task still owes a `settled_path_label`
+    /// pass to firm up `data_path` / `fallback_reason`. Set only on the
+    /// dynamic WebRTC mount path; every other path knows its label at build.
+    settle_pending: bool,
+    /// A manifest already in hand when the client was built or shortly after,
+    /// consumed by the first [`Self::fetch_manifest`]. Two producers: the
+    /// seeder fallback, which fetches and vets a manifest to pick a winner
+    /// and used to throw it away (the App then re-paid a relay-hop RTT for
+    /// the same bytes), and an origin-path background prefetch issued the
+    /// moment the connection exists. Single-consume; a fetch that finds it
+    /// empty just fetches live.
+    prefetched_manifest: PrefetchedManifest,
+    /// Set once a live manifest fetch has answered; a prefetch landing after
+    /// that stays out of the cell so a later sync cannot consume bytes older
+    /// than what the client already saw.
+    manifest_fetched: Rc<Cell<bool>>,
     /// Bytes this tab holds, and can therefore seed.
     ///
     /// Opened on the first sync rather than at connect: a tab that only browses
@@ -204,9 +238,9 @@ fn new_share_client(
     ShareClient {
         connection,
         token,
-        data_path,
+        data_path: Rc::new(RefCell::new(data_path)),
         mount_mode: "dynamic".to_owned(),
-        fallback_reason: None,
+        fallback_reason: Rc::new(RefCell::new(None)),
         rendezvous_relays: Vec::new(),
         lookups: LookupOpts::public_preset(),
         connected_at_ms: now_ms(),
@@ -217,13 +251,32 @@ fn new_share_client(
         _session: session,
         mesh_endpoint,
         _endpoint: endpoint,
-        mesh: RefCell::new(None),
+        mesh: Rc::new(RefCell::new(MeshSlot::Pending)),
+        last_tree: Rc::new(RefCell::new(None)),
+        settle_pending: false,
+        prefetched_manifest: Rc::new(RefCell::new(None)),
+        manifest_fetched: Rc::new(Cell::new(false)),
         store: RefCell::new(None),
         held: RefCell::new(BTreeSet::new()),
         seeder: seed::SeederShared::new(),
         from_origin: true,
         pinned_tree: None,
     }
+}
+
+/// A manifest fetched ahead of the first request — see the field on
+/// [`ShareClient`].
+type PrefetchedManifest = Rc<RefCell<Option<(Vec<u8>, MountManifest)>>>;
+
+/// This tab's relationship to the share's mesh — see the `mesh` field.
+enum MeshSlot {
+    /// No membership yet; the background join may still install one.
+    Pending,
+    /// Joined; the peer is live.
+    Joined(Rc<mesh::MeshPeer>),
+    /// The client let go (release, ticket change, shutdown). A join landing
+    /// now must leave rather than install.
+    Left,
 }
 
 #[wasm_bindgen]
@@ -315,12 +368,75 @@ impl ShareClient {
             TransportMode::WebRtc => {
                 connect_webrtc(ticket, token, /*allow_relay_fallback=*/ false).await
             }
+            // Race the lanes rather than sequencing them. Sequenced, a dead
+            // origin cost the whole dial cap before card collection even
+            // began; raced, a dead-origin connect is bounded by card
+            // collection alone. The head start keeps healthy shares out of
+            // the race — a live origin answers well inside it — and the
+            // waiting membership the seeder lane builds persists in
+            // [`WAITING_MESHES`] either way, so a lost race costs no
+            // identity churn.
             TransportMode::Dynamic => {
-                capped_origin_dial(
+                let origin = Box::pin(capped_origin_dial(
                     Box::pin(connect_webrtc(ticket, token, /*allow_relay_fallback=*/ true)),
                     cap_ms,
-                )
-                .await
+                ));
+                let race_ticket = fallback_ticket.clone();
+                let race_card = card.clone();
+                let race_password = mesh_password.clone();
+                let seeder = Box::pin(async move {
+                    wait_ms(SEEDER_RACE_HEAD_START_MS).await;
+                    let origin_status = JsValue::from_str(
+                        "the origin had not answered when the seeder lane started",
+                    );
+                    connect_via_seeder(
+                        race_ticket,
+                        auth,
+                        race_password.as_deref(),
+                        race_card,
+                        &origin_status,
+                    )
+                    .await
+                });
+                match futures::future::select(origin, seeder).await {
+                    // Origin won: drop the seeder attempt mid-flight. Its
+                    // waiting membership persists by design, and the join
+                    // task below says goodbye to the duplicate.
+                    futures::future::Either::Left((Ok(client), _seeder)) => Ok(client),
+                    // Origin is dead; the seeder lane is already warm.
+                    futures::future::Either::Left((Err(origin_error), seeder)) => {
+                        match seeder.await {
+                            Ok(mut client) => {
+                                client.mount_mode = mode.as_str().to_owned();
+                                return Ok(client);
+                            }
+                            Err(seeder_error) => Err(JsValue::from_str(&format!(
+                                "{} (origin: {})",
+                                describe(&seeder_error),
+                                describe(&origin_error),
+                            ))),
+                        }
+                    }
+                    // Seeder won: the dropped origin dial aborts
+                    // un-`close()`d, exactly as the cap timeout always did.
+                    futures::future::Either::Right((Ok(mut client), _origin)) => {
+                        client.mount_mode = mode.as_str().to_owned();
+                        return Ok(client);
+                    }
+                    // The seeder lane failed early (no relay in the ticket,
+                    // no vouching cards); the origin may still answer. No
+                    // second sequential seeder pass: the App retries connect,
+                    // and the next attempt's lane reuses the warm membership.
+                    futures::future::Either::Right((Err(seeder_error), origin)) => {
+                        origin.await.map_err(|origin_error| {
+                            JsValue::from_str(&format!(
+                                "{} (seeder lane: {})",
+                                describe(&origin_error),
+                                describe(&seeder_error),
+                            ))
+                        })
+                    }
+                }
             }
         };
         let mut client = match dialed {
@@ -328,9 +444,10 @@ impl ShareClient {
             // The origin is unreachable — dead, or gone from the relay. The
             // share does not have to be: every holder of this link is on the
             // mesh it derives, and a peer whose card vouches for the tree can
-            // serve it. `webrtc` mode is exempt on purpose: it exists to pin
-            // the transport for tests, and the seeder lane rides the relay.
-            Err(origin_error) if !matches!(mode, TransportMode::WebRtc) => {
+            // serve it. Reached from `relay` mode only — `webrtc` mode exists
+            // to pin the transport for tests (and the seeder lane rides the
+            // relay), and `dynamic` already raced the seeder lane above.
+            Err(origin_error) if matches!(mode, TransportMode::Relay) => {
                 let mut client =
                     connect_via_seeder(
                         fallback_ticket,
@@ -351,16 +468,24 @@ impl ShareClient {
         // Join the share's mesh so this tab can see — and hold direct sessions
         // with — the other people viewing the same share. Strictly additive:
         // a mesh that will not start costs the peer counts and nothing else,
-        // so it must never turn a working share into a failed connect.
+        // so it must never turn a working share into a failed connect — and,
+        // since it is additive, it runs in the background instead of holding
+        // the connect (its relay work cost real time on the critical path).
         let shared = client
             .mesh_endpoint
             .take()
             .map(|shared| (shared.endpoint, shared.webrtc));
-        let card = match card.as_ref() {
-            Some(value) => {
-                mesh::parse_card_parts(value, &client.data_path, Some("consumer".to_owned()))?
+        // Parsed eagerly so a malformed card from JS still fails the connect,
+        // with the provisional transport label; the settle below patches it.
+        let mut card = match card.as_ref() {
+            Some(value) => mesh::parse_card_parts(
+                value,
+                &client.data_path.borrow(),
+                Some("consumer".to_owned()),
+            )?,
+            None => {
+                mesh::default_card_parts(&client.data_path.borrow(), Some("consumer".to_owned()))
             }
-            None => mesh::default_card_parts(&client.data_path, Some("consumer".to_owned())),
         };
         // The serving half of seeding: this viewer answers the share's own
         // ALPNs on the mesh Router, exactly the producer's shape. The mount
@@ -382,35 +507,91 @@ impl ShareClient {
                 )),
             ));
         }
-        match mesh::MeshPeer::join_share(
-            resolved_mesh,
-            shared,
-            protocols,
-            card,
-        )
-        .await
-        {
-            Ok(peer) => *client.mesh.borrow_mut() = Some(Rc::new(peer)),
-            Err(error) => {
-                web_sys::console::warn_1(&JsValue::from_str(&format!(
-                    "[share] mesh unavailable; peer counts disabled: {error:?}"
-                )));
+        let connection = client.connection.clone();
+        let data_path = Rc::clone(&client.data_path);
+        let fallback_reason = Rc::clone(&client.fallback_reason);
+        let mesh_slot = Rc::clone(&client.mesh);
+        let last_tree = Rc::clone(&client.last_tree);
+        let settle_pending = client.settle_pending;
+        wasm_bindgen_futures::spawn_local(async move {
+            // Firm up the path label first: the card should advertise what the
+            // mount actually selected, and the settle wait no longer holds the
+            // connect. On a relay-free endpoint there is nothing to settle on
+            // *but* WebRTC, so a different answer is a "selection never
+            // settled" report, not a lost race.
+            if settle_pending {
+                let selected = settled_path_label(&connection).await;
+                if let Some(label) = selected.clone() {
+                    *data_path.borrow_mut() = label;
+                }
+                if selected.as_deref() != Some("webrtc") {
+                    *fallback_reason.borrow_mut() = Some(format!(
+                        "the mount reported {} rather than WebRTC on a relay-free endpoint",
+                        selected
+                            .as_deref()
+                            .unwrap_or("no path before the settle deadline"),
+                    ));
+                }
+                card.transport = data_path.borrow().clone();
             }
-        }
-        // The origin answered, so this connect joined on the shared endpoint —
-        // a membership left waiting by earlier dead-origin attempts is now a
-        // duplicate identity and says goodbye.
-        let waiting =
-            WAITING_MESHES.with(|meshes| meshes.borrow_mut().remove(&share_mesh_key(&token)));
-        if let Some(waiting) = waiting {
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Err(error) = waiting.peer.leave().await {
-                    web_sys::console::debug_1(&JsValue::from_str(&format!(
-                        "[share] leaving the waiting membership failed: {error:?}"
+            match mesh::MeshPeer::join_share(resolved_mesh, shared, protocols, card).await {
+                Ok(peer) => {
+                    let peer = Rc::new(peer);
+                    let install = {
+                        let mut slot = mesh_slot.borrow_mut();
+                        match &*slot {
+                            MeshSlot::Left => false,
+                            MeshSlot::Pending | MeshSlot::Joined(_) => {
+                                *slot = MeshSlot::Joined(Rc::clone(&peer));
+                                true
+                            }
+                        }
+                    };
+                    if install {
+                        // The first manifest fetch may have beaten the join;
+                        // publish the tree it recorded.
+                        let tree = last_tree.borrow().clone();
+                        if let Some(tree) = tree {
+                            peer.set_tree(tree).await;
+                        }
+                    } else {
+                        // Released mid-join (ticket change, retire): say
+                        // goodbye instead of installing a leaked membership.
+                        let _ = peer.leave().await;
+                    }
+                }
+                Err(error) => {
+                    web_sys::console::warn_1(&JsValue::from_str(&format!(
+                        "[share] mesh unavailable; peer counts disabled: {error:?}"
                     )));
                 }
-            });
-        }
+            }
+            // The origin answered, so this connect joined on the shared
+            // endpoint — a membership left waiting by earlier dead-origin
+            // attempts is now a duplicate identity and says goodbye.
+            let waiting =
+                WAITING_MESHES.with(|meshes| meshes.borrow_mut().remove(&share_mesh_key(&token)));
+            if let Some(waiting) = waiting
+                && let Err(error) = waiting.peer.leave().await
+            {
+                web_sys::console::debug_1(&JsValue::from_str(&format!(
+                    "[share] leaving the waiting membership failed: {error:?}"
+                )));
+            }
+        });
+        // Prefetch the manifest so the page's first call skips its round
+        // trip. Best-effort: a failure here surfaces on the real fetch, with
+        // its password re-labelling intact.
+        let prefetch_connection = client.connection.clone();
+        let prefetch_cell = Rc::clone(&client.prefetched_manifest);
+        let manifest_fetched = Rc::clone(&client.manifest_fetched);
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(pair) = fetch_manifest_on(&prefetch_connection, &token).await
+                && !manifest_fetched.get()
+            {
+                *prefetch_cell.borrow_mut() = Some(pair);
+            }
+        });
         Ok(client)
     }
 
@@ -446,11 +627,7 @@ impl ShareClient {
         // `&Arc`, and holding that reference would keep this `RefCell` borrowed
         // across every `await` in the sweep — which is the borrow `leave_mesh`
         // would then collide with, moving the panic rather than removing it.
-        let mesh_hub = self
-            .mesh
-            .borrow()
-            .as_ref()
-            .map(|peer| Arc::clone(peer.hub()));
+        let mesh_hub = self.mesh_peer().map(|peer| Arc::clone(peer.hub()));
         let hubs = [mesh_hub, self._hub.clone()];
         for hub in hubs.into_iter().flatten() {
             for id in hub.live_peer_ids() {
@@ -544,10 +721,7 @@ impl ShareClient {
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn peers_gossip(&self) -> u32 {
-        self.mesh
-            .borrow()
-            .as_ref()
-            .map_or(0, |peer| peer.peers_gossip())
+        self.mesh_peer().map_or(0, |peer| peer.peers_gossip())
     }
 
     /// Peers we hold a direct `WebRTC` data channel with.
@@ -568,10 +742,7 @@ impl ShareClient {
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn max_direct(&self) -> u32 {
-        self.mesh
-            .borrow()
-            .as_ref()
-            .map_or(0, |peer| peer.max_direct())
+        self.mesh_peer().map_or(0, |peer| peer.max_direct())
     }
 
     /// Leave the share's mesh, announcing departure so peers drop us now.
@@ -600,7 +771,11 @@ impl ShareClient {
     /// here panicked wasm-bindgen's borrow guard whenever a revival dropped
     /// this client while one of its async methods was still pending.
     pub fn leave_mesh(&self) {
-        let Some(peer) = self.mesh.borrow_mut().take() else {
+        // `Pending` → `Left` covers a client released before its background
+        // join landed: the join task observes `Left` and leaves the fresh
+        // membership itself.
+        let previous = std::mem::replace(&mut *self.mesh.borrow_mut(), MeshSlot::Left);
+        let MeshSlot::Joined(peer) = previous else {
             return;
         };
         // A dead-origin client *shares* its membership with the waiting-mesh
@@ -630,7 +805,8 @@ impl ShareClient {
     pub fn shutdown_mesh(&self) {
         WAITING_MESHES
             .with(|meshes| meshes.borrow_mut().remove(&share_mesh_key(&self.token)));
-        let Some(peer) = self.mesh.borrow_mut().take() else {
+        let previous = std::mem::replace(&mut *self.mesh.borrow_mut(), MeshSlot::Left);
+        let MeshSlot::Joined(peer) = previous else {
             return;
         };
         wasm_bindgen_futures::spawn_local(async move {
@@ -642,7 +818,7 @@ impl ShareClient {
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn transport(&self) -> String {
-        self.data_path.clone()
+        self.data_path.borrow().clone()
     }
 
     /// Has the mount connection gone away?
@@ -700,17 +876,24 @@ impl ShareClient {
     /// taken over what the producer actually served, so both sides hash the
     /// same thing rather than trusting a re-encode to be canonical.
     async fn fetch_manifest(&self) -> Result<(Vec<u8>, MountManifest), JsValue> {
-        let (bytes, manifest) = match fetch_manifest_on(&self.connection, &self.token).await {
-            Ok(pair) => pair,
-            // The first request is where a refused credential surfaces: the
-            // dial succeeds, and the producer only reads the token when the
-            // stream header arrives. Re-label it so the page re-prompts for a
-            // password instead of reporting a broken share.
-            Err(error) if unauthorized_close(&self.connection) => {
-                return Err(unauthorized(&describe(&error)));
-            }
-            Err(error) => return Err(error),
+        let prefetched = self.prefetched_manifest.borrow_mut().take();
+        let (bytes, manifest) = match prefetched {
+            // Already in hand — the seeder fallback's vetted pair, or the
+            // origin prefetch. Skips a round trip, not any check below.
+            Some(pair) => pair,
+            None => match fetch_manifest_on(&self.connection, &self.token).await {
+                Ok(pair) => pair,
+                // The first request is where a refused credential surfaces: the
+                // dial succeeds, and the producer only reads the token when the
+                // stream header arrives. Re-label it so the page re-prompts for
+                // a password instead of reporting a broken share.
+                Err(error) if unauthorized_close(&self.connection) => {
+                    return Err(unauthorized(&describe(&error)));
+                }
+                Err(error) => return Err(error),
+            },
         };
+        self.manifest_fetched.set(true);
         // Origin authority, enforced rather than assumed: a seeder was vetted
         // against one tree and answers for that tree only. Only the origin —
         // TLS-proven by dialing the ticket's endpoint id — may change it.
@@ -722,15 +905,16 @@ impl ShareClient {
                 ));
             }
         }
-        // The card could not carry a tree at join — `join_share` runs from the
-        // constructor, before this — so publish it now that we know one.
+        // The card could not carry a tree at join — the join runs in the
+        // background, possibly after this — so record the fingerprint where
+        // the join task can find it, and publish now if the mesh is up.
         //
         // Cloned out of the cell, not borrowed across the await below: see the
         // note on the `mesh` field.
-        let mesh = self.mesh.borrow().clone();
-        if let Some(mesh) = mesh {
-            mesh.set_tree(agent_share_proto::manifest::manifest_fingerprint(&bytes))
-                .await;
+        let fingerprint = agent_share_proto::manifest::manifest_fingerprint(&bytes);
+        *self.last_tree.borrow_mut() = Some(fingerprint.clone());
+        if let Some(mesh) = self.mesh_peer() {
+            mesh.set_tree(fingerprint).await;
         }
         Ok((bytes, manifest))
     }
@@ -973,16 +1157,14 @@ impl ShareClient {
     /// manifest it indexes into, so a `serving` set published against the wrong
     /// tree would send readers to the wrong files.
     async fn publish_serving(&self, manifest_bytes: &[u8], manifest: &MountManifest) {
+        let fingerprint = agent_share_proto::manifest::manifest_fingerprint(manifest_bytes);
+        *self.last_tree.borrow_mut() = Some(fingerprint.clone());
         // Cloned out of the cell, not borrowed across the two awaits below:
         // see the note on the `mesh` field.
-        let mesh = self.mesh.borrow().clone();
-        let Some(mesh) = mesh else {
+        let Some(mesh) = self.mesh_peer() else {
             return;
         };
-        mesh.set_tree(agent_share_proto::manifest::manifest_fingerprint(
-            manifest_bytes,
-        ))
-        .await;
+        mesh.set_tree(fingerprint).await;
         let held: Vec<u32> = self.held.borrow().iter().copied().collect();
         mesh.set_serving(agent_share_proto::serving::encode_serving(
             &held,
@@ -1093,7 +1275,7 @@ impl ShareClient {
             on_status.as_ref(),
             &serde_json::json!({
                 "stage": "connected",
-                "transport": client.data_path,
+                "transport": client.data_path.borrow().clone(),
                 "connect_ms": connect_ms,
             }),
         );
@@ -1107,7 +1289,7 @@ impl ShareClient {
         let measured = measure_window(&client, duration_ms, on_status.as_ref()).await?;
 
         let report = BenchReport {
-            transport: client.data_path.clone(),
+            transport: client.data_path.borrow().clone(),
             connect_ms,
             duration_s: measured.duration_s,
             latency_ms: measured.latency_ms,
@@ -1122,11 +1304,21 @@ impl ShareClient {
 }
 
 impl ShareClient {
+    /// The mesh peer, when joined. `Pending`/`Left` read as "no mesh", the
+    /// same answer `None` used to give.
+    fn mesh_peer(&self) -> Option<Rc<mesh::MeshPeer>> {
+        match &*self.mesh.borrow() {
+            MeshSlot::Joined(peer) => Some(Rc::clone(peer)),
+            MeshSlot::Pending | MeshSlot::Left => None,
+        }
+    }
+
     fn info_json(&self) -> serde_json::Value {
         let producer = self.connection.remote_id().to_string();
         let local = self._endpoint.id().to_string();
-        let mesh_up = self.mesh.borrow().is_some();
-        let nickname = self.mesh.borrow().as_ref().map(|m| m.nickname());
+        let mesh = self.mesh_peer();
+        let mesh_up = mesh.is_some();
+        let nickname = mesh.as_ref().map(|m| m.nickname());
         let peers_gossip = self.peers_gossip();
         let peers_direct = self.peers_direct();
         let max_direct = self.max_direct();
@@ -1138,8 +1330,8 @@ impl ShareClient {
         // Live, not the connect-time snapshot: iroh re-selects when a path
         // opens or is abandoned, and a pane that froze its answer would keep
         // asserting a path the connection had already left.
-        let live_path =
-            selected_path_label(&self.connection).unwrap_or_else(|| self.data_path.clone());
+        let live_path = selected_path_label(&self.connection)
+            .unwrap_or_else(|| self.data_path.borrow().clone());
         let relay_urls: Vec<String> = if self.rendezvous_relays.is_empty() {
             self._endpoint
                 .addr()
@@ -1183,7 +1375,7 @@ impl ShareClient {
                 "mount_mode": self.mount_mode,
                 "mount_path": live_path,
                 "mount_paths": path_labels(&self.connection),
-                "mount_fallback_reason": self.fallback_reason,
+                "mount_fallback_reason": self.fallback_reason.borrow().clone(),
                 "link": self.link_snapshot(),
             },
         })
@@ -1205,9 +1397,7 @@ impl ShareClient {
     /// counted twice, since it can appear in either hub.
     fn direct_peer_ids(&self) -> HashSet<String> {
         let mut ids: HashSet<String> = self
-            .mesh
-            .borrow()
-            .as_ref()
+            .mesh_peer()
             .map(|mesh| {
                 mesh.hub()
                     .live_peer_ids()
@@ -1231,10 +1421,11 @@ impl ShareClient {
             local,
             env!("CARGO_PKG_VERSION"),
             "browser",
-            &self.data_path,
+            self.data_path.borrow().clone(),
             Some("consumer".to_owned()),
         );
-        let card_for = |id: &str| self.mesh.borrow().as_ref().and_then(|m| m.card_for(id));
+        let mesh = self.mesh_peer();
+        let card_for = |id: &str| mesh.as_ref().and_then(|m| m.card_for(id));
         let peer_row = |id: &str,
                         role: &str,
                         flags: String,
@@ -1285,13 +1476,14 @@ impl ShareClient {
             })
         };
 
+        let data_path = self.data_path.borrow().clone();
         let mut rows = Vec::new();
         let (local_ip, local_ip_kind) = cache.get(local).cloned().unwrap_or((None, None));
         rows.push(peer_row(
             local,
             "self",
             "*".to_owned(),
-            &self.data_path,
+            &data_path,
             local_ip,
             local_ip_kind,
         ));
@@ -1310,7 +1502,7 @@ impl ShareClient {
             producer,
             "producer",
             flags,
-            &self.data_path,
+            &data_path,
             ip,
             ip_kind,
         ));
@@ -1336,8 +1528,7 @@ impl ShareClient {
 
         // Gossip-only members publish meta cards but may never open a direct
         // hub session — still show them so the Peers list matches the roster.
-        let mesh_ref = self.mesh.borrow();
-        if let Some(mesh) = mesh_ref.as_ref() {
+        if let Some(mesh) = mesh.as_ref() {
             for card in mesh.known_cards() {
                 if !seen.insert(card.endpoint.clone()) {
                     continue;
@@ -1816,6 +2007,15 @@ thread_local! {
 /// pins the lane for tests and keeps failing at its own pace.
 const ORIGIN_DIAL_CAP_MS: i32 = 30_000;
 
+/// How long the origin dial runs alone before the seeder lane joins the race
+/// (`dynamic` mode).
+///
+/// Long enough that a healthy origin — which answers in a second or two now
+/// that ICE settles early — never sees a racing lane at all; short enough
+/// that a dead origin costs three seconds rather than the whole
+/// [`ORIGIN_DIAL_CAP_MS`] before card collection begins.
+const SEEDER_RACE_HEAD_START_MS: i32 = 3_000;
+
 /// Race an origin dial against [`ORIGIN_DIAL_CAP_MS`].
 ///
 /// On timeout the dial future is dropped — its endpoints abort un-`close()`d,
@@ -2139,13 +2339,18 @@ async fn connect_via_seeder(
                                 client.connected_at_ms = now_ms();
                                 client.from_origin = false;
                                 client.pinned_tree = Some(majority.clone());
-                                client.fallback_reason = Some(format!(
+                                *client.fallback_reason.borrow_mut() = Some(format!(
                                     "origin unreachable ({}); reading from seeder {} over the                                      relay (data channel failed the bulk probe)",
                                     describe(origin_error),
                                     &candidate.endpoint[..8.min(candidate.endpoint.len())],
                                 ));
                                 client.seeder = waiting.seeder.clone();
-                                *client.mesh.borrow_mut() = Some(Rc::clone(&waiting.peer));
+                                *client.mesh.borrow_mut() =
+                                    MeshSlot::Joined(Rc::clone(&waiting.peer));
+                                // The vetting fetch already paid for these
+                                // bytes; the first manifest call reuses them.
+                                *client.prefetched_manifest.borrow_mut() =
+                                    Some((bytes, manifest));
                                 return Ok(client);
                             }
                             Ok(bad) => {
@@ -2190,7 +2395,7 @@ async fn connect_via_seeder(
                 client.connected_at_ms = now_ms();
                 client.from_origin = false;
                 client.pinned_tree = Some(majority.clone());
-                client.fallback_reason = Some(format!(
+                *client.fallback_reason.borrow_mut() = Some(format!(
                     "origin unreachable ({}); reading from seeder {}",
                     describe(origin_error),
                     &candidate.endpoint[..8.min(candidate.endpoint.len())],
@@ -2201,7 +2406,10 @@ async fn connect_via_seeder(
                 // revival (the upgrade watcher's included) must reuse them —
                 // a fresh identity per redial would drop every channel it
                 // just built. `leave_mesh` is what finally purges it.
-                *client.mesh.borrow_mut() = Some(Rc::clone(&waiting.peer));
+                *client.mesh.borrow_mut() = MeshSlot::Joined(Rc::clone(&waiting.peer));
+                // The vetting fetch already paid for these bytes; the first
+                // manifest call reuses them instead of re-paying the RTT.
+                *client.prefetched_manifest.borrow_mut() = Some((bytes, manifest));
                 return Ok(client);
             }
             Ok(_) => {
@@ -2640,27 +2848,33 @@ async fn connect_webrtc(
     // `peers_direct` unions the two so the count stays honest.
     let mesh_hub = BrowserHubTransport::new(local);
     let mesh_handle = WebRtcHandle::new(Arc::clone(&mesh_hub));
-    let signal_endpoint = Endpoint::builder(presets::Minimal)
-        .secret_key(key.clone())
-        .relay_mode(relay_mode(&ticket))
-        .add_custom_transport(mesh_handle.transport())
-        .path_selector(mesh_handle.path_selector())
-        .bind()
-        .await
-        .map_err(|error| err("bind signal endpoint", &error))?;
+    let signal_bind = async {
+        Endpoint::builder(presets::Minimal)
+            .secret_key(key.clone())
+            .relay_mode(relay_mode(&ticket))
+            .add_custom_transport(mesh_handle.transport())
+            .path_selector(mesh_handle.path_selector())
+            .bind()
+            .await
+            .map_err(|error| err("bind signal endpoint", &error))
+    };
 
     let hub = BrowserHubTransport::new(local);
     let handle = WebRtcHandle::new(Arc::clone(&hub));
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .secret_key(key)
-        // No relay, deliberately: this endpoint's whole purpose is to have no
-        // path to lose the mount dial to.
-        .relay_mode(RelayMode::Disabled)
-        .add_custom_transport(handle.transport())
-        .path_selector(handle.path_selector())
-        .bind()
-        .await
-        .map_err(|error| err("bind mount endpoint", &error))?;
+    let mount_bind = async {
+        Endpoint::builder(presets::Minimal)
+            .secret_key(key.clone())
+            // No relay, deliberately: this endpoint's whole purpose is to have
+            // no path to lose the mount dial to.
+            .relay_mode(RelayMode::Disabled)
+            .add_custom_transport(handle.transport())
+            .path_selector(handle.path_selector())
+            .bind()
+            .await
+            .map_err(|error| err("bind mount endpoint", &error))
+    };
+    // Nothing links the two binds but the shared key, so they run together.
+    let (signal_endpoint, endpoint) = futures::future::try_join(signal_bind, mount_bind).await?;
 
     // JSEP on the signal endpoint, attached into the *mount* endpoint's hub.
     // Decoupling those two is the point: the producer keys the session by the
@@ -2689,23 +2903,35 @@ async fn connect_webrtc(
         EndpointAddr::from_parts(producer, [TransportAddr::Custom(custom_addr(producer))]);
     match endpoint.connect(webrtc_only, MOUNT_ALPN).await {
         Ok(connection) => {
+            // Pinned webrtc mode settles inline: it exists to *prove* the
+            // transport for tests and bench, so it must not resolve before
+            // the selected path is known. Dynamic mode defers the settle to
+            // the background join task — on a relay-free, IP-free endpoint
+            // there is nothing to settle on but WebRTC, so `"webrtc"` is a
+            // provisional label rather than the old unconditional guess, and
+            // the 3 s settle wait comes off the connect path.
+            //
             // The *selected* path, not "is a WebRTC path present". Scanning
             // every path with `any()` answered a different question than the
             // one that matters — a connection can hold a WebRTC path it does
             // not send on — so it could report `webrtc` while the relay
             // carried the bytes, and the reverse.
-            let selected = settled_path_label(&connection).await;
-            let on_webrtc = selected.as_deref() == Some("webrtc");
-            if !on_webrtc && !allow_relay_fallback {
-                let observed = path_labels(&connection);
-                endpoint.close().await;
-                signal_endpoint.close().await;
-                return Err(JsValue::from_str(&format!(
-                    "mount connected but selected {} rather than WebRTC (paths={observed:?}), \
-                     and webrtc mode forbids a fallback",
-                    selected.as_deref().unwrap_or("no path"),
-                )));
-            }
+            let data_path = if allow_relay_fallback {
+                "webrtc".to_owned()
+            } else {
+                let selected = settled_path_label(&connection).await;
+                if selected.as_deref() != Some("webrtc") {
+                    let observed = path_labels(&connection);
+                    endpoint.close().await;
+                    signal_endpoint.close().await;
+                    return Err(JsValue::from_str(&format!(
+                        "mount connected but selected {} rather than WebRTC (paths={observed:?}), \
+                         and webrtc mode forbids a fallback",
+                        selected.as_deref().unwrap_or("no path"),
+                    )));
+                }
+                "webrtc".to_owned()
+            };
             // Captured before the endpoint moves into the mesh below.
             let rendezvous_relays: Vec<String> = signal_endpoint
                 .addr()
@@ -2715,9 +2941,7 @@ async fn connect_webrtc(
             let mut client = new_share_client(
                 connection,
                 token,
-                // Report what was actually selected. Previously this said
-                // "webrtc" unconditionally on this path, which was a guess.
-                selected.clone().unwrap_or_else(|| "relay".to_owned()),
+                data_path,
                 Some(hub),
                 Some(session),
                 // The mesh rides the *signal* endpoint, the one with a relay to
@@ -2729,17 +2953,7 @@ async fn connect_webrtc(
                 endpoint,
             );
             client.rendezvous_relays = rendezvous_relays;
-            if !on_webrtc {
-                // With no relay and no IP on this endpoint there is nothing for
-                // the mount to settle on *but* WebRTC, so this is now a
-                // "selection never settled" report rather than a lost race.
-                client.fallback_reason = Some(format!(
-                    "the mount reported {} rather than WebRTC on a relay-free endpoint",
-                    selected
-                        .as_deref()
-                        .unwrap_or("no path before the settle deadline"),
-                ));
-            }
+            client.settle_pending = allow_relay_fallback;
             Ok(client)
         }
         Err(error) if allow_relay_fallback => {
@@ -2768,7 +2982,7 @@ async fn finish_relay_fallback(
         .connect(ticket.addr.clone(), MOUNT_ALPN)
         .await
         .map_err(|error| err("dial the mount ALPN over iroh relay/IP (fallback)", &error))?;
-    let mut client = new_share_client(
+    let client = new_share_client(
         connection,
         token,
         "relay".to_owned(),
@@ -2777,7 +2991,7 @@ async fn finish_relay_fallback(
         None,
         endpoint,
     );
-    client.fallback_reason = Some(reason);
+    *client.fallback_reason.borrow_mut() = Some(reason);
     Ok(client)
 }
 
@@ -2814,22 +3028,33 @@ async fn negotiate(
             remote: producer_id,
         });
     }
-    let conn = endpoint
-        .connect(producer, WEBRTC_SIGNAL_ALPN)
-        .await
-        .map_err(|error| err("dial the signal ALPN", &error))?;
-    let (mut send, mut recv) = conn
-        .open_bi()
-        .await
-        .map_err(|error| err("open signal stream", &error))?;
-
+    // The relay dial and the offer are independent — the offer needs only
+    // `local` and `ice` — so the dial's latency hides inside ICE gathering.
+    // If the dial loses the race with an error, dropping the offer future
+    // closes its in-flight RTCPeerConnection (fofoca's pending offer arms a
+    // close-on-drop guard), so nothing leaks.
+    let dial = async {
+        let conn = endpoint
+            .connect(producer, WEBRTC_SIGNAL_ALPN)
+            .await
+            .map_err(|error| err("dial the signal ALPN", &error))?;
+        let streams = conn
+            .open_bi()
+            .await
+            .map_err(|error| err("open signal stream", &error))?;
+        Ok((conn, streams))
+    };
     // STUN only — TURN is refused by policy; the iroh relay is this
     // project's relay, and running a second one at the ICE layer would mean
     // operating two systems for one job.
     let ice = IceServers::default();
-    let (pending, offer) = browser_offer(local, &ice)
-        .await
-        .map_err(|error| js_stage("build offer", error))?;
+    let build_offer = async {
+        browser_offer(local, &ice)
+            .await
+            .map_err(|error| js_stage("build offer", error))
+    };
+    let ((conn, (mut send, mut recv)), (pending, offer)) =
+        futures::future::try_join(dial, build_offer).await?;
     let encoded = serde_json::to_vec(&offer).map_err(|error| err("encode offer", &error))?;
     send.write_all(&encoded)
         .await

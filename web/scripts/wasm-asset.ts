@@ -55,6 +55,10 @@ export interface WasmAsset {
   name: string
   /** Absolute URL path the app fetches. */
   path: string
+  /** Precompressed bodies, when a caller attached them — the binary is ~7 MB
+   * raw and ~2 MB compressed, and that difference sits on the connect path. */
+  br?: Uint8Array
+  gz?: Uint8Array
 }
 
 /**
@@ -101,21 +105,58 @@ export async function wasmAsset(): Promise<WasmAsset> {
   return asset
 }
 
+/** Attach a gzip body — cheap enough to run on every dev rebuild. */
+export function withGzip(asset: WasmAsset): WasmAsset {
+  asset.gz = Bun.gzipSync(asset.bytes, { level: 6 })
+  return asset
+}
+
 /**
- * The binary as an HTTP response.
+ * Brotli at build quality. Seconds, not milliseconds, on a 7 MB binary —
+ * which is why only `build.ts` calls it, once, and the dev server settles for
+ * gzip.
+ */
+export async function brotli(bytes: Uint8Array): Promise<Uint8Array> {
+  const { brotliCompressSync, constants } = await import('node:zlib')
+  return new Uint8Array(
+    brotliCompressSync(bytes, {
+      params: {
+        [constants.BROTLI_PARAM_QUALITY]: 10,
+        [constants.BROTLI_PARAM_SIZE_HINT]: bytes.length,
+      },
+    }),
+  )
+}
+
+/**
+ * The binary as an HTTP response, negotiated against `accept-encoding`.
  *
  * Shared so the headers are stated once. The cache directive is only safe
  * because of the hash in the URL, and that pairing is easier to keep true in
- * one place than in every server that serves the file.
+ * one place than in every server that serves the file. `content-type` stays
+ * `application/wasm` whatever the encoding, so `instantiateStreaming` still
+ * engages in the glue.
  */
-export function wasmResponse(asset: WasmAsset): Response {
-  return new Response(asset.bytes, {
-    headers: {
-      'content-type': 'application/wasm',
-      // Safe to cache hard: the URL changes when the bytes do.
-      'cache-control': 'public, max-age=31536000, immutable',
-    },
-  })
+export function wasmResponse(
+  asset: WasmAsset,
+  acceptEncoding?: string | null,
+): Response {
+  const headers: Record<string, string> = {
+    'content-type': 'application/wasm',
+    // Safe to cache hard: the URL changes when the bytes do.
+    'cache-control': 'public, max-age=31536000, immutable',
+    vary: 'accept-encoding',
+  }
+  const accepted = acceptEncoding ?? ''
+  let body = asset.bytes
+  if (asset.br && /\bbr\b/.test(accepted)) {
+    body = asset.br
+    headers['content-encoding'] = 'br'
+  } else if (asset.gz && /\bgzip\b/.test(accepted)) {
+    body = asset.gz
+    headers['content-encoding'] = 'gzip'
+  }
+  return new Response(body as unknown as BodyInit, { headers })
 }
 
 /**

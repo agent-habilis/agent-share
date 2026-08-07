@@ -207,11 +207,13 @@ function connect(
  * Give up this ticket's client: leave the share's mesh and evict the entry.
  *
  * Awaits the in-flight connect rather than skipping it. `ShareClient.connect`
- * joins the share's mesh *before* it resolves, so a session abandoned while
- * still connecting already has a live membership broadcasting heartbeats — and
- * the silence sweeper will never evict it, because it is not silent. Every
- * other viewer of that share counts a member with no UI behind it, forever.
- * Changing the hash mid-connect was enough to leave one.
+ * starts a background mesh join that can land *after* it resolves, so a
+ * session abandoned while still connecting may be about to acquire a live
+ * membership broadcasting heartbeats — and the silence sweeper would never
+ * evict it, because it is not silent. `leave_mesh` marks the client `Left`,
+ * which the join task observes: a membership landing on a released client
+ * says goodbye instead of installing itself. Skipping the await would skip
+ * that mark. Changing the hash mid-connect was enough to leak one, once.
  *
  * Evicting is the other half. `leave_mesh` is one-way (it takes the mesh out
  * of the client), so a cached entry that has been left is a client that can
