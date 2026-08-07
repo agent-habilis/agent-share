@@ -524,16 +524,17 @@ impl ShareClient {
             // [`WAITING_MESHES`] either way, so a lost race costs no
             // identity churn.
             TransportMode::Dynamic => {
-                // The lane coupling: the seeder lane sets this the moment a
-                // card vouches, and the origin dial concedes rather than
-                // running out its cap against an outvoted origin.
-                let cards_seen = Rc::new(Cell::new(false));
+                // The lane coupling: the seeder lane raises this the moment a
+                // peer answers its dial, and the origin dial concedes rather
+                // than running out its cap against an origin the mesh has
+                // already replaced.
+                let can_serve = MeshCanServe::default();
                 let origin = Box::pin(capped_origin_dial(
                     Box::pin(connect_webrtc(
                         ticket, token, /*allow_relay_fallback=*/ true,
                     )),
                     cap_ms,
-                    Some((Rc::clone(&cards_seen), ORIGIN_CONCEDE_FLOOR_MS)),
+                    Some((can_serve.clone(), ORIGIN_CONCEDE_FLOOR_MS)),
                 ));
                 let race_ticket = fallback_ticket.clone();
                 let race_card = card.clone();
@@ -549,7 +550,7 @@ impl ShareClient {
                         race_password.as_deref(),
                         race_card,
                         &origin_status,
-                        Some(cards_seen),
+                        Some(can_serve),
                     )
                     .await
                 });
@@ -2416,12 +2417,56 @@ fn default_origin_cap_ms(token: &[u8; SECRET_LEN]) -> i32 {
 /// [`ORIGIN_DIAL_CAP_MS`] before card collection begins.
 const SEEDER_RACE_HEAD_START_MS: i32 = 3_000;
 
-/// How long the origin dial must have run before a vouching card is allowed
-/// to concede it. Protects a healthy share with a slow origin: cards cannot
-/// realistically arrive earlier anyway (the seeder lane's head start, the
-/// join, and a gossip round stack up to about this), so the floor only bites
-/// when it should.
+/// How long the origin dial must have run before the seeder lane is allowed
+/// to concede it. Protects a healthy share with a slow origin against a
+/// seeder that answers instantly.
 const ORIGIN_CONCEDE_FLOOR_MS: f64 = 5_000.0;
+
+/// Proof that the mesh can serve this share, strong enough to cut a running
+/// origin dial short.
+///
+/// Deliberately **not** raisable from a roster card. A departed peer's card
+/// lives in the meta CRDT for the rest of the page's session — nothing
+/// deletes it, see `ShareMeshDriver::refresh_book` — so "a card vouches" is
+/// true on every attempt for any share that ever had a peer, ghosts
+/// included. Conceding on that starved a live origin whose honest cold dial
+/// was measured at 6-20 s: the dial died at [`ORIGIN_CONCEDE_FLOOR_MS`],
+/// the race then dialled the ghosts, failed, and the App retried into the
+/// same livelock. Only [`Self::peer_answered`] raises it, and only a peer
+/// that actually answered a dial can trigger that.
+#[derive(Clone, Default)]
+struct MeshCanServe(Rc<Cell<bool>>);
+
+impl MeshCanServe {
+    /// A candidate's mount connection is up: someone alive is serving this
+    /// share, so the origin no longer has to be waited out.
+    ///
+    /// The connection is taken as an argument it does not read, so that the
+    /// rule above is the compiler's to keep rather than a comment's: a
+    /// caller holding only a card has nothing to pass.
+    fn peer_answered(&self, _proof: &Connection) {
+        self.0.set(true);
+    }
+
+    fn proven(&self) -> bool {
+        self.0.get()
+    }
+
+    /// The already-proven value, for tests that have no socket to dial.
+    #[cfg(test)]
+    fn already_answered() -> Self {
+        let value = Self::default();
+        value.0.set(true);
+        value
+    }
+}
+
+/// Whether the origin dial should concede now. Split out for the same
+/// reason [`reoffer_due`] is: the rule is the whole safety argument, and a
+/// rule that can be read on its own can be tested on its own.
+fn concede_due(proven: bool, elapsed_ms: f64, floor_ms: f64) -> bool {
+    proven && elapsed_ms >= floor_ms
+}
 
 /// Race an origin dial against [`ORIGIN_DIAL_CAP_MS`].
 ///
@@ -2429,26 +2474,26 @@ const ORIGIN_CONCEDE_FLOOR_MS: f64 = 5_000.0;
 /// which is acceptable for a producer we are about to give up on — and the
 /// synthesized error routes the caller into the seeder fallback.
 ///
-/// `concede` is the dynamic-mode lane coupling: the seeder lane sets the
-/// flag the moment a peer's card vouches for the share, and this dial gives
-/// up (after `floor_ms`) rather than running out its cap against an origin
-/// the mesh has already outvoted. Matters most when the seeder lane *fails*
-/// after cards were seen — the caller then awaits this future, which now
-/// resolves in one watcher tick instead of the cap's remainder.
+/// `concede` is the dynamic-mode lane coupling: the seeder lane raises its
+/// [`MeshCanServe`] the moment a peer answers a dial, and this dial gives up
+/// (after `floor_ms`) rather than running out its cap against an origin the
+/// mesh has already replaced. Matters most when the seeder lane *fails*
+/// after that — the caller then awaits this future, which now resolves in
+/// one watcher tick instead of the cap's remainder.
 /// Generic over the dial's winner for the same reason [`first_success`] is:
 /// tests script the dial with a scalar instead of a [`ShareClient`].
 async fn capped_origin_dial<Winner>(
     dial: std::pin::Pin<Box<dyn std::future::Future<Output = Result<Winner, JsValue>>>>,
     cap_ms: i32,
-    concede: Option<(Rc<Cell<bool>>, f64)>,
+    concede: Option<(MeshCanServe, f64)>,
 ) -> Result<Winner, JsValue> {
     let concession = Box::pin(async move {
-        let Some((cards_seen, floor_ms)) = concede else {
+        let Some((can_serve, floor_ms)) = concede else {
             return std::future::pending::<()>().await;
         };
         let started = now_ms();
         loop {
-            if cards_seen.get() && now_ms() - started >= floor_ms {
+            if concede_due(can_serve.proven(), now_ms() - started, floor_ms) {
                 return;
             }
             wait_ms(250).await;
@@ -2462,7 +2507,7 @@ async fn capped_origin_dial<Winner>(
         ),
         futures::future::Either::Right((futures::future::Either::Right(((), _)), _)) => {
             Err(JsValue::from_str(
-                "origin dial conceded: a peer on the mesh already vouches for the share",
+                "origin dial conceded: a peer on the mesh is already serving the share",
             ))
         }
     }
@@ -2488,7 +2533,7 @@ async fn connect_via_seeder(
     password: Option<&str>,
     card: Option<JsValue>,
     origin_error: &JsValue,
-    cards_seen: Option<Rc<Cell<bool>>>,
+    can_serve: Option<MeshCanServe>,
 ) -> Result<ShareClient, JsValue> {
     let token = *auth.token();
     let secret = ticket.secret;
@@ -2635,7 +2680,9 @@ async fn connect_via_seeder(
     // up in seconds while a beacon-less mesh is still healing; when they are
     // corpses the lane is bounded and prunes them, and the card path below
     // proceeds unchanged.
-    if let Some(client) = redial_known_seeders(&waiting, &ticket, &token, origin_error).await {
+    if let Some(client) =
+        redial_known_seeders(&waiting, &ticket, &token, origin_error, can_serve.as_ref()).await
+    {
         return Ok(client);
     }
 
@@ -2652,11 +2699,10 @@ async fn connect_via_seeder(
             })
             .collect();
         if !vouching.is_empty() {
-            // Tell the racing origin dial the mesh can serve this share; it
-            // concedes instead of running out its cap against a corpse.
-            if let Some(flag) = &cards_seen {
-                flag.set(true);
-            }
+            // Note what is *not* here: the racing origin dial is not told to
+            // concede. A card is a claim by a peer that may have closed its
+            // tab an hour ago — see [`MeshCanServe`] — so the proof is
+            // deferred to the dial that actually reaches one of them.
             break vouching;
         }
         if now_ms() - started > SEEDER_CARDS_DEADLINE_MS {
@@ -2737,8 +2783,12 @@ async fn connect_via_seeder(
     let mut refusals = Vec::new();
     let waiting_ref = &waiting;
     let relays_ref = &relays;
-    let token_ref = &token;
-    let majority_ref = majority.as_str();
+    let terms = VetTerms {
+        token: &token,
+        tree: majority.as_str(),
+        channel_wait: SEEDER_CHANNEL_WAIT_MS,
+        can_serve: can_serve.as_ref(),
+    };
     let mut attempts: Vec<
         std::pin::Pin<Box<dyn std::future::Future<Output = Result<VettedSeeder, String>> + '_>>,
     > = Vec::new();
@@ -2755,16 +2805,7 @@ async fn connect_via_seeder(
             if delay > 0 {
                 wait_ms(delay).await;
             }
-            vet_seeder_candidate(
-                waiting_ref,
-                endpoint,
-                id,
-                relays_ref,
-                token_ref,
-                majority_ref,
-                SEEDER_CHANNEL_WAIT_MS,
-            )
-            .await
+            vet_seeder_candidate(waiting_ref, endpoint, id, relays_ref, &terms).await
         }));
     }
     if attempts.is_empty() {
@@ -2842,6 +2883,7 @@ async fn redial_known_seeders(
     ticket: &MountTicket,
     token: &[u8; SECRET_LEN],
     origin_error: &JsValue,
+    can_serve: Option<&MeshCanServe>,
 ) -> Option<ShareClient> {
     let entries = load_known_seeders(token);
     if entries.is_empty() {
@@ -2878,16 +2920,13 @@ async fn redial_known_seeders(
             if delay > 0 {
                 wait_ms(delay).await;
             }
-            vet_seeder_candidate(
-                waiting,
-                endpoint,
-                id,
-                relays_ref,
+            let terms = VetTerms {
                 token,
-                &tree,
-                KNOWN_SEEDER_CHANNEL_WAIT_MS,
-            )
-            .await
+                tree: &tree,
+                channel_wait: KNOWN_SEEDER_CHANNEL_WAIT_MS,
+                can_serve,
+            };
+            vet_seeder_candidate(waiting, endpoint, id, relays_ref, &terms).await
         }));
     }
     if attempts.is_empty() {
@@ -3114,6 +3153,22 @@ struct VettedSeeder {
     demoted: bool,
 }
 
+/// What a candidate is held to, and what it raises when it passes. Bundled
+/// because both lanes — the known-seeder redial and the card race — vet
+/// against the same four things and differ only in their values.
+#[derive(Clone, Copy)]
+struct VetTerms<'a> {
+    token: &'a [u8; SECRET_LEN],
+    /// The tree the candidate must serve: the card majority, or the tree
+    /// this tab recorded for a known seeder.
+    tree: &'a str,
+    /// How long to wait for a data channel before conceding the relay.
+    channel_wait: f64,
+    /// Raised when the candidate's connection lands, if the caller is
+    /// racing an origin dial that wants to know.
+    can_serve: Option<&'a MeshCanServe>,
+}
+
 /// One candidate, dialled and vetted end to end. WebRTC first — the whole
 /// point of a swarm of browsers is that bytes flow tab-to-tab, not through
 /// the relay, which stays the honest fallback lane. The manifest is fetched
@@ -3125,10 +3180,14 @@ async fn vet_seeder_candidate(
     endpoint: String,
     id: fofoca::protocol::iroh_base::EndpointId,
     relays: &[TransportAddr],
-    token: &[u8; SECRET_LEN],
-    majority: &str,
-    channel_wait: f64,
+    terms: &VetTerms<'_>,
 ) -> Result<VettedSeeder, String> {
+    let VetTerms {
+        token,
+        tree,
+        channel_wait,
+        can_serve,
+    } = *terms;
     let short = endpoint[..8.min(endpoint.len())].to_owned();
     // Which arm won decides whether the bulk probe below runs: only the
     // data channel is suspect, and provenance says it more cheaply and more
@@ -3149,12 +3208,19 @@ async fn vet_seeder_candidate(
             }
         }
     };
+    // A mount connection to a peer that is not us: the mesh demonstrably
+    // holds this share, which is the only evidence that may cut the origin
+    // dial short. Raised here rather than on the card that named this
+    // candidate, because a card outlives the tab that published it.
+    if let Some(can_serve) = can_serve {
+        can_serve.peer_answered(&connection);
+    }
     // The candidate must serve the tree its card claimed — fetched bytes,
     // hashed here, against the card. A mismatch is disqualifying, not
     // retryable: it lied once.
     let (bytes, manifest) = match fetch_manifest_on(&connection, token).await {
         Ok((bytes, manifest))
-            if agent_share_proto::manifest::manifest_fingerprint(&bytes) == majority =>
+            if agent_share_proto::manifest::manifest_fingerprint(&bytes) == tree =>
         {
             (bytes, manifest)
         }
@@ -4254,12 +4320,52 @@ mod tests {
 
     type Dial = std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, JsValue>>>>;
 
-    /// The dynamic-mode lane coupling: once the seeder lane has seen a
-    /// vouching card, a hung origin dial concedes instead of running out
-    /// its whole cap.
+    /// A card is a claim; only a dial that landed is proof. The rule the
+    /// concession runs on must ignore everything short of one, however long
+    /// the dial has been running.
+    #[test]
+    fn only_an_answered_peer_concedes_the_origin() {
+        use super::{ORIGIN_CONCEDE_FLOOR_MS as FLOOR, concede_due};
+        assert!(!concede_due(false, FLOOR * 100.0, FLOOR));
+        assert!(!concede_due(true, FLOOR / 2.0, FLOOR));
+        assert!(concede_due(true, FLOOR, FLOOR));
+    }
+
+    /// The ghost-roster livelock this guard exists for. A share whose
+    /// producer went away leaves cards behind forever — nothing deletes a
+    /// departed peer's CRDT entry — so a lane that finds cards, dials them
+    /// and reaches nobody leaves the proof where it started, and a returning
+    /// producer gets its whole 6-20 s cold dial. Conceding on the card
+    /// instead killed that dial at the 5 s floor, and the retry met the same
+    /// ghosts.
+    ///
+    /// That the card path cannot raise the proof is the compiler's job, not
+    /// this test's: [`MeshCanServe::peer_answered`] demands a `Connection`,
+    /// which only a landed dial can produce. What is asserted here is the
+    /// other half — an unraised proof leaves a slow origin alone however
+    /// long the floor has passed.
+    #[test]
+    async fn ghost_cards_alone_never_concede_the_origin() {
+        let can_serve = super::MeshCanServe::default();
+        // An honest origin answering well past the floor, the way a cold
+        // relay handshake does.
+        let dial: Dial = Box::pin(async {
+            sleep(300).await;
+            Ok(42)
+        });
+        let outcome = super::capped_origin_dial(dial, 5_000, Some((can_serve, 50.0))).await;
+        assert!(
+            matches!(outcome, Ok(42)),
+            "a roster of ghosts must not cut a live origin's dial short: {outcome:?}"
+        );
+    }
+
+    /// The other half of the same rule: a peer that really answered does
+    /// concede, so a lane that fails *after* connecting hands control back
+    /// to the caller in a watcher tick instead of the cap's remainder.
     #[test]
     async fn origin_dial_concedes_once_cards_vouch() {
-        let flag = std::rc::Rc::new(std::cell::Cell::new(true));
+        let flag = super::MeshCanServe::already_answered();
         let dial: Dial = Box::pin(async {
             std::future::pending::<()>().await;
             unreachable!("the dial never resolves")
@@ -4272,11 +4378,11 @@ mod tests {
         );
     }
 
-    /// The floor guards a healthy share with a slow origin: a card that
-    /// arrives early cannot concede a dial that is about to win.
+    /// The floor guards a healthy share with a slow origin: a seeder that
+    /// answers early cannot concede a dial that is about to win.
     #[test]
     async fn origin_dial_win_beats_an_early_card() {
-        let flag = std::rc::Rc::new(std::cell::Cell::new(true));
+        let flag = super::MeshCanServe::already_answered();
         let dial: Dial = Box::pin(async {
             sleep(50).await;
             Ok(9)
@@ -4288,11 +4394,11 @@ mod tests {
         );
     }
 
-    /// With no cards the cap still governs, exactly as before the flag
-    /// existed.
+    /// With nobody answering, the cap still governs, exactly as before the
+    /// concession existed.
     #[test]
     async fn origin_dial_times_out_with_no_cards() {
-        let flag = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = super::MeshCanServe::default();
         let dial: Dial = Box::pin(async {
             std::future::pending::<()>().await;
             unreachable!("the dial never resolves")
