@@ -20,3 +20,11 @@ rustflags = ["--cfg", 'getrandom_backend="wasm_js"']
 # wasm32-unknown-unknown, `tokio::time` has no driver, and `tokio::spawn` has no
 # reactor. Each one compiled cleanly and then panicked in a browser.
 runner = "wasm-bindgen-test-runner"
+
+# NOTE: to test in-progress fofoca work from the sibling checkout before a
+# rev bump, append a LOCAL TESTING [patch."https://github.com/fofoca-network/fofoca"]
+# table here (config-level patches reach both workspaces; manifest patches do
+# not cross the nested wasm-client boundary). The pre-commit hook in
+# .git/hooks rejects committing such a section or a lockfile resolved
+# against it. Unwind: push fofoca, bump the manifest revs, delete the
+# section, rebuild, commit.

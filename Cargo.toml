@@ -39,10 +39,10 @@ rust-version = "1.93"
 # The cost is deliberate: an engine change is now push-then-bump here, where a
 # path dep to a sibling checkout needed no round trip. Keep this rev in step
 # with agent-gossip's.
-fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "e63a481f1626d02f2b39c681f019cf4cd4b05ba5" }
-fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", rev = "e63a481f1626d02f2b39c681f019cf4cd4b05ba5", default-features = false }
-fofoca-blobs = { git = "https://github.com/fofoca-network/fofoca", rev = "e63a481f1626d02f2b39c681f019cf4cd4b05ba5" }
-fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "e63a481f1626d02f2b39c681f019cf4cd4b05ba5" }
+fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "52a72f76c63b80b97e6113e81027b7db86eafbe1" }
+fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", rev = "52a72f76c63b80b97e6113e81027b7db86eafbe1", default-features = false }
+fofoca-blobs = { git = "https://github.com/fofoca-network/fofoca", rev = "52a72f76c63b80b97e6113e81027b7db86eafbe1" }
+fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "52a72f76c63b80b97e6113e81027b7db86eafbe1" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
@@ -125,3 +125,9 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 
+# NOTE: no local-testing [patch] here, ever. To test in-progress fofoca work
+# from the sibling checkout, patch in this repo's .cargo/config.toml instead:
+# a config-level [patch] applies to every workspace under this directory —
+# including the nested wasm-client workspace, which a manifest patch here
+# cannot reach — and the pre-commit hook guards that file against committing
+# the local section.
