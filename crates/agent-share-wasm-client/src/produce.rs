@@ -9,17 +9,18 @@ use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::framing::{
     BENCH_KIND_ECHO, BENCH_KIND_FILL, MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES,
     MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_HASH, OP_MANIFEST, OP_READ,
-    OP_WATCH,
-    REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_MANIFEST, WEBRTC_SIGNAL_ALPN,
+    OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_MANIFEST, WEBRTC_SIGNAL_ALPN,
     decode_bench_request_prefix,
 };
 use agent_share_proto::lookup::LookupOpts;
 use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
-use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
+use fofoca::iroh::endpoint::{Connection, presets};
+use fofoca::iroh::{Endpoint, SecretKey};
 use fofoca_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle,
     browser_answer, log_signal_sdps,
@@ -27,8 +28,6 @@ use fofoca_iroh_webrtc_transport::{
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
-use fofoca::iroh::endpoint::{Connection, presets};
-use fofoca::iroh::{Endpoint, SecretKey};
 use js_sys::{Array, Reflect, Uint8Array};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
@@ -943,7 +942,10 @@ async fn serve_stream<S: ServeSource>(
     Ok(())
 }
 
-async fn write_ok_body(send: &mut fofoca::iroh::endpoint::SendStream, body: &[u8]) -> Result<(), JsValue> {
+async fn write_ok_body(
+    send: &mut fofoca::iroh::endpoint::SendStream,
+    body: &[u8],
+) -> Result<(), JsValue> {
     send.write_all(&[ReadStatus::Ok.to_byte()])
         .await
         .map_err(|error| err("write status", &error))?;

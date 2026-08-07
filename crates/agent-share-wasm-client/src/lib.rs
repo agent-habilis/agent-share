@@ -36,12 +36,12 @@ use std::rc::Rc;
 use fofoca_blobs::{BlobStore, FileId, IdbStore, extent_of};
 use std::sync::Arc;
 
+use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::framing::{
     self, BENCH_ECHO_INTERVAL_SECS, DEFAULT_BENCH_DURATION_SECS, MAX_BENCH_ECHO_BYTES,
     MAX_BENCH_FILL_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, SECRET_LEN,
     WEBRTC_SIGNAL_ALPN,
 };
-use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::lookup::{LookupOpts, RelayChoice};
 use agent_share_proto::manifest::{ManifestDelta, MountManifest};
 use agent_share_proto::mesh_key::share_mesh_key;
@@ -378,7 +378,9 @@ impl ShareClient {
             // identity churn.
             TransportMode::Dynamic => {
                 let origin = Box::pin(capped_origin_dial(
-                    Box::pin(connect_webrtc(ticket, token, /*allow_relay_fallback=*/ true)),
+                    Box::pin(connect_webrtc(
+                        ticket, token, /*allow_relay_fallback=*/ true,
+                    )),
                     cap_ms,
                 ));
                 let race_ticket = fallback_ticket.clone();
@@ -448,15 +450,14 @@ impl ShareClient {
             // to pin the transport for tests (and the seeder lane rides the
             // relay), and `dynamic` already raced the seeder lane above.
             Err(origin_error) if matches!(mode, TransportMode::Relay) => {
-                let mut client =
-                    connect_via_seeder(
-                        fallback_ticket,
-                        auth,
-                        mesh_password.as_deref(),
-                        card.clone(),
-                        &origin_error,
-                    )
-                    .await?;
+                let mut client = connect_via_seeder(
+                    fallback_ticket,
+                    auth,
+                    mesh_password.as_deref(),
+                    card.clone(),
+                    &origin_error,
+                )
+                .await?;
                 client.mount_mode = mode.as_str().to_owned();
                 return Ok(client);
             }
@@ -803,8 +804,7 @@ impl ShareClient {
     /// departure. The page-death path (`pagehide`) — nothing after this can
     /// reuse the membership, so nothing is kept.
     pub fn shutdown_mesh(&self) {
-        WAITING_MESHES
-            .with(|meshes| meshes.borrow_mut().remove(&share_mesh_key(&self.token)));
+        WAITING_MESHES.with(|meshes| meshes.borrow_mut().remove(&share_mesh_key(&self.token)));
         let previous = std::mem::replace(&mut *self.mesh.borrow_mut(), MeshSlot::Left);
         let MeshSlot::Joined(peer) = previous else {
             return;
@@ -1499,12 +1499,7 @@ impl ShareClient {
             flags.push('D');
         }
         rows.push(peer_row(
-            producer,
-            "producer",
-            flags,
-            &data_path,
-            ip,
-            ip_kind,
+            producer, "producer", flags, &data_path, ip, ip_kind,
         ));
 
         let mut seen: HashSet<String> = HashSet::new();
@@ -1793,22 +1788,42 @@ async fn fetch_manifest_on(
     Ok((bytes, manifest))
 }
 
-/// One ranged read on `conn`, raced against a deadline.
+/// How long the probe tolerates **zero forward progress** before declaring
+/// the path unable to carry bulk.
+///
+/// A window, not a total budget: the clock re-arms on every chunk, so a slow
+/// link passes as long as bytes keep arriving. The defect this probe hunts
+/// is a total freeze — a read frozen at its first bytes forever — and a
+/// freeze does not trickle. A whole-read deadline here would be a throughput
+/// floor (256 KiB in 10 s demands ≥26 KB/s) that discards healthy seeders on
+/// slow links, and a slow seeder holding the only copy beats no seeder.
+const PROBE_STALL_MS: i32 = 10_000;
+
+/// Bytes per probe body read. Sub-frame granularity is what makes the stall
+/// window a progress meter rather than a second whole-read deadline: a slow
+/// link renews the window on every chunk it manages to land.
+const PROBE_CHUNK_LEN: usize = 16 * 1024;
+
+/// One ranged read on `conn`, failed only if it stops moving.
 ///
 /// The connect-time bulk probe: between two browser tabs the data channel
 /// passes JSEP and a manifest fine and then stalls on bulk READ responses —
 /// observed as a zip download frozen at its 39-byte local header on an
 /// otherwise healthy `paths webrtc` mount, twice, on a pristine mesh. Until
-/// the transport's browser↔browser bulk path is fixed, a seeder connection
-/// must prove it can move a real chunk before it is allowed to carry the
-/// share; a channel that cannot is closed and the relay takes the job.
+/// the transport's browser↔browser bulk path is fixed, a data-channel
+/// connection must prove it can move a real chunk before it is allowed to
+/// carry the share; a channel that cannot is closed and the relay takes the
+/// job. Only that pairing is suspect: the caller does not probe relay or ip
+/// connections, where bulk never stalled.
 async fn probe_read(
     conn: &Connection,
     token: &[u8; SECRET_LEN],
     index: u32,
     len: u32,
 ) -> Result<(), JsValue> {
-    let attempt = async {
+    // Open + request + header under one stall window: a frozen channel does
+    // not answer the header either, and nothing here is throughput-bound.
+    let setup = async {
         let (mut send, mut recv) = conn
             .open_bi()
             .await
@@ -1818,21 +1833,81 @@ async fn probe_read(
             .map_err(|error| err("send probe read", &error))?;
         send.finish().map_err(|error| err("finish", &error))?;
         let got = read_header(&mut recv, len).await?;
-        let mut data = vec![0u8; got as usize];
-        recv.read_exact(&mut data)
-            .await
-            .map_err(|error| err("read probe body", &error))?;
-        if got == 0 {
-            return Err(JsValue::from_str("probe read answered empty"));
-        }
-        Ok(())
+        Ok::<_, JsValue>((recv, got))
     };
-    match futures::future::select(Box::pin(attempt), Box::pin(wait_ms(10_000))).await {
-        futures::future::Either::Left((outcome, _)) => outcome,
-        futures::future::Either::Right(((), _)) => Err(JsValue::from_str(
-            "probe read stalled: this path cannot carry bulk data",
-        )),
+    let (recv, got) =
+        match futures::future::select(Box::pin(setup), Box::pin(wait_ms(PROBE_STALL_MS))).await {
+            futures::future::Either::Left((outcome, _)) => outcome?,
+            futures::future::Either::Right(((), _)) => {
+                return Err(JsValue::from_str(
+                    "probe read stalled: this path cannot carry bulk data",
+                ));
+            }
+        };
+    if got == 0 {
+        return Err(JsValue::from_str("probe read answered empty"));
     }
+    let mut source = StreamChunks {
+        recv,
+        buf: vec![0u8; PROBE_CHUNK_LEN],
+    };
+    drain_with_stall_deadline(&mut source, got as usize, || wait_ms(PROBE_STALL_MS)).await
+}
+
+/// The probe's chunk supply — a seam so the rolling-deadline drain can run
+/// against a scripted stream in tests, where no [`Connection`] exists.
+trait ProbeChunkSource {
+    /// Read some bytes; `Ok(None)` means the stream ended.
+    async fn next_chunk(&mut self) -> Result<Option<usize>, JsValue>;
+}
+
+struct StreamChunks {
+    recv: fofoca::iroh::endpoint::RecvStream,
+    buf: Vec<u8>,
+}
+
+impl ProbeChunkSource for StreamChunks {
+    async fn next_chunk(&mut self) -> Result<Option<usize>, JsValue> {
+        self.recv
+            .read(&mut self.buf)
+            .await
+            .map_err(|error| err("read probe body", &error))
+    }
+}
+
+/// Pull `remaining` bytes out of `source`, racing **each** read against a
+/// fresh `stall_timer`. Progress re-arms the clock; only a full window with
+/// no bytes at all fails — see [`PROBE_STALL_MS`] for why slow must pass.
+/// The timer is a parameter because the production clock (`wait_ms`) needs a
+/// `Window`, which the wasm test runner does not have.
+async fn drain_with_stall_deadline<Source, Timer, TimerFut>(
+    source: &mut Source,
+    mut remaining: usize,
+    mut stall_timer: Timer,
+) -> Result<(), JsValue>
+where
+    Source: ProbeChunkSource,
+    Timer: FnMut() -> TimerFut,
+    TimerFut: std::future::Future<Output = ()>,
+{
+    while remaining > 0 {
+        match futures::future::select(Box::pin(source.next_chunk()), Box::pin(stall_timer())).await
+        {
+            futures::future::Either::Left((Ok(Some(read)), _)) if read > 0 => {
+                remaining = remaining.saturating_sub(read);
+            }
+            futures::future::Either::Left((Ok(_), _)) => {
+                return Err(JsValue::from_str("probe read body ended early"));
+            }
+            futures::future::Either::Left((Err(error), _)) => return Err(error),
+            futures::future::Either::Right(((), _)) => {
+                return Err(JsValue::from_str(
+                    "probe read stalled: this path cannot carry bulk data",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// How long **one attempt** waits for peer cards to arrive over gossip.
@@ -2161,11 +2236,8 @@ async fn connect_via_seeder(
                 mount_endpoint,
                 mount_hub,
             };
-            WAITING_MESHES.with(|meshes| {
-                meshes
-                    .borrow_mut()
-                    .insert(mesh_key.clone(), entry.clone())
-            });
+            WAITING_MESHES
+                .with(|meshes| meshes.borrow_mut().insert(mesh_key.clone(), entry.clone()));
             entry
         }
     };
@@ -2272,18 +2344,24 @@ async fn connect_via_seeder(
 
     let mut refusals = Vec::new();
     for candidate in candidates {
-        let Ok(id) = candidate.endpoint.parse::<fofoca::protocol::iroh_base::EndpointId>() else {
+        let Ok(id) = candidate
+            .endpoint
+            .parse::<fofoca::protocol::iroh_base::EndpointId>()
+        else {
             continue;
         };
         // WebRTC first — the whole point of a swarm of browsers is that
         // bytes flow tab-to-tab, not through the relay. The relay stays as
-        // the honest fallback lane it always was.
-        let connection = match seeder_webrtc_dial(&waiting, id, &relays).await {
-            Ok(connection) => connection,
+        // the honest fallback lane it always was. Which arm won decides
+        // whether the bulk probe below runs: only the data channel is
+        // suspect, and provenance says it more cheaply and more precisely
+        // than re-reading the settled path.
+        let (connection, via_data_channel) = match seeder_webrtc_dial(&waiting, id, &relays).await {
+            Ok(connection) => (connection, true),
             Err(webrtc_error) => {
                 let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
                 match waiting.endpoint.connect(addr, MOUNT_ALPN).await {
-                    Ok(connection) => connection,
+                    Ok(connection) => (connection, false),
                     Err(error) => {
                         refusals.push(format!(
                             "{}: webrtc: {}; relay: {error}",
@@ -2303,12 +2381,19 @@ async fn connect_via_seeder(
                 if agent_share_proto::manifest::manifest_fingerprint(&bytes) == majority =>
             {
                 // Prove the path moves bulk before trusting it with the
-                // share; see `probe_read`. A webrtc mount that stalls is
-                // closed and redialled over the relay — bytes beat purity.
-                if let Some(index) = manifest
-                    .files
-                    .iter()
-                    .position(|entry| !entry.is_tombstone() && entry.size > 0)
+                // share; see `probe_read`. Only a data-channel connection is
+                // suspect — bulk never stalled on the relay or a direct ip,
+                // so probing those lanes would only gate healthy seeders
+                // behind a timer (and a failed relay probe used to close and
+                // redial the *same relay*, paying twice to lose the seeder).
+                // A webrtc mount that stalls is closed and redialled over
+                // the relay — bytes beat purity — and that replacement is
+                // trusted the same way any relay connection is.
+                if via_data_channel
+                    && let Some(index) = manifest
+                        .files
+                        .iter()
+                        .position(|entry| !entry.is_tombstone() && entry.size > 0)
                 {
                     let index = u32::try_from(index).unwrap_or(0);
                     if let Err(probe_error) =
@@ -2321,11 +2406,7 @@ async fn connect_via_seeder(
                         connection.close(0u32.into(), b"failed the bulk probe");
                         let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
                         match waiting.endpoint.connect(addr, MOUNT_ALPN).await {
-                            Ok(relay_conn)
-                                if probe_read(&relay_conn, &token, index, MAX_READ_LEN)
-                                    .await
-                                    .is_ok() =>
-                            {
+                            Ok(relay_conn) => {
                                 let mut client = new_share_client(
                                     relay_conn,
                                     token,
@@ -2340,7 +2421,7 @@ async fn connect_via_seeder(
                                 client.from_origin = false;
                                 client.pinned_tree = Some(majority.clone());
                                 *client.fallback_reason.borrow_mut() = Some(format!(
-                                    "origin unreachable ({}); reading from seeder {} over the                                      relay (data channel failed the bulk probe)",
+                                    "origin unreachable ({}); reading from seeder {} over the relay (data channel failed the bulk probe)",
                                     describe(origin_error),
                                     &candidate.endpoint[..8.min(candidate.endpoint.len())],
                                 ));
@@ -2349,17 +2430,8 @@ async fn connect_via_seeder(
                                     MeshSlot::Joined(Rc::clone(&waiting.peer));
                                 // The vetting fetch already paid for these
                                 // bytes; the first manifest call reuses them.
-                                *client.prefetched_manifest.borrow_mut() =
-                                    Some((bytes, manifest));
+                                *client.prefetched_manifest.borrow_mut() = Some((bytes, manifest));
                                 return Ok(client);
-                            }
-                            Ok(bad) => {
-                                bad.close(0u32.into(), b"relay probe failed too");
-                                refusals.push(format!(
-                                    "{}: bulk probe failed on webrtc and relay",
-                                    &candidate.endpoint[..8]
-                                ));
-                                continue;
                             }
                             Err(error) => {
                                 refusals.push(format!(
@@ -2419,7 +2491,11 @@ async fn connect_via_seeder(
                 ));
             }
             Err(error) => {
-                refusals.push(format!("{}: {}", &candidate.endpoint[..8], describe(&error)));
+                refusals.push(format!(
+                    "{}: {}",
+                    &candidate.endpoint[..8],
+                    describe(&error)
+                ));
             }
         }
     }
@@ -3111,7 +3187,10 @@ fn js_stage(context: &str, error: JsValue) -> JsValue {
 }
 
 /// Read the `status(1) ‖ len(u32)` prefix every response carries.
-async fn read_header(recv: &mut fofoca::iroh::endpoint::RecvStream, cap: u32) -> Result<u32, JsValue> {
+async fn read_header(
+    recv: &mut fofoca::iroh::endpoint::RecvStream,
+    cap: u32,
+) -> Result<u32, JsValue> {
     let mut prefix = [0u8; 5];
     recv.read_exact(&mut prefix)
         .await
@@ -3218,4 +3297,105 @@ fn pinned_ladder() -> Vec<fofoca::iroh::RelayUrl> {
                 .expect("RENDEZVOUS_RELAY_LADDER entries are valid relay URLs")
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProbeChunkSource, drain_with_stall_deadline};
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_futures::JsFuture;
+
+    // These run on wasm32, the only target this crate builds for — see the
+    // dev-dependency note in `Cargo.toml`. Renaming the attribute keeps the
+    // tests written as ordinary `#[test]` functions.
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    /// `wait_ms` needs a `Window`; the node test runner has none, but
+    /// `setTimeout` lives on the global in both worlds.
+    async fn sleep(ms: i32) {
+        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+            let global = js_sys::global();
+            let set_timeout = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+                .expect("setTimeout exists on the test global");
+            let set_timeout: js_sys::Function = set_timeout.unchecked_into();
+            let _ = set_timeout.call2(&global, &resolve, &JsValue::from(ms));
+        });
+        let _ = JsFuture::from(promise).await;
+    }
+
+    /// Yields `chunk_len` bytes `chunks` times, sleeping `gap_ms` before
+    /// each; then hangs forever or ends the stream, per `then_hang`.
+    struct Scripted {
+        chunks: usize,
+        chunk_len: usize,
+        gap_ms: i32,
+        then_hang: bool,
+    }
+
+    impl ProbeChunkSource for Scripted {
+        async fn next_chunk(&mut self) -> Result<Option<usize>, JsValue> {
+            if self.chunks == 0 {
+                if self.then_hang {
+                    std::future::pending::<()>().await;
+                }
+                return Ok(None);
+            }
+            sleep(self.gap_ms).await;
+            self.chunks -= 1;
+            Ok(Some(self.chunk_len))
+        }
+    }
+
+    /// A slow link is not a stalled link. Eight chunks arriving every 40 ms
+    /// take 320 ms — more than three full 100 ms stall windows — and must
+    /// pass, because every chunk re-arms the clock. Under the old whole-read
+    /// deadline this exact stream failed: 256 KiB raced against one fixed
+    /// timer is a throughput floor, and it discarded slow-but-healthy
+    /// seeders that may have held the only copy of a share.
+    #[test]
+    async fn slow_but_moving_probe_passes() {
+        let mut source = Scripted {
+            chunks: 8,
+            chunk_len: 32 * 1024,
+            gap_ms: 40,
+            then_hang: false,
+        };
+        let outcome = drain_with_stall_deadline(&mut source, 256 * 1024, || sleep(100)).await;
+        assert!(
+            outcome.is_ok(),
+            "a moving stream must outlive any number of stall windows: {outcome:?}"
+        );
+    }
+
+    /// The defect the probe hunts: first bytes land, then nothing, forever.
+    #[test]
+    async fn frozen_probe_fails_within_one_window() {
+        let mut source = Scripted {
+            chunks: 1,
+            chunk_len: 39,
+            gap_ms: 0,
+            then_hang: true,
+        };
+        let outcome = drain_with_stall_deadline(&mut source, 256 * 1024, || sleep(100)).await;
+        assert!(
+            outcome.is_err(),
+            "a stream frozen after its first bytes must stall out"
+        );
+    }
+
+    /// An early end is a failure, not a pass — the probe asked for more.
+    #[test]
+    async fn short_probe_body_fails() {
+        let mut source = Scripted {
+            chunks: 2,
+            chunk_len: 1024,
+            gap_ms: 0,
+            then_hang: false,
+        };
+        let outcome = drain_with_stall_deadline(&mut source, 256 * 1024, || sleep(100)).await;
+        assert!(
+            outcome.is_err(),
+            "a stream that ends early must not pass the probe"
+        );
+    }
 }

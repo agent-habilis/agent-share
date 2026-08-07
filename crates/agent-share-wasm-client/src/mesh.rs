@@ -32,10 +32,10 @@ use fofoca::embed::{
 };
 use fofoca::net::TransportOpts;
 use fofoca::ops::{StateMergeParams, broadcast_state_merge};
+use fofoca::protocol::Password;
 use fofoca::protocol::{
     Channel, DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message, Nickname,
 };
-use fofoca::protocol::Password;
 use fofoca::runtime::{
     CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams,
     derive_topic_mesh_with, setup_mesh,
@@ -451,12 +451,22 @@ impl MeshPeer {
     /// of only advertising them.
     pub(crate) async fn join_share(
         resolved: Resolved,
-        shared: Option<(fofoca::iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
+        shared: Option<(
+            fofoca::iroh::Endpoint,
+            fofoca_iroh_webrtc_transport::WebRtcHandle,
+        )>,
         protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
         card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
         let injected = shared.map(|(endpoint, webrtc)| InjectedEndpoint { endpoint, webrtc });
-        spawn_peer_inner(resolved, TransportOpts::default(), injected, protocols, card).await
+        spawn_peer_inner(
+            resolved,
+            TransportOpts::default(),
+            injected,
+            protocols,
+            card,
+        )
+        .await
     }
 
     #[wasm_bindgen(getter)]
@@ -702,7 +712,10 @@ fn parse_transport(mode: Option<&str>) -> Result<TransportOpts, JsValue> {
 async fn spawn_peer(
     resolved: Resolved,
     transports: TransportOpts,
-    shared: Option<(fofoca::iroh::Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)>,
+    shared: Option<(
+        fofoca::iroh::Endpoint,
+        fofoca_iroh_webrtc_transport::WebRtcHandle,
+    )>,
     card: CardParts,
 ) -> Result<MeshPeer, JsValue> {
     let injected = shared.map(|(endpoint, webrtc)| InjectedEndpoint { endpoint, webrtc });

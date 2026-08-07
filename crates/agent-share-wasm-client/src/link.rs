@@ -30,9 +30,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use fofoca_iroh_webrtc_transport::BrowserHubTransport;
 use fofoca::iroh::endpoint::Connection;
 use fofoca::iroh::{EndpointId, TransportAddr};
+use fofoca_iroh_webrtc_transport::BrowserHubTransport;
 
 /// Cumulative counters differenced into rates.
 ///

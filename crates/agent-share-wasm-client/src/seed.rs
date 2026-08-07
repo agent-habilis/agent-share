@@ -193,7 +193,8 @@ pub(crate) async fn read_window(
         return Ok(Vec::new());
     }
     let end = (offset + u64::from(len)).min(file.size);
-    let ranges = ChunkRanges::from(ChunkNum(offset / CHUNK_BYTES)..ChunkNum(end.div_ceil(CHUNK_BYTES)));
+    let ranges =
+        ChunkRanges::from(ChunkNum(offset / CHUNK_BYTES)..ChunkNum(end.div_ceil(CHUNK_BYTES)));
 
     // The version gate: a file the store cannot bind any more (it changed, or
     // was never hashed) must not be served from a stale outboard.
@@ -205,7 +206,14 @@ pub(crate) async fn read_window(
 
     let mut blocks = SparseBlocks::empty(file.size, CHUNK_GROUP_BYTES);
     let mut outboard = Outboard::new();
-    decode_sparse(root, file.size, &encoded, &ranges, &mut blocks, &mut outboard)?;
+    decode_sparse(
+        root,
+        file.size,
+        &encoded,
+        &ranges,
+        &mut blocks,
+        &mut outboard,
+    )?;
 
     // Reassemble the byte window from the decoded blocks. The decode proved
     // every chunk group covering the window, so a missing block here is a
@@ -266,5 +274,4 @@ mod tests {
             assert_eq!(status, ReadStatus::LenOverCap);
         });
     }
-
 }
