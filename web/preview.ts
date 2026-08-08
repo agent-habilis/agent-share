@@ -2,8 +2,9 @@
  * Serve a production `dist/` build. Run `bun run build` first.
  *
  * Bun's HTML multipage server rebundles source; this only hands out the
- * already-built files so preview matches a static host. Extensionless paths
- * (share routes like `/files/<ticket>`) fall back to the SPA `index.html`.
+ * already-built files so preview matches a static host. Extensionless paths,
+ * and share routes however they are spelled, fall back to the SPA
+ * `index.html` — see `looksLikeAsset`.
  *
  * `PORT` picks the port, so a preview can run alongside `bun run dev` instead of
  * losing a coin flip for 3000 and exiting `EADDRINUSE`. Bun reads `PORT` on its
@@ -36,7 +37,17 @@ if (!(await distFile(asset.path).exists())) {
   process.exit(1)
 }
 
+/**
+ * Share routes, which always get the SPA shell however they are spelled.
+ *
+ * `/preview/<ticket>/note.txt` ends in a dot and would otherwise read as a
+ * missing asset and 404 — the preview view carries its file in the path, so
+ * the extension-shaped tail is the normal case rather than the odd one.
+ */
+const SHARE_ROUTE = /^\/(files|info|preview)\//
+
 function looksLikeAsset(pathname: string): boolean {
+  if (SHARE_ROUTE.test(pathname)) return false
   const last = pathname.split('/').pop() ?? ''
   return last.includes('.')
 }

@@ -5,9 +5,16 @@
  * - `/` — home
  * - `/files/<ticket>` — file browser
  * - `/info/<ticket>` — session info
+ * - `/preview/<ticket>/<path…>` — one file, rendered in place
  *
  * The ticket is a bearer capability in one path segment. It is bare ASCII
  * Base58, so it survives a URL path verbatim — no percent-encoding.
+ *
+ * Preview carries the selected file in the path rather than a query param, so
+ * the URL reads as what it names and a preview survives a reload. Every segment
+ * is percent-encoded on the way out and decoded on the way back, because a file
+ * name may hold anything a filesystem allows — `?`, `#`, a literal `/` cannot
+ * appear, but a `%` can.
  *
  * `?transport=webrtc|relay|dynamic` pins the mount data path (the wasm
  * `TransportMode`). `?dev=true` reveals the Info pane's dev tools. Both are
@@ -16,7 +23,7 @@
  * deliberately leaves them off.
  */
 
-export type ShareView = 'files' | 'info'
+export type ShareView = 'files' | 'info' | 'preview'
 
 /** Mount data path, spelled as the wasm `TransportMode` spells it. */
 export type TransportMode = 'webrtc' | 'relay' | 'dynamic'
@@ -24,13 +31,18 @@ export type TransportMode = 'webrtc' | 'relay' | 'dynamic'
 export interface ShareRoute {
   view: ShareView
   ticket: string
+  /**
+   * The file the `preview` view names, one segment per tree level. Empty on
+   * every other view, and on a `/preview/<ticket>` that names no file.
+   */
+  path: string[]
   /** Requested data path. Absent ⇒ the wasm default, `dynamic`. */
   transport?: TransportMode
   /** Show the Info pane's dev tools. Absent ⇒ hidden. */
   dev?: boolean
 }
 
-const VIEW_RE = /^(files|info)$/
+const VIEW_RE = /^(files|info|preview)$/
 
 const TRANSPORT_MODES: readonly TransportMode[] = ['webrtc', 'relay', 'dynamic']
 
@@ -63,14 +75,22 @@ export function parseDev(search: string = window.location.search): boolean {
   return raw === 'true' || raw === '1'
 }
 
-/** Path for a share view, with the ticket percent-encoded as one segment. */
+/**
+ * Path for a share view, with the ticket percent-encoded as one segment.
+ *
+ * `file` is the preview view's target, one segment per tree level. It trails
+ * the ticket rather than riding the query string, and `transport`/`dev` keep
+ * their positions ahead of it so the existing callers read unchanged.
+ */
 export function sharePath(
   ticket: string,
   view: ShareView = 'files',
   transport?: TransportMode,
   dev = false,
+  file: readonly string[] = [],
 ): string {
-  const path = `/${view}/${encodeURIComponent(ticket)}`
+  const segments = [view, ticket, ...file].map(encodeURIComponent)
+  const path = `/${segments.join('/')}`
   const query = new URLSearchParams()
   if (transport) query.set('transport', transport)
   if (dev) query.set('dev', 'true')
@@ -90,29 +110,52 @@ export function shareUrl(ticket: string, view: ShareView = 'files'): string {
 }
 
 /**
- * Parse `/files/<ticket>` or `/info/<ticket>`. Returns `null` for home or
- * anything that is not a share route.
+ * Parse `/files/<ticket>`, `/info/<ticket>` or `/preview/<ticket>/<path…>`.
+ * Returns `null` for home or anything that is not a share route.
+ *
+ * Only `preview` accepts trailing segments; a stray one on the other two views
+ * is still a mistake and still reads as home. The path it yields is a lookup
+ * key into the manifest-derived tree and never touches a filesystem, so a
+ * segment naming nothing simply finds nothing.
  */
 export function parseRoute(
   pathname: string = window.location.pathname,
   search: string = window.location.search,
 ): ShareRoute | null {
   const parts = pathname.replace(/\/+$/, '').split('/').filter(Boolean)
-  if (parts.length !== 2) return null
-  const [viewRaw, ticketRaw] = parts
+  const [viewRaw, ticketRaw, ...rest] = parts
   if (!viewRaw || !ticketRaw || !VIEW_RE.test(viewRaw)) return null
+  const view = viewRaw as ShareView
+  if (rest.length > 0 && view !== 'preview') return null
   let ticket: string
+  let path: string[]
   try {
     ticket = decodeURIComponent(ticketRaw).trim()
+    path = rest.map(decodeURIComponent)
   } catch {
     return null
   }
   if (!ticket) return null
-  const route: ShareRoute = { view: viewRaw as ShareView, ticket }
+  const route: ShareRoute = { view, ticket, path }
   const transport = parseTransport(search)
   if (transport) route.transport = transport
   if (parseDev(search)) route.dev = true
   return route
+}
+
+/**
+ * Stamped on every entry this tab pushes.
+ *
+ * The initial entry of a document — a cold load, a pasted link, a new tab —
+ * carries `null` state and nothing can be behind it. That difference is what
+ * lets a view decide between popping back to where the user came from and
+ * replacing itself: `history.back()` off a pasted link leaves the site.
+ */
+const PUSHED = { agentShare: 1 }
+
+/** Whether the current entry was pushed by this tab, so `back()` stays here. */
+export function canGoBack(state: unknown = window.history.state): boolean {
+  return typeof state === 'object' && state !== null && 'agentShare' in state
 }
 
 type RouteListener = () => void
@@ -143,13 +186,15 @@ function notifyRouteChange(): void {
 export function navigateToShare(
   ticket: string,
   view: ShareView = 'files',
-  options?: { replace?: boolean },
+  options?: { replace?: boolean; file?: readonly string[] },
 ): void {
-  const path = sharePath(ticket, view, parseTransport(), parseDev())
+  const target = sharePath(ticket, view, parseTransport(), parseDev(), options?.file)
   if (options?.replace) {
-    window.history.replaceState(null, '', path)
+    // The entry keeps its place in history, so it keeps its stamp — replacing
+    // a pasted link must not make it look like something can be behind it.
+    window.history.replaceState(window.history.state, '', target)
   } else {
-    window.history.pushState(null, '', path)
+    window.history.pushState(PUSHED, '', target)
   }
   notifyRouteChange()
 }

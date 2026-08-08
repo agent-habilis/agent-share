@@ -45,7 +45,9 @@ import {
 } from './mount.ts'
 import { canProduce, pickShareRoot, startProducer, type ShareProducer } from './produce.ts'
 import { buildPeerCard } from './peerCard/index.ts'
+import { Preview } from './Preview.tsx'
 import {
+  canGoBack,
   navigateToShare,
   onRouteChange,
   parseRoute,
@@ -727,6 +729,8 @@ function transferLabel(kind: Transfer['kind']): string {
 const Session = component<{
   ticket: string
   view: ShareView
+  /** The file the `preview` view names. Empty on every other view. */
+  routePath: string[]
   transport?: TransportMode
   dev?: boolean
 }>(function* (props) {
@@ -1332,6 +1336,22 @@ const Session = component<{
     }
   }
 
+  // Identity-stable handlers for ColumnView. The thunk below re-runs once per
+  // transfer chunk (it reads `transfer.value`), and ColumnView's memo can only
+  // bail when every prop it reads keeps its identity — an inline arrow re-made
+  // per run forces the whole file tree to re-reconcile at chunk rate. See
+  // `ColumnView.render.test.tsx`, which pins both shapes.
+  const onPathChange = (next: string[]) => {
+    path.value = next
+  }
+  const onDownload = () => void downloadSelected()
+  const onSeed = () => void seedSelected()
+  const onPreview = () => {
+    const selected = path.peek()
+    if (selected.length > 0) navigateToShare(props.ticket, 'preview', { file: selected })
+  }
+  const noop = () => undefined
+
   yield () => {
     const current = state.value
     if (current.phase === 'connecting') {
@@ -1355,14 +1375,14 @@ const Session = component<{
             <ColumnView
               root={offlineBuilt.root}
               path={path.value}
-              onPathChange={(next) => {
-                path.value = next
-              }}
-              onDownload={() => undefined}
+              onPathChange={onPathChange}
+              onDownload={noop}
               downloadDisabled
               held={held.value}
-              onSeed={() => undefined}
+              onSeed={noop}
               seedDisabled
+              onPreview={noop}
+              previewDisabled
             />
           </SessionChrome>
         )
@@ -1399,11 +1419,34 @@ const Session = component<{
     const redialling = reviving.value
     const mountable = canMount() && !redialling
     const showingInfo = props.view === 'info'
+    const showingPreview = props.view === 'preview'
+    // The URL names the file, not the selection signal, so a preview survives a
+    // reload and a pasted link opens the same one.
+    const previewNode = nodeAtPath(built.root, props.routePath)
+    const previewFile = previewNode?.kind === 'file' ? previewNode : undefined
     const closeInfo = () => {
       navigateToShare(props.ticket, 'files')
     }
     const openInfo = () => {
       navigateToShare(props.ticket, 'info')
+    }
+    /*
+      Cancelling a preview goes *back*, rather than pushing the files view on
+      top of it. Pushing left the preview sitting one Back press away from a
+      user who had just asked to leave it — and every open-then-cancel added
+      two more entries to walk through.
+
+      A pasted link has nothing behind it, so that case replaces instead, and
+      lands the column browser on the file that was on screen — otherwise the
+      only way out of a preview link is the root of the share.
+    */
+    const closePreview = () => {
+      if (canGoBack()) {
+        window.history.back()
+        return
+      }
+      if (props.routePath.length > 0) path.value = props.routePath
+      navigateToShare(props.ticket, 'files', { replace: true })
     }
     const mountButton = () => (
       <Button variant="ghost" onclick={() => void mount()} disabled={!mountable}>
@@ -1422,7 +1465,15 @@ const Session = component<{
     // posture — it is always willing to reach more peers — so naming it in
     // the chrome would label the normal state of the world. A transfer whose
     // peer is being re-dialed simply shows its own label until bytes resume.
-    const crumb = showingInfo ? 'info' : active ? transferLabel(active.kind) : 'files'
+    // The view wins over the transfer label: it names where you are, and a
+    // download started from here is still reachable by leaving.
+    const crumb = showingPreview
+      ? 'preview'
+      : showingInfo
+        ? 'info'
+        : active
+          ? transferLabel(active.kind)
+          : 'files'
     const infoButton = (
       <Button variant="ghost" onclick={openInfo}>
         Info
@@ -1451,7 +1502,24 @@ const Session = component<{
       the content underneath never moves.
     */
     let trailing: Child
-    if (showingInfo) {
+    if (showingPreview) {
+      /*
+        Ahead of the transfer branch, the way `showingInfo` already is: that
+        branch ends in a `Cancel` that aborts the transfer, and two buttons
+        called Cancel — one leaving the view, one stopping a download — is a
+        coin flip the user has to lose once to learn.
+
+        One button, and it leaves. Downloading lives in the detail pane that
+        `Cancel` returns to, on the same file, so a second copy of it here
+        would be a second answer to a question already answered one screen
+        away.
+      */
+      trailing = (
+        <Button variant="secondary" onclick={closePreview}>
+          Cancel
+        </Button>
+      )
+    } else if (showingInfo) {
       trailing = (
         <Button variant="ghost" onclick={closeInfo}>
           Close
@@ -1556,7 +1624,16 @@ const Session = component<{
         trailing={trailing}
         belowBar={belowBar}
       >
-        {showingInfo ? (
+        {showingPreview ? (
+          // Keyed by the file: switching previews starts a fresh load rather
+          // than racing the old one, and unmounting is what aborts it.
+          <Preview
+            key={previewFile?.path ?? ''}
+            node={previewFile}
+            client={current.client}
+            onClose={closePreview}
+          />
+        ) : showingInfo ? (
           <TechInfo
             client={current.client}
             tick={tick}
@@ -1576,14 +1653,14 @@ const Session = component<{
           <ColumnView
             root={built.root}
             path={path.value}
-            onPathChange={(next) => {
-              path.value = next
-            }}
-            onDownload={() => void downloadSelected()}
+            onPathChange={onPathChange}
+            onDownload={onDownload}
             downloadDisabled={active !== null || redialling}
             held={held.value}
-            onSeed={() => void seedSelected()}
+            onSeed={onSeed}
             seedDisabled={seeding.value || redialling}
+            onPreview={onPreview}
+            previewDisabled={active !== null || redialling}
           />
         )}
       </SessionChrome>
@@ -1610,6 +1687,7 @@ export const App = component(function* (_props) {
         key={clientKey(current.ticket, current.transport)}
         ticket={current.ticket}
         view={current.view}
+        routePath={current.path}
         transport={current.transport}
         dev={current.dev}
       />

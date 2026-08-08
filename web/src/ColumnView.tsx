@@ -55,6 +55,9 @@ interface ColumnViewProps {
   /** Pull the current selection into local storage, so this tab can seed it. */
   onSeed: () => void
   seedDisabled?: boolean
+  /** Open the selected file in the preview view. Files only. */
+  onPreview: () => void
+  previewDisabled?: boolean
 }
 
 /** The directory chain the current path selects, root first. */
@@ -106,16 +109,26 @@ function fitColumnWidth(dir: DirNode, padX: number): number {
   return Math.max(MIN_WIDTH, longest + ROW_CHROME + padX * 2)
 }
 
+/**
+ * Width of a run of buttons, in cells.
+ *
+ * Each label plus the button's 1ch of padding on each side, and one cell of gap
+ * between them. Exact: the button's edge is an outline, so it adds nothing.
+ */
+function buttonRow(labels: string[]): number {
+  return labels.reduce((sum, label) => sum + label.length + 2, 0) + (labels.length - 1)
+}
+
+const FILE_BUTTONS = buttonRow(['download', 'seed', 'preview'])
+const DIR_BUTTONS = buttonRow(['download', 'seed'])
+
 function fitDetailWidth(node: Node, padX: number): number {
-  // "download" label plus the button's 1ch of padding on each side. Exact: the
-  // button's edge is an outline, so it adds nothing to the width.
-  const downloadLabel = 10
   if (node.kind !== 'file') {
-    return Math.max(MIN_WIDTH, Math.max(node.name.length, downloadLabel) + padX * 2)
+    return Math.max(MIN_WIDTH, Math.max(node.name.length, DIR_BUTTONS) + padX * 2)
   }
   const size = humanBytes(node.size)
   const date = node.mtime > 0 ? new Date(node.mtime * 1000).toISOString().slice(0, 10) : ''
-  const longest = Math.max(node.name.length, size.length, date.length, downloadLabel)
+  const longest = Math.max(node.name.length, size.length, date.length, FILE_BUTTONS)
   return Math.max(MIN_WIDTH, longest + padX * 2)
 }
 
@@ -232,6 +245,8 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
               }
               onFit={() => setWidth(depth, fitColumnWidth(column, 2))}
               held={props.held}
+              onPreview={props.onPreview}
+              previewDisabled={props.previewDisabled}
             />
           )
         })}
@@ -251,6 +266,8 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
           held={props.held}
           onSeed={props.onSeed}
           seedDisabled={props.seedDisabled}
+          onPreview={props.onPreview}
+          previewDisabled={props.previewDisabled}
         />
       </div>
     )
@@ -299,6 +316,8 @@ function Column({
   onResizeStart,
   onFit,
   held,
+  onPreview,
+  previewDisabled,
 }: {
   dir: DirNode
   selected: string | undefined
@@ -309,6 +328,8 @@ function Column({
   onResizeStart: (event: MouseEvent) => void
   onFit: () => void
   held: ReadonlySet<number>
+  onPreview: () => void
+  previewDisabled?: boolean
 }) {
   return (
     <div
@@ -340,6 +361,8 @@ function Column({
               padX={padX}
               onSelect={() => onSelect(child)}
               held={held}
+              onPreview={onPreview}
+              previewDisabled={previewDisabled}
             />
           ))
         )}
@@ -355,12 +378,16 @@ function Row({
   padX,
   onSelect,
   held,
+  onPreview,
+  previewDisabled,
 }: {
   node: Node
   active: boolean
   padX: number
   onSelect: () => void
   held: ReadonlySet<number>
+  onPreview: () => void
+  previewDisabled?: boolean
 }) {
   const state = seedState(node, held)
   return (
@@ -370,6 +397,20 @@ function Row({
       onclick={(event: MouseEvent) => {
         event.stopPropagation()
         onSelect()
+      }}
+      /*
+        Double-click opens the file, the way it does in Finder. Files only:
+        a folder already opens on the first click, since that is what pushes
+        its column into view.
+
+        No `onSelect()` here — the two clicks underneath this one have already
+        run, so the row is the selection by the time this fires, which is what
+        `onPreview` reads.
+      */
+      ondblclick={(event: MouseEvent) => {
+        if (node.kind !== 'file' || previewDisabled) return
+        event.stopPropagation()
+        onPreview()
       }}
       onkeydown={(event: KeyboardEvent) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -425,7 +466,7 @@ function Row({
   )
 }
 
-/** The rightmost pane: metadata and download for the current selection. */
+/** The rightmost pane: metadata and actions for the current selection. */
 function Detail({
   node,
   width,
@@ -436,6 +477,8 @@ function Detail({
   held,
   onSeed,
   seedDisabled,
+  onPreview,
+  previewDisabled,
 }: {
   node: Node | undefined
   width: number
@@ -446,6 +489,8 @@ function Detail({
   held: ReadonlySet<number>
   onSeed: () => void
   seedDisabled?: boolean
+  onPreview: () => void
+  previewDisabled?: boolean
 }) {
   if (!node) return null
   const state = seedState(node, held)
@@ -481,8 +526,15 @@ function Detail({
           ) : (
             <Text color="fgMuted">folder</Text>
           )}
+          {/*
+            Wrapping, because three buttons are wider than the pane's default
+            width and the pane is the one column here that cannot scroll
+            sideways — without it the last button is simply cut off. Fitting
+            the pane (double-click the border) still snaps to a width that
+            holds them on one line.
+          */}
           <div style={{ alignSelf: 'start' }}>
-            <Stack direction="row" gap={1}>
+            <Stack direction="row" gap={1} wrap>
               <Button
                 variant="secondary"
                 onclick={() => onDownload()}
@@ -506,6 +558,19 @@ function Detail({
               >
                 {state === 'full' ? 'Seeding' : 'Seed'}
               </Button>
+              {/*
+                Files only. A folder has no single thing to render, and a
+                button that opens a view saying so is worse than no button.
+              */}
+              {node.kind === 'file' ? (
+                <Button
+                  variant="secondary"
+                  onclick={() => onPreview()}
+                  disabled={previewDisabled}
+                >
+                  Preview
+                </Button>
+              ) : null}
             </Stack>
           </div>
         </Stack>

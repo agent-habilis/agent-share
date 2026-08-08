@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach } from 'bun:test'
 
 import {
+  canGoBack,
   navigateToShare,
   onRouteChange,
   parseRoute,
@@ -44,10 +45,12 @@ describe('parseRoute', () => {
     expect(parseRoute(`/files/${encodeURIComponent(TICKET)}`)).toEqual({
       view: 'files',
       ticket: TICKET,
+      path: [],
     })
     expect(parseRoute(`/info/${encodeURIComponent(TICKET)}`)).toEqual({
       view: 'info',
       ticket: TICKET,
+      path: [],
     })
   })
 
@@ -58,6 +61,7 @@ describe('parseRoute', () => {
     expect(parseRoute(`/files/${TICKET}`)).toEqual({
       view: 'files',
       ticket: TICKET,
+      path: [],
     })
   })
 
@@ -65,6 +69,7 @@ describe('parseRoute', () => {
     expect(parseRoute(`/files/${encodeURIComponent(TICKET)}/`)).toEqual({
       view: 'files',
       ticket: TICKET,
+      path: [],
     })
   })
 
@@ -74,6 +79,61 @@ describe('parseRoute', () => {
     expect(parseRoute('/about')).toBeNull()
     expect(parseRoute('/files')).toBeNull()
     expect(parseRoute(`/other/${encodeURIComponent(TICKET)}`)).toBeNull()
+  })
+
+  test('only preview takes segments past the ticket', () => {
+    expect(parseRoute(`/files/${TICKET}/extra`)).toBeNull()
+    expect(parseRoute(`/info/${TICKET}/extra`)).toBeNull()
+  })
+})
+
+describe('the preview route', () => {
+  test('reads the file path out of the trailing segments', () => {
+    expect(parseRoute(`/preview/${TICKET}/docs/note.md`)).toEqual({
+      view: 'preview',
+      ticket: TICKET,
+      path: ['docs', 'note.md'],
+    })
+  })
+
+  test('a preview naming no file is still a preview route', () => {
+    // A `/preview/<ticket>` reached by hand has nothing to show, and the pane
+    // says so — parsing it as home would send the tab to the landing page.
+    expect(parseRoute(`/preview/${TICKET}`)).toEqual({
+      view: 'preview',
+      ticket: TICKET,
+      path: [],
+    })
+  })
+
+  test('segments survive characters a URL path cannot carry raw', () => {
+    const name = 'a b#c%d?e.txt'
+    const url = new URL(
+      sharePath(TICKET, 'preview', undefined, false, ['sub dir', name]),
+      'http://localhost',
+    )
+    expect(url.pathname).not.toContain('#')
+    expect(parseRoute(url.pathname, url.search)).toEqual({
+      view: 'preview',
+      ticket: TICKET,
+      path: ['sub dir', name],
+    })
+  })
+
+  test('navigateToShare writes a preview path and carries the transport', () => {
+    window.history.replaceState(null, '', `/files/${TICKET}?transport=relay`)
+    navigateToShare(TICKET, 'preview', { file: ['docs', 'note.md'] })
+    expect(window.location.pathname).toBe(`/preview/${TICKET}/docs/note.md`)
+    expect(parseRoute()).toEqual({
+      view: 'preview',
+      ticket: TICKET,
+      path: ['docs', 'note.md'],
+      transport: 'relay',
+    })
+  })
+
+  test('a preview URL still yields its ticket when pasted', () => {
+    expect(parseShareInput(`http://localhost/preview/${TICKET}/docs/note.md`)).toBe(TICKET)
   })
 })
 
@@ -105,6 +165,7 @@ describe('transport on the route', () => {
     expect(parseRoute(`/files/${TICKET}`, '?transport=webrtc')).toEqual({
       view: 'files',
       ticket: TICKET,
+      path: [],
       transport: 'webrtc',
     })
   })
@@ -119,6 +180,7 @@ describe('transport on the route', () => {
     expect(parseRoute(url.pathname, url.search)).toEqual({
       view: 'info',
       ticket: TICKET,
+      path: [],
       transport: 'relay',
     })
   })
@@ -132,7 +194,12 @@ describe('transport on the route', () => {
     window.history.replaceState(null, '', `/files/${TICKET}?transport=webrtc`)
     navigateToShare(TICKET, 'info')
     expect(window.location.pathname).toBe(`/info/${TICKET}`)
-    expect(parseRoute()).toEqual({ view: 'info', ticket: TICKET, transport: 'webrtc' })
+    expect(parseRoute()).toEqual({
+      view: 'info',
+      ticket: TICKET,
+      path: [],
+      transport: 'webrtc',
+    })
   })
 
   test('navigateToShare adds nothing when no mode is pinned', () => {
@@ -185,5 +252,27 @@ describe('navigateToShare', () => {
     navigateToShare(TICKET, 'files')
     navigateToShare(TICKET, 'info', { replace: true })
     expect(window.location.pathname).toBe(`/info/${encodeURIComponent(TICKET)}`)
+  })
+})
+
+describe('canGoBack', () => {
+  test('a fresh document has nothing behind it', () => {
+    // What a pasted link or a new tab lands on: `back()` here leaves the site.
+    window.history.replaceState(null, '', `/preview/${TICKET}/note.txt`)
+    expect(canGoBack()).toBe(false)
+  })
+
+  test('an entry this tab pushed can be popped', () => {
+    window.history.replaceState(null, '', `/files/${TICKET}`)
+    navigateToShare(TICKET, 'preview', { file: ['note.txt'] })
+    expect(canGoBack()).toBe(true)
+  })
+
+  test('replacing keeps the entry as unpoppable as it was', () => {
+    // The replaced entry keeps its place in history, so it must keep its
+    // answer too — otherwise leaving a pasted link would try to pop past it.
+    window.history.replaceState(null, '', `/preview/${TICKET}/note.txt`)
+    navigateToShare(TICKET, 'files', { replace: true })
+    expect(canGoBack()).toBe(false)
   })
 })
