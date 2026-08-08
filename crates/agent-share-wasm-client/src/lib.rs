@@ -3003,7 +3003,7 @@ async fn connect_via_seeder(
             let mesh_handle = WebRtcHandle::new(Arc::clone(&mesh_hub));
             let endpoint = Endpoint::builder(presets::Minimal)
                 .secret_key(key)
-                .relay_mode(relay_mode(&ticket))
+                .relay_mode(relay_mode(&ticket.lookups.relay))
                 .add_custom_transport(mesh_handle.transport())
                 .path_selector(mesh_handle.path_selector())
                 .bind()
@@ -3019,7 +3019,7 @@ async fn connect_via_seeder(
             // lane's session. See the field note on [`WaitingMesh`].
             let signal_endpoint = Endpoint::builder(presets::Minimal)
                 .secret_key(mount_key.clone())
-                .relay_mode(relay_mode(&ticket))
+                .relay_mode(relay_mode(&ticket.lookups.relay))
                 .bind()
                 .await
                 .map_err(|error| err("bind the mount-signal endpoint", &error))?;
@@ -3942,7 +3942,7 @@ async fn connect_relay(
     let key = SecretKey::generate();
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(key)
-        .relay_mode(relay_mode(&ticket))
+        .relay_mode(relay_mode(&ticket.lookups.relay))
         .bind()
         .await
         .map_err(|error| err("bind relay endpoint", &error))?;
@@ -3985,7 +3985,7 @@ async fn connect_relay_only(
     // host-only); dialing relay-only plus path assertion is enough here.
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(key)
-        .relay_mode(relay_mode(&ticket))
+        .relay_mode(relay_mode(&ticket.lookups.relay))
         .bind()
         .await
         .map_err(|error| err("bind relay-only endpoint", &error))?;
@@ -4272,7 +4272,7 @@ async fn connect_webrtc(
     let signal_bind = async {
         Endpoint::builder(presets::Minimal)
             .secret_key(key.clone())
-            .relay_mode(relay_mode(&ticket))
+            .relay_mode(relay_mode(&ticket.lookups.relay))
             .add_custom_transport(mesh_handle.transport())
             .path_selector(mesh_handle.path_selector())
             .bind()
@@ -4545,9 +4545,23 @@ async fn read_header(
 
 /// The relay ladder the ticket carries. `Disabled` on a loopback ticket, where
 /// there is nothing to reach.
-fn relay_mode(ticket: &MountTicket) -> RelayMode {
+///
+/// The length of this ladder does not set how many relay `WebSocket`s a tab
+/// opens, so trimming it does not quiet the red `WebSocket … failed` lines in
+/// the console. On wasm, iroh measures a rung with a `fetch` of `/ping`, and it
+/// opens a socket only for the home relay and for each rung a *peer* advertises.
+/// That is why [`seeder_relays`] naming all five rungs costs five sockets, four
+/// of them guesses that iroh's inactive-relay reap kills a minute later. A
+/// socket that closes before it opens always logs an error, and no browser API
+/// can silence it. Removing the noise needs a cap on speculative relay paths in
+/// iroh, not a change here.
+///
+/// Takes the choice rather than the ticket so a *producing* tab, which binds
+/// before it has a ticket to hand, homes on the ladder its ticket will go on to
+/// advertise.
+pub(crate) fn relay_mode(choice: &agent_share_proto::lookup::RelayChoice) -> RelayMode {
     use agent_share_proto::lookup::RelayChoice;
-    match &ticket.lookups.relay {
+    match choice {
         RelayChoice::Disabled => RelayMode::Disabled,
         // Our relay first, n0's as fallback — the same rungs the mesh gossips
         // over, taken from the one list rather than a second copy. A ticket
@@ -4634,21 +4648,19 @@ fn serde_wasm<T: serde::Serialize>(value: &T) -> Result<JsValue, JsValue> {
 }
 
 /// The `Pinned` ladder, from `agent-habilis-mesh` — see [`relay_mode`].
+///
+/// The engine parses the list, not us: `relay_ladder` is `LazyLock`-cached and
+/// its `RelayUrl`s are `Arc`-backed, so this costs a clone rather than five URL
+/// parses per endpoint. The CLI reaches the same list through the same call.
 fn pinned_ladder() -> Vec<fofoca::iroh::RelayUrl> {
-    fofoca::RENDEZVOUS_RELAY_LADDER
-        .iter()
-        .map(|raw| {
-            raw.parse()
-                .expect("RENDEZVOUS_RELAY_LADDER entries are valid relay URLs")
-        })
-        .collect()
+    fofoca::net::relay_ladder(&fofoca::protocol::RelayChoice::Pinned)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         CHANNEL_DISCONNECT_GRACE_MS, PeerCard, ProbeChunkSource, RaceOutcome, SwarmView,
-        drain_with_stall_deadline, first_success, swarm_rows,
+        drain_with_stall_deadline, first_success, pinned_ladder, relay_mode, swarm_rows,
     };
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
@@ -4657,6 +4669,38 @@ mod tests {
     // dev-dependency note in `Cargo.toml`. Renaming the attribute keeps the
     // tests written as ordinary `#[test]` functions.
     use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    /// A producing tab homes on the ladder its ticket goes on to advertise.
+    ///
+    /// It used to bind with iroh's `default_relay_mode()`, which names n0's four
+    /// relays and not rung 0 — ours. So a tab served a "pinned" ticket from a
+    /// relay no reader of that ticket would look on, and two tabs sharing to
+    /// each other were guaranteed to start apart. Compared as sets: `RelayMap`
+    /// is a `BTreeMap`, so rung order does not survive, and nothing downstream
+    /// wants it to — iroh picks its home relay by measured latency.
+    #[test]
+    fn a_pinned_endpoint_is_offered_our_relay() {
+        let ladder = pinned_ladder();
+        let ours = ladder.first().expect("the pinned ladder has rungs").clone();
+        assert_eq!(ours.host_str(), Some("relay.agent-habilis.com"));
+
+        let choice = agent_share_proto::lookup::LookupOpts::public_preset().relay;
+        let mut offered = relay_mode(&choice).relay_map().urls::<Vec<_>>();
+        let mut expected = ladder;
+        offered.sort();
+        expected.sort();
+        assert_eq!(offered, expected);
+        assert!(offered.contains(&ours));
+    }
+
+    /// A loopback ticket reaches no relay at all.
+    #[test]
+    fn a_disabled_choice_names_no_relay() {
+        let offered = relay_mode(&agent_share_proto::lookup::RelayChoice::Disabled)
+            .relay_map()
+            .urls::<Vec<fofoca::iroh::RelayUrl>>();
+        assert!(offered.is_empty());
+    }
 
     /// `wait_ms` needs a `Window`; the node test runner has none, but
     /// `setTimeout` lives on the global in both worlds.

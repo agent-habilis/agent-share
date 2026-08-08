@@ -20,6 +20,8 @@ mod dht;
 mod mdns;
 mod relay;
 
+pub(crate) use relay::pinned_ladder;
+
 /// Build an iroh endpoint for a swarm's lookups.
 ///
 /// - `lookups`: which address-lookups (mDNS / DHT) and relay to wire.

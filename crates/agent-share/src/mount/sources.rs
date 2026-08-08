@@ -289,10 +289,7 @@ pub(super) fn seeder_addr(
     use agent_share_proto::lookup::RelayChoice;
     let relays: Vec<fofoca::iroh::RelayUrl> = match &lookups.relay {
         RelayChoice::Disabled => Vec::new(),
-        RelayChoice::Pinned => fofoca::RENDEZVOUS_RELAY_LADDER
-            .iter()
-            .filter_map(|raw| raw.parse().ok())
-            .collect(),
+        RelayChoice::Pinned => crate::lookup::pinned_ladder(),
         RelayChoice::Custom(ladder) => ladder.clone(),
     };
     EndpointAddr::from_parts(id, relays.into_iter().map(TransportAddr::Relay))
@@ -335,5 +332,40 @@ mod tests {
         assert!(!vouches(&partial, "aaaa", 2, 4));
         let complete = card(Some("aaaa"), Some("*"));
         assert!(vouches(&complete, "aaaa", 3, 4));
+    }
+
+    /// A seeder is dialled on the very rungs [`crate::lookup::pinned_ladder`]
+    /// hands the endpoint. The two used to parse `RENDEZVOUS_RELAY_LADDER`
+    /// separately — and disagreed on a bad rung, one dropping it and the other
+    /// panicking — so this pins that they stay one list.
+    ///
+    /// Compared as sets: `EndpointAddr` keeps its addresses sorted, so rung
+    /// order does not survive the trip. Nothing downstream wants it to — iroh
+    /// picks a home relay by measured latency, never by position.
+    #[test]
+    fn a_pinned_seeder_is_dialled_on_the_endpoint_ladder() {
+        use agent_share_proto::lookup::LookupOpts;
+
+        let id = fofoca::iroh::SecretKey::generate().public();
+        let addr = super::seeder_addr(id, &LookupOpts::public_preset());
+
+        let mut dialled: Vec<_> = addr.relay_urls().cloned().collect();
+        let mut ladder = crate::lookup::pinned_ladder();
+        dialled.sort();
+        ladder.sort();
+        assert_eq!(dialled, ladder);
+        assert!(!dialled.is_empty(), "a public share must name its rungs");
+    }
+
+    /// A loopback share names no rungs: resolution is left to mDNS/DHT on the
+    /// endpoint, and a stray relay address would send it off-box.
+    #[test]
+    fn a_loopback_seeder_names_no_relay() {
+        use agent_share_proto::lookup::LookupOpts;
+
+        let id = fofoca::iroh::SecretKey::generate().public();
+        let addr = super::seeder_addr(id, &LookupOpts::loopback());
+
+        assert_eq!(addr.relay_urls().count(), 0);
     }
 }

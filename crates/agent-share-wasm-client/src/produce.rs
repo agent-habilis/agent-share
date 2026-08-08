@@ -154,9 +154,16 @@ impl ShareProducer {
         let hub = BrowserHubTransport::new(local);
         let handle = WebRtcHandle::new(Arc::clone(&hub));
 
+        // A tab is always publicly reachable or not reachable at all — it has no
+        // mDNS, no DHT, and no loopback peers. Hoisted above the bind so the
+        // endpoint, the mesh derivation, and the ticket cannot state different
+        // reaches: they must agree, or a viewer derives a mesh the producer is
+        // not on, or dials a relay ladder this tab never homed on.
+        let lookups = LookupOpts::public_preset();
+
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
-            .relay_mode(fofoca::iroh::endpoint::default_relay_mode())
+            .relay_mode(crate::relay_mode(&lookups.relay))
             .alpns(vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()])
             .add_custom_transport(handle.transport())
             .path_selector(handle.path_selector())
@@ -184,11 +191,6 @@ impl ShareProducer {
                 Box::new(SignalHandler::new(local, Arc::clone(&hub))),
             ),
         ];
-        // A tab is always publicly reachable or not reachable at all — it has no
-        // mDNS, no DHT, and no loopback peers. Hoisted so the mesh derivation
-        // and the ticket cannot state different reaches: they must agree, or a
-        // viewer derives a mesh the producer is not on.
-        let lookups = LookupOpts::public_preset();
         // One identity for this tab: the mount peer and the mesh peer are the
         // same node, so a viewer counts this producer once rather than twice.
         let card = match card.as_ref() {
@@ -488,9 +490,14 @@ impl BenchProducer {
         let hub = BrowserHubTransport::new(local);
         let handle = WebRtcHandle::new(Arc::clone(&hub));
 
+        // Bound before the endpoint for the reason `ShareProducer::start` gives:
+        // the ticket below advertises this ladder, so the endpoint must home on
+        // it too.
+        let lookups = LookupOpts::public_preset();
+
         let mut builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
-            .relay_mode(fofoca::iroh::endpoint::default_relay_mode());
+            .relay_mode(crate::relay_mode(&lookups.relay));
         builder = if with_webrtc {
             builder
                 .alpns(vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()])
@@ -520,7 +527,7 @@ impl BenchProducer {
         let ticket = MountTicket {
             addr: endpoint.addr(),
             secret,
-            lookups: LookupOpts::public_preset(),
+            lookups,
             kind,
             mesh_id: None,
             // A bench share is synthetic — no directory, no bytes, nothing
