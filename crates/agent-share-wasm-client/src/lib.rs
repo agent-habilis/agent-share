@@ -2203,6 +2203,11 @@ struct KnownSeeder {
     /// re-verifies against this, so a stale record is refused, not trusted.
     tree: String,
     seen_ms: f64,
+    /// Consecutive attempts that could not reach this endpoint at all. See
+    /// [`KNOWN_SEEDER_STRIKE_LIMIT`]. Defaulted so rosters written before
+    /// this field existed still decode.
+    #[serde(default)]
+    strikes: u32,
 }
 
 /// Where the vetted-seeder records live: `localStorage`, beside the manifest
@@ -2263,6 +2268,7 @@ fn remember_known_seeder(token: &[u8; SECRET_LEN], endpoint: &str, tree: &Majori
             endpoint: endpoint.to_owned(),
             tree: tree.as_str().to_owned(),
             seen_ms: now_ms(),
+            strikes: 0,
         },
     );
     store_known_seeders(token, &list);
@@ -2339,12 +2345,64 @@ fn judge_adopted_tree(
     }
 }
 
-/// Drop the endpoints a redial lane dialled without a win, so a roster of
-/// corpses is paid for at most once per generation.
+/// Drop named endpoints from the roster outright. For a peer the mesh has
+/// contradicted, where the record itself is what is wrong — see
+/// [`challenge_adopted_tree`].
 fn forget_known_seeders(token: &[u8; SECRET_LEN], failed: &[String]) {
     let mut list = load_known_seeders(token);
     list.retain(|entry| !failed.contains(&entry.endpoint));
     store_known_seeders(token, &list);
+}
+
+/// The attempt log, joined for a user-facing error.
+fn refusal_lines(refusals: &[Refusal]) -> String {
+    refusals
+        .iter()
+        .map(|refusal| refusal.reason.as_str())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// How many attempts in a row must fail to *reach* a seeder before its
+/// record is dropped.
+///
+/// Not one. A dial that reaches nobody is ambiguous: the peer may be gone,
+/// or this tab's own link may be down — a laptop waking with its interfaces
+/// still cold fails every dial in milliseconds, and the roster is what the
+/// fast lane needs most at exactly that moment. One miss is not evidence.
+/// Three in a row is, and any answer in between clears the count.
+const KNOWN_SEEDER_STRIKE_LIMIT: u32 = 3;
+
+/// The roster this tab keeps after a redial lane that produced no winner.
+///
+/// The rule is that a record is only spent by evidence about *the peer*.
+/// The lane used to delete every endpoint it had launched an attempt
+/// against, which threw away three different kinds of live seeder: one that
+/// answered and then failed its vet, one still mid-dial when the lane's
+/// deadline fired, and — when the local link was down — all of them at once.
+///
+/// So an endpoint that never refused is left alone, since an attempt cut
+/// off mid-flight says nothing; an endpoint that answered has its count
+/// cleared, since whatever failed afterwards was about the share and not
+/// about the peer being there; and an endpoint nothing could reach is
+/// struck, and dropped only once it has run out of chances.
+fn roster_after_failed_lane(list: Vec<KnownSeeder>, refusals: &[Refusal]) -> Vec<KnownSeeder> {
+    list.into_iter()
+        .filter_map(|mut entry| {
+            let Some(refusal) = refusals
+                .iter()
+                .find(|refusal| refusal.endpoint == entry.endpoint)
+            else {
+                return Some(entry);
+            };
+            if !refusal.unreached {
+                entry.strikes = 0;
+                return Some(entry);
+            }
+            entry.strikes += 1;
+            (entry.strikes < KNOWN_SEEDER_STRIKE_LIMIT).then_some(entry)
+        })
+        .collect()
 }
 
 /// Persist the origin's manifest so a refreshed tab can re-arm with no live
@@ -2947,7 +3005,7 @@ async fn connect_via_seeder(
         can_serve: can_serve.as_ref(),
     };
     let mut attempts: Vec<
-        std::pin::Pin<Box<dyn std::future::Future<Output = Result<VettedSeeder, String>> + '_>>,
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<VettedSeeder, Refusal>> + '_>>,
     > = Vec::new();
     for (slot, candidate) in candidates.iter().take(SEEDER_RACE_WIDTH).enumerate() {
         let Ok(id) = candidate
@@ -2990,7 +3048,7 @@ async fn connect_via_seeder(
             return Err(JsValue::from_str(&format!(
                 "the origin is unreachable ({}) and no seeder could serve the share: {}",
                 describe(origin_error),
-                refusals.join("; "),
+                refusal_lines(&refusals),
             )));
         }
         RaceOutcome::DeadlineExpired => {
@@ -2998,7 +3056,7 @@ async fn connect_via_seeder(
                 "the origin is unreachable ({}) and no seeder answered inside {} s: {}",
                 describe(origin_error),
                 SEEDER_RACE_DEADLINE_MS / 1_000,
-                refusals.join("; "),
+                refusal_lines(&refusals),
             )));
         }
     };
@@ -3066,9 +3124,8 @@ async fn redial_known_seeders(
     // by id rather than by luck.
     let own = waiting.peer.hub().local_id().to_string();
     let relays_ref = &relays;
-    let mut dialled: Vec<String> = Vec::new();
     let mut attempts: Vec<
-        std::pin::Pin<Box<dyn std::future::Future<Output = Result<VettedSeeder, String>> + '_>>,
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<VettedSeeder, Refusal>> + '_>>,
     > = Vec::new();
     for entry in entries.iter().filter(|entry| entry.endpoint != own) {
         let Ok(id) = entry
@@ -3077,7 +3134,6 @@ async fn redial_known_seeders(
         else {
             continue;
         };
-        dialled.push(entry.endpoint.clone());
         let endpoint = entry.endpoint.clone();
         let tree = entry.tree.clone();
         let delay = i32::try_from(attempts.len()).unwrap_or(0) * KNOWN_SEEDER_STAGGER_MS;
@@ -3111,6 +3167,20 @@ async fn redial_known_seeders(
                 &vetted.endpoint[..8.min(vetted.endpoint.len())],
             )));
             let tree = agent_share_proto::manifest::manifest_fingerprint(&vetted.bytes);
+            // A win is the strongest proof of life there is, so any misses
+            // this endpoint had banked from earlier attempts are void. The
+            // strike count has to reset on evidence or it only ever climbs,
+            // and a peer that answers most of the time would still be
+            // deleted eventually.
+            let cleared = roster_after_failed_lane(
+                load_known_seeders(token),
+                &[Refusal {
+                    endpoint: vetted.endpoint.clone(),
+                    reason: String::new(),
+                    unreached: false,
+                }],
+            );
+            store_known_seeders(token, &cleared);
             // Note what is *not* here: a `remember_known_seeder` call. Its
             // fresh `seen_ms` would restart the 24 h TTL, and a record that
             // renews itself every time it wins can never expire — a seeder
@@ -3133,11 +3203,12 @@ async fn redial_known_seeders(
             Some(client)
         }
         RaceOutcome::AllFailed | RaceOutcome::DeadlineExpired => {
-            forget_known_seeders(token, &dialled);
+            let kept = roster_after_failed_lane(load_known_seeders(token), &refusals);
+            store_known_seeders(token, &kept);
             if !refusals.is_empty() {
                 web_sys::console::log_1(&JsValue::from_str(&format!(
                     "[share] known-seeder redial found nobody home ({}); waiting for cards",
-                    refusals.join("; "),
+                    refusal_lines(&refusals),
                 )));
             }
             None
@@ -3390,6 +3461,22 @@ struct VettedSeeder {
     demoted: bool,
 }
 
+/// Why a candidate did not serve this attempt, and the part the roster cares
+/// about: whether the dial ever reached it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Refusal {
+    endpoint: String,
+    /// The line for the attempt log.
+    reason: String,
+    /// Neither the data channel nor the relay produced a connection.
+    ///
+    /// Only this says anything about whether the peer is still out there.
+    /// Every later failure happens *after* a connection landed, so it is
+    /// about the share — a tree that moved, a stalled read — and not about
+    /// the peer's existence.
+    unreached: bool,
+}
+
 /// What a candidate is held to, and what it raises when it passes. Bundled
 /// because both lanes — the known-seeder redial and the card race — vet
 /// against the same four things and differ only in their values.
@@ -3418,7 +3505,7 @@ async fn vet_seeder_candidate(
     id: fofoca::protocol::iroh_base::EndpointId,
     relays: &[TransportAddr],
     terms: &VetTerms<'_>,
-) -> Result<VettedSeeder, String> {
+) -> Result<VettedSeeder, Refusal> {
     let VetTerms {
         token,
         tree,
@@ -3437,10 +3524,14 @@ async fn vet_seeder_candidate(
             match waiting.endpoint.connect(addr, MOUNT_ALPN).await {
                 Ok(connection) => (connection, false),
                 Err(error) => {
-                    return Err(format!(
-                        "{short}: webrtc: {}; relay: {error}",
-                        describe(&webrtc_error),
-                    ));
+                    return Err(Refusal {
+                        endpoint,
+                        reason: format!(
+                            "{short}: webrtc: {}; relay: {error}",
+                            describe(&webrtc_error),
+                        ),
+                        unreached: true,
+                    });
                 }
             }
         }
@@ -3462,11 +3553,19 @@ async fn vet_seeder_candidate(
             (bytes, manifest)
         }
         Ok(_) => {
-            return Err(format!(
-                "{short}: served a different tree than its card claimed"
-            ));
+            return Err(Refusal {
+                endpoint,
+                reason: format!("{short}: served a different tree than its card claimed"),
+                unreached: false,
+            });
         }
-        Err(error) => return Err(format!("{short}: {}", describe(&error))),
+        Err(error) => {
+            return Err(Refusal {
+                endpoint,
+                reason: format!("{short}: {}", describe(&error)),
+                unreached: false,
+            });
+        }
     };
     // Prove the path moves bulk before trusting it with the share; see
     // `probe_read`. Only a data-channel connection is suspect — bulk never
@@ -3505,7 +3604,11 @@ async fn vet_seeder_candidate(
                 manifest,
                 demoted: true,
             }),
-            Err(error) => Err(format!("{short}: relay redial after failed probe: {error}")),
+            Err(error) => Err(Refusal {
+                endpoint,
+                reason: format!("{short}: relay redial after failed probe: {error}"),
+                unreached: false,
+            }),
         };
     }
     Ok(VettedSeeder {
@@ -3531,13 +3634,13 @@ enum RaceOutcome<Winner> {
 /// still-running attempts, which cancels them mid-dial — the same
 /// cancellation an abandoned connect always had. A seam like
 /// [`drain_with_stall_deadline`]: generic so tests can script the futures.
-async fn first_success<Winner, Attempt, Deadline>(
+async fn first_success<Winner, Refused, Attempt, Deadline>(
     mut pending: Vec<Attempt>,
     mut deadline: Deadline,
-    refusals: &mut Vec<String>,
+    refusals: &mut Vec<Refused>,
 ) -> RaceOutcome<Winner>
 where
-    Attempt: std::future::Future<Output = Result<Winner, String>> + Unpin,
+    Attempt: std::future::Future<Output = Result<Winner, Refused>> + Unpin,
     Deadline: std::future::Future<Output = ()> + Unpin,
 {
     loop {
@@ -4785,11 +4888,109 @@ mod tests {
         );
     }
 
+    fn refusal(endpoint: &str, unreached: bool) -> super::Refusal {
+        super::Refusal {
+            endpoint: endpoint.to_owned(),
+            reason: format!("{endpoint}: refused"),
+            unreached,
+        }
+    }
+
+    fn kept(list: &[super::KnownSeeder]) -> Vec<&str> {
+        list.iter().map(|entry| entry.endpoint.as_str()).collect()
+    }
+
+    /// A peer that answered is alive, whatever went wrong next. The redial
+    /// lane vets against the tree this tab recorded, so a seeder that
+    /// correctly *followed* the origin to a new tree fails its vet — and
+    /// deleting it for that is exactly backwards: the roster keeps the
+    /// frozen peer and throws away the current one.
+    #[test]
+    fn a_seeder_that_answered_is_never_forgotten() {
+        let list = vec![seeder("moved-on", 0.0), seeder("corpse", 0.0)];
+        let refusals = [refusal("moved-on", false), refusal("corpse", true)];
+        assert!(
+            kept(&super::roster_after_failed_lane(list, &refusals)).contains(&"moved-on"),
+            "a peer that served us a manifest is not a corpse"
+        );
+    }
+
+    /// The lane's 10 s deadline cannot contain its own pipeline: a 6 s JSEP
+    /// wait, a manifest fetch, then 10 s bulk-probe windows. So a live
+    /// seeder whose channel formed at 2 s is routinely still mid-probe when
+    /// the deadline fires, and it never refused anything — the lane simply
+    /// ran out of time. Deleting it on that basis deletes the working peer.
+    #[test]
+    fn a_seeder_still_dialling_at_the_deadline_is_never_forgotten() {
+        let list = vec![seeder("slow-but-live", 0.0), seeder("corpse", 0.0)];
+        // Only the corpse got as far as refusing before the deadline.
+        let refusals = [refusal("corpse", true)];
+        assert!(
+            kept(&super::roster_after_failed_lane(list, &refusals)).contains(&"slow-but-live"),
+            "an attempt cut off mid-flight is not evidence about its peer"
+        );
+    }
+
+    /// Reaching nobody at all says more about this tab's link than about
+    /// everyone else's liveness. A laptop waking with its interfaces still
+    /// down fails every dial in milliseconds, and wiping the roster there
+    /// costs the fast lane in the exact scenario it was built for.
+    #[test]
+    fn a_lane_that_reached_nobody_keeps_everybody() {
+        let list = vec![seeder("a", 0.0), seeder("b", 0.0)];
+        let refusals = [refusal("a", true), refusal("b", true)];
+        assert_eq!(
+            kept(&super::roster_after_failed_lane(list, &refusals)),
+            vec!["a", "b"],
+            "one bad moment on our own link must not empty the roster"
+        );
+    }
+
+    /// The other half: a record still has to be spendable, or a roster of
+    /// corpses would cost the redial lane its whole budget on every single
+    /// reconnect until the 24 h TTL finally expired them.
+    #[test]
+    fn an_endpoint_missed_often_enough_is_dropped() {
+        let mut list = vec![seeder("corpse", 0.0), seeder("bystander", 0.0)];
+        let refusals = [refusal("corpse", true)];
+        for _ in 0..super::KNOWN_SEEDER_STRIKE_LIMIT {
+            list = super::roster_after_failed_lane(list, &refusals);
+        }
+        assert_eq!(
+            kept(&list),
+            vec!["bystander"],
+            "a peer nothing has reached in three tries is spent, and only that peer"
+        );
+    }
+
+    /// Strikes have to be *consecutive*, or a peer that is merely flaky
+    /// accumulates its way to deletion over a long session. An answer is
+    /// proof of life and puts the count back to zero.
+    #[test]
+    fn an_answer_wipes_out_earlier_misses() {
+        let missed = [refusal("flaky", true)];
+        let answered = [refusal("flaky", false)];
+        let mut list = vec![seeder("flaky", 0.0)];
+        for _ in 0..super::KNOWN_SEEDER_STRIKE_LIMIT - 1 {
+            list = super::roster_after_failed_lane(list, &missed);
+        }
+        list = super::roster_after_failed_lane(list, &answered);
+        for _ in 0..super::KNOWN_SEEDER_STRIKE_LIMIT - 1 {
+            list = super::roster_after_failed_lane(list, &missed);
+        }
+        assert_eq!(
+            kept(&list),
+            vec!["flaky"],
+            "the count restarts after an answer instead of resuming"
+        );
+    }
+
     fn seeder(endpoint: &str, seen_ms: f64) -> super::KnownSeeder {
         super::KnownSeeder {
             endpoint: endpoint.to_owned(),
             tree: "aaaa".to_owned(),
             seen_ms,
+            strikes: 0,
         }
     }
 
