@@ -996,13 +996,29 @@ impl ShareClient {
         });
     }
 
-    /// Leave for real: purge the waiting-mesh registry and broadcast the
-    /// departure. The page-death path (`pagehide`) — nothing after this can
-    /// reuse the membership, so nothing is kept, and the waiting entry's
-    /// endpoints get their closing handshake instead of an abort-by-drop.
+    /// Leave for real: purge the waiting-mesh registry and give up whatever
+    /// can still be given up. The page-death path (`pagehide`) — nothing
+    /// after this can reuse the membership, so nothing is kept.
+    ///
+    /// Be careful what you expect of the async half. This file has measured
+    /// that spawned tasks do not run during page teardown, so the
+    /// `peer.leave()` broadcast and the endpoint closes below are best
+    /// effort that mostly does not happen: on a real tab close the browser
+    /// tears the process down first, and this membership's relay
+    /// registrations go on looking held until the far side times them out.
+    /// Removing the registry entry and detaching the hubs is the part that
+    /// is actually reliable, because both are synchronous, so both happen
+    /// here rather than inside the task. Nothing downstream may be sized
+    /// against a graceful departure that this path cannot promise — the
+    /// ghost roster is a fact of tab-closing until the engine grows a
+    /// synchronous departure signal.
     pub fn shutdown_mesh(&self) {
         let waiting =
             WAITING_MESHES.with(|meshes| meshes.borrow_mut().remove(&share_mesh_key(&self.token)));
+        // Synchronous, so it survives a teardown that eats the task below.
+        if let Some(waiting) = waiting.as_ref() {
+            waiting.detach_hubs();
+        }
         let previous = std::mem::replace(&mut *self.mesh.borrow_mut(), MeshSlot::Left);
         let own = match previous {
             MeshSlot::Joined(peer) => Some(peer),
@@ -2558,6 +2574,14 @@ struct WaitingMesh {
     /// The mount lane's session registry: outbound seeder sessions attach
     /// here; `has_session` is what turns a retry into a free dial.
     mount_hub: Arc<BrowserHubTransport>,
+    /// The mesh lane's session registry, held for one reason: so that
+    /// [`Self::retire`] can let go of it. A hub's sessions close through
+    /// `detach`, never through `Endpoint::close()` — which is why
+    /// `produce.rs`'s `stop()` detaches before closing — so a membership
+    /// retired without this left the mesh lane's peer connections open with
+    /// their handlers installed, and remote tabs kept live-looking channels
+    /// to an identity that had departed.
+    mesh_hub: Arc<BrowserHubTransport>,
     /// Set when a connect of this tab's has joined the share's mesh under
     /// *another* identity, which makes this one a duplicate: two cards and
     /// two relay registrations for one tab on one share. It cannot always be
@@ -2588,7 +2612,47 @@ impl WaitingMesh {
         self.endpoint.close().await;
         self.signal_endpoint.close().await;
         self.mount_endpoint.close().await;
-        self.mount_hub.detach_all();
+        self.detach_hubs();
+    }
+
+    /// Let go of every peer connection this membership holds.
+    ///
+    /// Both hubs, and through one loop rather than one line each, so that a
+    /// third lane cannot be added and quietly left attached — the mesh hub
+    /// was missing here for exactly that reason. Synchronous, which is what
+    /// makes it the only part of a farewell a page teardown can still run;
+    /// see [`ShareClient::shutdown_mesh`].
+    fn detach_hubs(&self) {
+        for hub in [&self.mount_hub, &self.mesh_hub] {
+            hub.detach_all();
+        }
+    }
+}
+
+/// Put `mine` in the registry under `key`, or hand back whoever got there
+/// first.
+///
+/// Minting a membership takes three endpoint binds and a mesh join, all of
+/// them `await` points, so two attempts for one share routinely overlap —
+/// a `/files` → `/info` → back navigation remounts the Session and starts a
+/// second one while the first is still binding. Both then find the registry
+/// empty. A plain `insert` silently drops whichever landed first, and a
+/// dropped `WaitingMesh` is not a free one: it is a joined membership with a
+/// heartbeating card and two relay registrations that nothing will ever say
+/// goodbye for. `Some` means the caller lost and owes its own entry a
+/// `retire`; `None` means the registry now holds it.
+fn claim_waiting_mesh<T: Clone>(
+    registry: &RefCell<HashMap<String, T>>,
+    key: &str,
+    mine: T,
+) -> Option<T> {
+    let mut registry = registry.borrow_mut();
+    match registry.get(key) {
+        Some(winner) => Some(winner.clone()),
+        None => {
+            registry.insert(key.to_owned(), mine);
+            None
+        }
     }
 }
 
@@ -2924,11 +2988,24 @@ async fn connect_via_seeder(
                 signal_endpoint,
                 mount_endpoint,
                 mount_hub,
+                mesh_hub,
                 duplicate: Rc::new(Cell::new(false)),
             };
-            WAITING_MESHES
-                .with(|meshes| meshes.borrow_mut().insert(mesh_key.clone(), entry.clone()));
-            entry
+            // Another attempt for this share may have finished minting
+            // while this one was binding its endpoints. Whoever lost says
+            // goodbye properly instead of being dropped on the floor.
+            match WAITING_MESHES.with(|meshes| claim_waiting_mesh(meshes, &mesh_key, entry.clone()))
+            {
+                Some(winner) => {
+                    web_sys::console::log_1(&JsValue::from_str(
+                        "[share] a concurrent attempt already joined this share's mesh; \
+                         retiring the duplicate membership",
+                    ));
+                    entry.retire(true).await;
+                    winner
+                }
+                None => entry,
+            }
         }
     };
     let mesh_peer = &waiting.peer;
@@ -4980,6 +5057,33 @@ mod tests {
         assert_eq!(
             super::judge_adopted_tree(&[card("me", Some("tree1"))], "me", "tree1"),
             TreeVerdict::Unknown
+        );
+    }
+
+    /// Two attempts for one share overlap all the time — minting is three
+    /// endpoint binds and a mesh join, and a `/files` → `/info` → back
+    /// navigation starts a second attempt inside the first. Both find the
+    /// registry empty, and the loser's membership has to come back to its
+    /// owner so it can be retired: a silently displaced `WaitingMesh` keeps
+    /// its card on the roster and its two relay registrations for the life
+    /// of the page, with nothing left holding a reference to say goodbye.
+    #[test]
+    fn a_losing_mint_gets_its_membership_back_to_retire() {
+        let registry = std::cell::RefCell::new(std::collections::HashMap::new());
+        assert_eq!(
+            super::claim_waiting_mesh(&registry, "share", 1),
+            None,
+            "the first attempt claims the slot"
+        );
+        assert_eq!(
+            super::claim_waiting_mesh(&registry, "share", 2),
+            Some(1),
+            "the second attempt is handed the winner, and keeps its own to retire"
+        );
+        assert_eq!(
+            registry.borrow().get("share"),
+            Some(&1),
+            "the winner stays registered rather than being displaced"
         );
     }
 
