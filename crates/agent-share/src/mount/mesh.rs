@@ -17,13 +17,14 @@
 //! refuses the id, the share still serves and the file transfer is unaffected.
 //! Everything here degrades to "no peer counts" rather than to a broken share.
 
-use std::collections::HashMap;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_share_proto::PeerCard;
 use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
+use agent_share_proto::roster::{MetaEntry, entries_from_meta, live_cards};
 use anyhow::{Context, Result};
 use fofoca::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
@@ -98,7 +99,7 @@ fn share_card_gate() -> SelfWriteGate {
     }
 }
 
-/// Every peer's published card, keyed by endpoint id.
+/// Every peer's published card, plus the roster saying which of them are here.
 ///
 /// Shared with [`ShareMesh`] rather than owned by the driver: the driver lives
 /// inside the engine's event loop and is unreachable from the outside, so a
@@ -106,7 +107,41 @@ fn share_card_gate() -> SelfWriteGate {
 /// roster. The browser peer carries the same split for the same reason.
 /// `pub(crate)` because [`super::sources::SourceSet`] reads it too — the
 /// roster is where read candidates come from.
-pub(crate) type CardBook = Arc<Mutex<HashMap<String, PeerCard>>>;
+pub(crate) type CardBook = Arc<Mutex<Roster>>;
+
+/// What the driver publishes for readers outside the event loop.
+///
+/// Two views of one snapshot, and which one a caller wants is a real choice.
+/// A peer list wants [`Self::present`]: a card whose author the engine no
+/// longer counts is a peer that is gone, and showing it is the defect this
+/// split exists to close. A reader looking for bytes wants [`Self::all`]:
+/// hiding a source that turns out to be alive costs a stalled download, which
+/// is far worse than one stale row.
+#[derive(Default)]
+pub(crate) struct Roster {
+    /// Every `/peers/<nick>/card` in the meta document, ghosts included.
+    /// Nothing ever deletes an entry, so this only grows.
+    entries: Vec<MetaEntry>,
+    /// Nicknames the engine counts as present, with the idle ones already
+    /// dropped — the same set its peer count is taken from, which is what
+    /// makes a list built here agree with that count.
+    present: BTreeSet<String>,
+}
+
+impl Roster {
+    /// Cards of the peers that are here.
+    pub(crate) fn present(&self) -> Vec<PeerCard> {
+        live_cards(&self.entries, &self.present)
+    }
+
+    /// Every card the document holds, present or not.
+    pub(crate) fn all(&self) -> Vec<PeerCard> {
+        self.entries
+            .iter()
+            .map(|entry| entry.card.clone())
+            .collect()
+    }
+}
 
 /// The manifest fingerprint on our own card, shared with [`ShareMesh`].
 ///
@@ -131,56 +166,32 @@ pub(crate) enum ShareRequest {
     RepublishCard,
 }
 
-/// Read every `/peers/<nick>/card` out of a meta document.
+/// The nicknames the engine currently counts as present, ours included.
 ///
-/// Free function rather than a method so the part with the interesting
-/// behaviour — what it tolerates — is testable without standing up an engine.
+/// `roster_snapshot()` reports active peers *and* the quiet ones it evicted
+/// for silence; only the active half is present, which is exactly the set
+/// behind the peer count (`tick_sweep` drops a quiet peer from `peers` and
+/// rewrites that count in the same breath).
 ///
-/// **Keyed by endpoint, not by nickname.** Nicknames are random per join
-/// ([`Nickname::random`] below), so the same machine that rejoins appears under
-/// a new one; the endpoint id is the identity that a mount session can actually
-/// be addressed by. A peer occupying two nicknames therefore collapses to one
-/// entry, which is the desired reading: it is one peer.
-/// Cards from the meta document.
-///
-/// # Known defect: departed peers are not removed
-///
-/// The meta channel is a CRDT and nothing deletes a peer's entry when it goes
-/// — a browser tab *cannot*, because the page is torn down before a broadcast
-/// runs (see `ShareClient::leave_mesh`). So this returns every peer that has
-/// ever joined, and the availability grid counts a departed peer's slots as
-/// held. That makes "which slots would be lost" answer *none* when it should
-/// not. Reloading one tab three times reproduces it.
-///
-/// Filtering against `roster_snapshot()` was tried and reverted: the book and
-/// the roster are fed by different events, and with the filter in place a live
-/// producer's card disappeared entirely. Hiding a peer that is *there* is worse
-/// than showing one that is not, so the ghost stays until this is understood.
-/// See `a_peer_that_left_is_still_listed`.
-fn cards_from_meta(doc: &serde_json::Value) -> HashMap<String, PeerCard> {
-    let mut cards = HashMap::new();
-    let Some(peers) = doc.get("peers").and_then(serde_json::Value::as_object) else {
-        return cards;
-    };
-    for peer in peers.values() {
-        let Some(card_value) = peer.get("card") else {
-            continue;
-        };
-        // A card this build cannot parse is skipped, never fatal: a peer on an
-        // older or newer shape must cost us that one peer, not the roster.
-        let Some(card) = PeerCard::from_card_value(card_value) else {
-            continue;
-        };
-        cards.insert(card.endpoint.clone(), card);
-    }
-    cards
+/// Our own nickname is added because we are never on our own roster and are
+/// unquestionably here. Leaving it out would hide our own card.
+fn present_nicknames(state: &EventLoopState, own: &Nickname) -> BTreeSet<String> {
+    let mut names: BTreeSet<String> = state
+        .roster_snapshot()
+        .peers
+        .into_iter()
+        .filter(|entry| !entry.quiet)
+        .map(|entry| entry.nickname.as_str().to_owned())
+        .collect();
+    names.insert(own.as_str().to_owned());
+    names
 }
 
-/// Snapshot the roster out of a shared book.
+/// Snapshot the present peers out of a shared book.
 fn cards_from_book(book: &CardBook) -> Vec<PeerCard> {
     book.lock()
         .ok()
-        .map(|book| book.values().cloned().collect())
+        .map(|book| book.present())
         .unwrap_or_default()
 }
 
@@ -245,15 +256,23 @@ impl ShareDriver {
         }
     }
 
-    /// Rebuild the endpoint → card map from the live meta document.
+    /// Rebuild the shared roster from the live meta document and the engine's
+    /// own list of who is present.
     ///
     /// A full rebuild per event rather than a patch. The document is the
     /// authority and it is small — one card per peer — so re-reading it costs
     /// nothing next to the gossip round-trip that triggered it, and it cannot
-    /// drift from what the CRDT actually says. `on_peer_left` needs the same
-    /// path anyway, since a departure is an absence rather than an edit.
-    fn refresh_book(&self, state: &EventLoopState) {
-        let next = cards_from_meta(&state.doc(Channel::Meta).to_json());
+    /// drift from what the CRDT actually says.
+    ///
+    /// Both halves are re-read together on purpose. They change on different
+    /// events — a card arrives on the meta channel, a departure is an absence,
+    /// an eviction is a timer — so reading one without the other is how the
+    /// two drift into disagreeing about the same peer.
+    fn refresh_book(&self, state: &EventLoopState, ctx: &HandlerCtx<'_>) {
+        let next = Roster {
+            entries: entries_from_meta(&state.doc(Channel::Meta).to_json()),
+            present: present_nicknames(state, ctx.author),
+        };
         if let Ok(mut book) = self.book.lock() {
             *book = next;
         }
@@ -294,7 +313,7 @@ impl ShareDriver {
         }
         // Our own card is part of the roster, and publishing it is the one
         // change that never arrives as an inbound meta event.
-        self.refresh_book(state);
+        self.refresh_book(state, ctx);
     }
 }
 
@@ -324,9 +343,9 @@ impl NodeApp for ShareDriver {
         &mut self,
         _author: &Nickname,
         state: &mut EventLoopState,
-        _ctx: &HandlerCtx<'_>,
+        ctx: &HandlerCtx<'_>,
     ) {
-        self.refresh_book(state);
+        self.refresh_book(state, ctx);
     }
 
     async fn on_meshed(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
@@ -340,9 +359,9 @@ impl NodeApp for ShareDriver {
         &mut self,
         _nickname: &Nickname,
         state: &mut EventLoopState,
-        _ctx: &HandlerCtx<'_>,
+        ctx: &HandlerCtx<'_>,
     ) {
-        self.refresh_book(state);
+        self.refresh_book(state, ctx);
     }
 }
 
@@ -354,6 +373,17 @@ impl NodeDriver for ShareDriver {
 
     async fn on_startup(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         self.publish_card(state, ctx).await;
+    }
+
+    /// The only signal a silence eviction gives an app.
+    ///
+    /// A peer evicted for going quiet produces no meta event and no
+    /// `on_peer_left` — that hook fires for a graceful departure only, because
+    /// a quiet peer may still return. Without this tick the shared roster
+    /// would keep listing a peer the engine had already stopped counting,
+    /// which is most of how the list and the count came to disagree.
+    async fn on_tick(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+        self.refresh_book(state, ctx);
     }
 
     async fn handle_session(
@@ -501,10 +531,20 @@ impl ShareMesh {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 ticks = ticks.wrapping_add(1);
                 if ticks.is_multiple_of(600) {
+                    // `ghosts` is the whole reason this line exists: the meta
+                    // document never forgets a peer, so the gap between what
+                    // the roster shows and what the document holds is the
+                    // overnight growth a post-mortem is looking for.
+                    let (present, held) = book
+                        .lock()
+                        .ok()
+                        .map(|book| (book.present().len(), book.all().len()))
+                        .unwrap_or_default();
                     tracing::info!(
                         gossip = live.load(Ordering::Relaxed).saturating_sub(1),
                         direct = webrtc.transport().session_count(),
-                        roster = cards_from_book(&book).len(),
+                        roster = present,
+                        ghosts = held.saturating_sub(present),
                         "serve self-stats"
                     );
                 }
@@ -775,7 +815,7 @@ pub(crate) async fn join(opts: JoinOpts) -> Result<ShareMesh> {
     // take on the share mesh (iroh QUIC), distinct from a browser's webrtc/relay.
     // True of both roles: a consumer reads files over the mount protocol, but
     // its *mesh* traffic rides the same unicast plane the producer's does.
-    let book: CardBook = Arc::new(Mutex::new(HashMap::new()));
+    let book: CardBook = Arc::new(Mutex::new(Roster::default()));
     let tree: SharedTree = Arc::new(Mutex::new(tree));
     let serving: SharedServing = Arc::new(Mutex::new(serving));
     let driver = ShareDriver::new(
@@ -807,8 +847,10 @@ pub(crate) async fn join(opts: JoinOpts) -> Result<ShareMesh> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Role, cards_from_book, cards_from_meta, roles_suffix};
+    use super::{Role, Roster, cards_from_book, roles_suffix};
     use agent_share_proto::PeerCard;
+    use agent_share_proto::roster::entries_from_meta;
+    use std::collections::BTreeSet;
 
     /// A meta document shaped the way `publish_card` writes one.
     fn meta_with(peers: &[(&str, serde_json::Value)]) -> serde_json::Value {
@@ -833,10 +875,24 @@ mod tests {
         .to_card_value()
     }
 
+    /// The roster the driver would publish, given a document and who the
+    /// engine says is here. The parse's own tolerances are pinned in
+    /// `agent_share_proto::roster`; what is interesting here is the join.
+    fn roster(doc: &serde_json::Value, present: &[&str]) -> Roster {
+        Roster {
+            entries: entries_from_meta(doc),
+            present: present.iter().map(|name| (*name).to_owned()).collect(),
+        }
+    }
+
     #[test]
     fn an_empty_document_yields_an_empty_roster() {
-        assert!(cards_from_meta(&serde_json::json!({})).is_empty());
-        assert!(cards_from_meta(&meta_with(&[])).is_empty());
+        assert!(
+            roster(&serde_json::json!({}), &["alice"])
+                .present()
+                .is_empty()
+        );
+        assert!(roster(&meta_with(&[]), &["alice"]).present().is_empty());
     }
 
     #[test]
@@ -845,18 +901,22 @@ mod tests {
             ("alice", card("endpoint-a", Role::Producer)),
             ("bob", card("endpoint-b", Role::Consumer)),
         ]);
-        let roster = cards_from_meta(&doc);
+        let cards = roster(&doc, &["alice", "bob"]).present();
 
-        assert_eq!(roster.len(), 2);
-        assert_eq!(
-            roster["endpoint-a"].role.as_deref(),
-            Some("producer"),
+        assert_eq!(cards.len(), 2);
+        let roles: BTreeSet<&str> = cards
+            .iter()
+            .filter_map(|card| card.role.as_deref())
+            .collect();
+        assert!(
+            roles.contains("producer"),
             "the role a peer published is what a source-selector reads"
         );
-        assert_eq!(roster["endpoint-b"].role.as_deref(), Some("consumer"));
+        assert!(roles.contains("consumer"));
     }
 
-    /// A peer is on the mesh before it has published anything.
+    /// A peer is on the mesh before it has published anything, and a peer we
+    /// cannot describe is not a row.
     #[test]
     fn a_peer_with_no_card_yet_is_skipped() {
         let doc = serde_json::json!({
@@ -865,56 +925,46 @@ mod tests {
                 "bob": {},
             }
         });
-        let roster = cards_from_meta(&doc);
-        assert_eq!(roster.len(), 1);
-        assert!(roster.contains_key("endpoint-a"));
+        let cards = roster(&doc, &["alice", "bob"]).present();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].endpoint, "endpoint-a");
     }
 
-    /// **Known defect, pinned so it is not mistaken for correct.**
+    /// **The defect this fixed, inverted.**
     ///
-    /// A departed peer stays in the roster this builds, because nothing deletes
-    /// its CRDT entry — a browser tab cannot even try, since the page is gone
-    /// before a broadcast can run. The availability grid then counts its slots
-    /// as held, so "which slots would be lost" answers *none* when it should
-    /// not. Three reloads of one tab reproduce it.
+    /// A departed peer used to stay listed forever, because nothing deletes
+    /// its CRDT entry and the list was built from the document alone. The
+    /// availability grid then counted its slots as held, so "which slots would
+    /// be lost" answered *none* when it should not. Three reloads of one tab
+    /// reproduced it.
     ///
-    /// Filtering against `roster_snapshot()` was tried and reverted: book and
-    /// roster are fed by different events, and the filter made a *live*
-    /// producer's card vanish. Hiding a peer that is there is worse than
-    /// showing one that is not.
-    ///
-    /// This test asserts today's behaviour so the defect is visible in the
-    /// suite. Invert it when the fix lands.
+    /// An earlier filter against `roster_snapshot()` was tried and reverted
+    /// because it made a *live* producer's card vanish: it compared an
+    /// endpoint-keyed book against a nickname-keyed roster, a comparison that
+    /// is empty however many peers are present. The join now happens on the
+    /// nickname the document is itself keyed by, so the two are comparable —
+    /// and the peer count is read off the same set, which is what makes the
+    /// list and the count agree rather than merely resemble each other.
     #[test]
-    fn a_peer_that_left_is_still_listed() {
+    fn a_peer_that_left_is_dropped_once_the_roster_drops_it() {
         let doc = meta_with(&[
             ("alice", card("endpoint-a", Role::Producer)),
             ("ghost", card("endpoint-gone", Role::Consumer)),
         ]);
-        let roster = cards_from_meta(&doc);
-        assert_eq!(roster.len(), 2);
-        assert!(
-            roster.contains_key("endpoint-gone"),
-            "documenting the defect: a card left behind in the CRDT still reads as a peer"
+        let book = roster(&doc, &["alice"]);
+        let cards = book.present();
+        let present: Vec<&str> = cards.iter().map(|card| card.endpoint.as_str()).collect();
+        assert_eq!(
+            present,
+            vec!["endpoint-a"],
+            "the departed peer is not a row"
         );
-    }
-
-    /// The one that matters: a peer we cannot parse must cost us that peer, not
-    /// the roster. Otherwise one bad card from a future build blinds us to
-    /// every good one.
-    #[test]
-    fn an_unparseable_card_costs_only_that_peer() {
-        let doc = serde_json::json!({
-            "peers": {
-                "alice": { "card": card("endpoint-a", Role::Producer) },
-                // No `endpoint` — the one field `from_card_value` requires.
-                "mallory": { "card": { "version": "9.9.9" } },
-                "eve": { "card": "not even an object" },
-            }
-        });
-        let roster = cards_from_meta(&doc);
-        assert_eq!(roster.len(), 1, "the good card must survive its neighbours");
-        assert!(roster.contains_key("endpoint-a"));
+        assert_eq!(
+            book.all().len(),
+            2,
+            "and its card is still in the document, which is why readers that \
+             must not be starved use `all`"
+        );
     }
 
     /// Nicknames are random per join, so a rejoining peer appears under a new
@@ -925,7 +975,7 @@ mod tests {
             ("old-nick", card("endpoint-a", Role::Consumer)),
             ("new-nick", card("endpoint-a", Role::Consumer)),
         ]);
-        assert_eq!(cards_from_meta(&doc).len(), 1);
+        assert_eq!(roster(&doc, &["old-nick", "new-nick"]).present().len(), 1);
     }
 
     fn peer(endpoint: &str, role: Role) -> PeerCard {

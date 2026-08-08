@@ -126,12 +126,15 @@ impl SourceSet {
                 .collect::<Vec<_>>()
         });
         let struck = struck.unwrap_or_default();
+        // Every card, present or not. A source hidden because its author
+        // went quiet is a stalled download if it turns out to be reachable,
+        // and the strike count below already handles one that is not.
         let mut out: Vec<PeerCard> = book
-            .values()
+            .all()
+            .into_iter()
             .filter(|card| card.endpoint != self.local_endpoint)
             .filter(|card| !struck.contains(&card.endpoint))
             .filter(|card| vouches(card, &self.tree, index, self.total_slots))
-            .cloned()
             .collect();
         // Native peers first — line rate, no browser in the path. Endpoint id
         // as the tiebreak keeps the order stable across calls.

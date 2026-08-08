@@ -474,11 +474,14 @@ async fn bootstrap_from_seeders(
             .lock()
             .ok()
             .map(|cards| {
+                // Present peers only: a card left behind by a peer that has
+                // gone costs a dial that cannot be answered, and this loop is
+                // choosing who to reach rather than reading from anyone.
                 cards
-                    .values()
+                    .present()
+                    .into_iter()
                     .filter(|card| card.endpoint != local)
                     .filter(|card| card.tree.is_some() && card.serving.is_some())
-                    .cloned()
                     .collect()
             })
             .unwrap_or_default();
