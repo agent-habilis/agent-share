@@ -17,6 +17,8 @@
 //!   layouts.
 //! - [`lookup`]: the discovery allowlist baked into a ticket.
 //! - [`peer_addr`]: the `EndpointAddr` JSON codec the ticket embeds.
+//! - [`roster`]: who is on a share's mesh, joining the meta document's cards
+//!   to the engine's roster of who is actually present.
 //!
 //! Everything here is wire format. Breaking it is *permitted* — there is no
 //! compatibility promise — but it must be **deliberate**, and that is what the
@@ -34,6 +36,7 @@ pub mod lookup;
 pub mod manifest;
 pub mod mesh_key;
 pub mod peer_addr;
+pub mod roster;
 pub mod serving;
 pub mod ticket;
 pub mod token;
