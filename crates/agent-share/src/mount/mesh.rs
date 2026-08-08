@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use agent_share_proto::PeerCard;
 use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
-use agent_share_proto::roster::{MetaEntry, entries_from_meta, live_cards};
+use agent_share_proto::roster::{Roster, entries_from_meta};
 use anyhow::{Context, Result};
 use fofoca::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
@@ -108,40 +108,6 @@ fn share_card_gate() -> SelfWriteGate {
 /// `pub(crate)` because [`super::sources::SourceSet`] reads it too — the
 /// roster is where read candidates come from.
 pub(crate) type CardBook = Arc<Mutex<Roster>>;
-
-/// What the driver publishes for readers outside the event loop.
-///
-/// Two views of one snapshot, and which one a caller wants is a real choice.
-/// A peer list wants [`Self::present`]: a card whose author the engine no
-/// longer counts is a peer that is gone, and showing it is the defect this
-/// split exists to close. A reader looking for bytes wants [`Self::all`]:
-/// hiding a source that turns out to be alive costs a stalled download, which
-/// is far worse than one stale row.
-#[derive(Default)]
-pub(crate) struct Roster {
-    /// Every `/peers/<nick>/card` in the meta document, ghosts included.
-    /// Nothing ever deletes an entry, so this only grows.
-    entries: Vec<MetaEntry>,
-    /// Nicknames the engine counts as present, with the idle ones already
-    /// dropped — the same set its peer count is taken from, which is what
-    /// makes a list built here agree with that count.
-    present: BTreeSet<String>,
-}
-
-impl Roster {
-    /// Cards of the peers that are here.
-    pub(crate) fn present(&self) -> Vec<PeerCard> {
-        live_cards(&self.entries, &self.present)
-    }
-
-    /// Every card the document holds, present or not.
-    pub(crate) fn all(&self) -> Vec<PeerCard> {
-        self.entries
-            .iter()
-            .map(|entry| entry.card.clone())
-            .collect()
-    }
-}
 
 /// The manifest fingerprint on our own card, shared with [`ShareMesh`].
 ///
@@ -269,10 +235,10 @@ impl ShareDriver {
     /// an eviction is a timer — so reading one without the other is how the
     /// two drift into disagreeing about the same peer.
     fn refresh_book(&self, state: &EventLoopState, ctx: &HandlerCtx<'_>) {
-        let next = Roster {
-            entries: entries_from_meta(&state.doc(Channel::Meta).to_json()),
-            present: present_nicknames(state, ctx.author),
-        };
+        let next = Roster::new(
+            entries_from_meta(&state.doc(Channel::Meta).to_json()),
+            present_nicknames(state, ctx.author),
+        );
         if let Ok(mut book) = self.book.lock() {
             *book = next;
         }
@@ -847,9 +813,9 @@ pub(crate) async fn join(opts: JoinOpts) -> Result<ShareMesh> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Role, Roster, cards_from_book, roles_suffix};
+    use super::{Role, cards_from_book, roles_suffix};
     use agent_share_proto::PeerCard;
-    use agent_share_proto::roster::entries_from_meta;
+    use agent_share_proto::roster::{Roster, entries_from_meta};
     use std::collections::BTreeSet;
 
     /// A meta document shaped the way `publish_card` writes one.
@@ -879,10 +845,10 @@ mod tests {
     /// engine says is here. The parse's own tolerances are pinned in
     /// `agent_share_proto::roster`; what is interesting here is the join.
     fn roster(doc: &serde_json::Value, present: &[&str]) -> Roster {
-        Roster {
-            entries: entries_from_meta(doc),
-            present: present.iter().map(|name| (*name).to_owned()).collect(),
-        }
+        Roster::new(
+            entries_from_meta(doc),
+            present.iter().map(|name| (*name).to_owned()).collect(),
+        )
     }
 
     #[test]

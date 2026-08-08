@@ -19,13 +19,14 @@
 //! no mDNS and no DHT; it does not need them.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_share_proto::PeerCard;
 use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
+use agent_share_proto::roster::{MetaEntry, Roster, entries_from_meta};
 use fofoca::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
     SilentSink,
@@ -168,8 +169,35 @@ fn mesh_lookups(share: &agent_share_proto::lookup::LookupOpts) -> fofoca::protoc
     }
 }
 
-/// Endpoint id → peer card learned from meta `/peers/<nick>/card`.
-type ClientBook = Arc<Mutex<HashMap<String, PeerCard>>>;
+/// Peer cards from meta `/peers/<nick>/card`, beside the roster saying which
+/// of their authors are still here.
+///
+/// Shared with [`MeshPeer`] rather than owned by the driver: the driver runs
+/// inside the engine's event loop and cannot be reached from the outside, so
+/// the loop writes here and the page reads. The CLI peer carries the same
+/// split for the same reason.
+type ClientBook = Arc<Mutex<Roster>>;
+
+/// The nicknames the engine currently counts as present, ours included.
+///
+/// `roster_snapshot()` reports active peers *and* the quiet ones it evicted
+/// for silence; only the active half is present, which is exactly the set
+/// behind the peer count (`tick_sweep` drops a quiet peer from `peers` and
+/// rewrites that count in the same breath).
+///
+/// Our own nickname is added because we are never on our own roster and are
+/// unquestionably here. Leaving it out would hide our own card.
+fn present_nicknames(state: &EventLoopState, own: &Nickname) -> BTreeSet<String> {
+    let mut names: BTreeSet<String> = state
+        .roster_snapshot()
+        .peers
+        .into_iter()
+        .filter(|entry| !entry.quiet)
+        .map(|entry| entry.nickname.as_str().to_owned())
+        .collect();
+    names.insert(own.as_str().to_owned());
+    names
+}
 
 /// Share-mesh driver: presence plus mesh/app metadata on the meta card.
 struct ShareMeshDriver {
@@ -223,29 +251,26 @@ impl ShareMeshDriver {
                 "share meta peer card publish failed: {error}"
             )));
         }
-        self.refresh_book(state);
+        self.refresh_book(state, ctx);
     }
 
-    /// Rebuild the endpoint → card map from the live meta document.
+    /// Rebuild the shared roster from the live meta document and the engine's
+    /// own list of who is present.
     ///
-    /// Includes peers that have left: nothing deletes a departed peer's CRDT
-    /// entry, and a tab being closed cannot — see `ShareClient::leave_mesh`.
-    /// Known defect, shared with the native peer; see `cards_from_meta` there
-    /// for why the obvious roster filter was reverted.
-    fn refresh_book(&self, state: &EventLoopState) {
-        let doc = state.doc(Channel::Meta).to_json();
-        let mut next = HashMap::new();
-        if let Some(peers) = doc.get("peers").and_then(|value| value.as_object()) {
-            for peer in peers.values() {
-                let Some(card_value) = peer.get("card") else {
-                    continue;
-                };
-                let Some(card) = PeerCard::from_card_value(card_value) else {
-                    continue;
-                };
-                next.insert(card.endpoint.clone(), card);
-            }
-        }
+    /// A full rebuild per event rather than a patch. The document is the
+    /// authority and it is small — one card per peer — so re-reading it costs
+    /// nothing next to the gossip round-trip that triggered it, and it cannot
+    /// drift from what the CRDT actually says.
+    ///
+    /// Both halves are re-read together on purpose. They change on different
+    /// events — a card arrives on the meta channel, a departure is an absence,
+    /// an eviction is a timer — so reading one without the other is how the
+    /// two drift into disagreeing about the same peer.
+    fn refresh_book(&self, state: &EventLoopState, ctx: &HandlerCtx<'_>) {
+        let next = Roster::new(
+            entries_from_meta(&state.doc(Channel::Meta).to_json()),
+            present_nicknames(state, ctx.author),
+        );
         if let Ok(mut book) = self.book.lock() {
             *book = next;
         }
@@ -277,9 +302,9 @@ impl NodeApp for ShareMeshDriver {
         &mut self,
         _author: &Nickname,
         state: &mut EventLoopState,
-        _ctx: &HandlerCtx<'_>,
+        ctx: &HandlerCtx<'_>,
     ) {
-        self.refresh_book(state);
+        self.refresh_book(state, ctx);
     }
 
     async fn on_meshed(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
@@ -290,9 +315,9 @@ impl NodeApp for ShareMeshDriver {
         &mut self,
         _nickname: &Nickname,
         state: &mut EventLoopState,
-        _ctx: &HandlerCtx<'_>,
+        ctx: &HandlerCtx<'_>,
     ) {
-        self.refresh_book(state);
+        self.refresh_book(state, ctx);
     }
 }
 
@@ -318,6 +343,19 @@ impl NodeDriver for ShareMeshDriver {
 
     async fn on_startup(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         self.publish_card(state, ctx).await;
+    }
+
+    /// The only signal a silence eviction gives an app.
+    ///
+    /// A peer evicted for going quiet produces no meta event and no
+    /// `on_peer_left` — that hook fires for a graceful departure only, because
+    /// a quiet peer may still return. It is also the only thing that notices a
+    /// tab that was closed, since a page teardown runs no broadcast. Without
+    /// this tick the shared roster would keep listing peers the engine had
+    /// already stopped counting, which is most of how the Peers list and the
+    /// mesh count came to disagree.
+    async fn on_tick(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+        self.refresh_book(state, ctx);
     }
 }
 
@@ -485,11 +523,16 @@ impl MeshPeer {
     }
 
     /// Meta peer card for `endpoint_id`, if published.
+    ///
+    /// Answers from every card the document holds, not only the present ones:
+    /// this decorates a row that exists for its own reasons — ours, the
+    /// producer's, a live data channel's — and a peer we are talking to right
+    /// now must not render as unknown because gossip wrote it off.
     pub(crate) fn card_for(&self, endpoint_id: &str) -> Option<PeerCard> {
         self.clients
             .lock()
             .ok()
-            .and_then(|book| book.get(endpoint_id).cloned())
+            .and_then(|book| book.card_for(endpoint_id))
     }
 
     /// Publish the manifest fingerprint this tab is on.
@@ -557,12 +600,17 @@ impl MeshPeer {
         }
     }
 
-    /// All meta peer cards currently known (gossip roster advertise).
+    /// Meta peer cards of the peers the engine says are here.
+    ///
+    /// Departed peers are dropped, because nothing removes their CRDT entry
+    /// and a tab that is closed cannot remove its own — the page is torn down
+    /// before any broadcast runs. So the document only grows, and reading it
+    /// unfiltered is what listed peers that had long gone.
     pub(crate) fn known_cards(&self) -> Vec<PeerCard> {
         self.clients
             .lock()
             .ok()
-            .map(|book| book.values().cloned().collect())
+            .map(|book| book.present())
             .unwrap_or_default()
     }
 
@@ -731,7 +779,7 @@ async fn spawn_peer_inner(
 ) -> Result<MeshPeer, JsValue> {
     let Resolved { kind, author, .. } = resolved;
     let live = Arc::new(AtomicUsize::new(0));
-    let clients: ClientBook = Arc::new(Mutex::new(HashMap::new()));
+    let clients: ClientBook = Arc::new(Mutex::new(Roster::default()));
     let config = setup_mesh(
         kind,
         SetupParams {
@@ -762,10 +810,17 @@ async fn spawn_peer_inner(
 
     let mesh_id = config.mesh_id().as_str().to_owned();
     let hub = config.webrtc_handle().transport();
-    // Seed our own card so Info does not wait on meta sync to self.
-    let own = card.clone().into_card(hub.local_id().to_string());
+    // Seed our own card so Info does not wait on meta sync to self. Under our
+    // own nickname, and present, because we are never on our own roster and
+    // would otherwise be filtered out of our own list.
+    let own = MetaEntry {
+        nickname: author.as_str().to_owned(),
+        card: card.clone().into_card(hub.local_id().to_string()),
+    };
     if let Ok(mut book) = clients.lock() {
-        book.insert(own.endpoint.clone(), own);
+        let mut present = BTreeSet::new();
+        present.insert(own.nickname.clone());
+        *book = Roster::new(vec![own], present);
     }
     // `handle_signals: false` — there are no process signals in a tab, and the
     // engine's signal registration is host-only anyway.

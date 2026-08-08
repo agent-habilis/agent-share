@@ -98,9 +98,69 @@ pub fn live_cards(entries: &[MetaEntry], live: &BTreeSet<String>) -> Vec<PeerCar
         .collect()
 }
 
+/// What a mesh driver publishes for readers outside its event loop.
+///
+/// Two views of one snapshot, and which one a caller wants is a real choice.
+/// A peer list wants [`Self::present`]: a card whose author the engine no
+/// longer counts is a peer that is gone, and showing it is the defect this
+/// split exists to close. A reader looking for bytes wants [`Self::all`]:
+/// hiding a source that turns out to be alive costs a stalled download, which
+/// is far worse than one stale row.
+///
+/// Held by both clients. The driver lives inside the engine's event loop and
+/// is unreachable from the outside, so the loop writes here and everything
+/// else reads.
+#[derive(Default, Debug)]
+pub struct Roster {
+    /// Every `/peers/<nick>/card` in the meta document, departed peers
+    /// included. Nothing deletes an entry, so this only grows.
+    entries: Vec<MetaEntry>,
+    /// Nicknames the engine counts as present, with the idle ones already
+    /// dropped — the same set its peer count is taken from, which is what
+    /// makes a list built here agree with that count.
+    present: BTreeSet<String>,
+}
+
+impl Roster {
+    #[must_use]
+    pub fn new(entries: Vec<MetaEntry>, present: BTreeSet<String>) -> Self {
+        Self { entries, present }
+    }
+
+    /// Cards of the peers that are here.
+    #[must_use]
+    pub fn present(&self) -> Vec<PeerCard> {
+        live_cards(&self.entries, &self.present)
+    }
+
+    /// Every card the document holds, present or not.
+    #[must_use]
+    pub fn all(&self) -> Vec<PeerCard> {
+        self.entries
+            .iter()
+            .map(|entry| entry.card.clone())
+            .collect()
+    }
+
+    /// The card describing `endpoint`, from anywhere in the document.
+    ///
+    /// Searches [`Self::all`] rather than the present half, because this
+    /// decorates a row that already exists for its own reasons — our own, the
+    /// producer's, a live data channel's. Those rows do not come from the
+    /// roster, so letting the roster blank their version and runtime would
+    /// turn a peer we are talking to right now into an unnamed one.
+    #[must_use]
+    pub fn card_for(&self, endpoint: &str) -> Option<PeerCard> {
+        self.entries
+            .iter()
+            .find(|entry| entry.card.endpoint == endpoint)
+            .map(|entry| entry.card.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MetaEntry, entries_from_meta, live_cards};
+    use super::{MetaEntry, Roster, entries_from_meta, live_cards};
     use crate::client::PeerCard;
     use std::collections::BTreeSet;
 
@@ -218,5 +278,49 @@ mod tests {
     fn an_empty_roster_shows_nobody() {
         let entries = [entry("alice", "ep-a")];
         assert!(live_cards(&entries, &BTreeSet::new()).is_empty());
+    }
+
+    fn book() -> Roster {
+        Roster::new(
+            vec![entry("alice", "ep-a"), entry("ghost", "ep-gone")],
+            live(&["alice"]),
+        )
+    }
+
+    /// The whole point of the split: one snapshot answers both questions
+    /// differently, so a caller picks by what it is about to do.
+    #[test]
+    fn the_two_views_disagree_about_a_peer_that_left() {
+        let endpoints = |cards: Vec<PeerCard>| {
+            cards
+                .into_iter()
+                .map(|card| card.endpoint)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(endpoints(book().present()), vec!["ep-a"]);
+        assert_eq!(endpoints(book().all()), vec!["ep-a", "ep-gone"]);
+    }
+
+    /// A row we hold a live connection to must keep its name even when gossip
+    /// has written the peer off. This is why `card_for` reads `all`: the row
+    /// exists because of the connection, and blanking its version and runtime
+    /// would report a peer we are actively talking to as unknown.
+    #[test]
+    fn a_card_still_describes_a_peer_the_roster_has_dropped() {
+        assert_eq!(
+            book().card_for("ep-gone").map(|card| card.endpoint),
+            Some("ep-gone".to_owned())
+        );
+        assert!(book().card_for("ep-never-seen").is_none());
+    }
+
+    /// A driver that has not run yet answers "nobody", not a panic — the
+    /// browser seeds one of these before its event loop starts.
+    #[test]
+    fn a_book_nobody_has_filled_in_is_empty() {
+        let empty = Roster::default();
+        assert!(empty.present().is_empty());
+        assert!(empty.all().is_empty());
+        assert!(empty.card_for("ep-a").is_none());
     }
 }
