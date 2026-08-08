@@ -19,7 +19,7 @@ import { missingSlots, peerAvailability } from './availability.ts'
 import { sortPeers } from './peers.ts'
 import type { PeerAvailability } from './availability.ts'
 import { formatIpWithFlag, isGeoLookupCandidate, lookupCountryCode } from './countryFlag/index.ts'
-import { formatRate, formatRatio, laneSummary, ratio } from './transferStats.ts'
+import { formatRate, laneSummary } from './transferStats.ts'
 import type { LinkSample } from './transferStats.ts'
 import { humanBytes } from './tree.ts'
 
@@ -429,8 +429,7 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
               <Text color="fgMuted">
                 mount wire: down {formatRate(link.total.down_bps)} · up{' '}
                 {formatRate(link.total.up_bps)} · received{' '}
-                {humanBytes(link.total.received)} · sent {humanBytes(link.total.sent)} ·
-                ratio {formatRatio(ratio(link.total.sent, link.total.received))}
+                {humanBytes(link.total.received)} · sent {humanBytes(link.total.sent)}
               </Text>
               <Text color="fgSubtle">by path: {laneSummary(link.lanes)} received</Text>
             </>

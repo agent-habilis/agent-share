@@ -3,16 +3,12 @@ import { describe, expect, test } from 'bun:test'
 import {
   PEERS_CELLS,
   RATE_CELLS,
-  RATIO_CELLS,
   fit,
-  formatBarRatio,
   formatPeers,
   formatRate,
-  formatRatio,
   formatSampledRate,
   laneSummary,
   peerCounts,
-  ratio,
   type Lane,
 } from './transferStats.ts'
 
@@ -27,33 +23,6 @@ function lane(label: string, received: number, selected = false): Lane {
     rtt_ms: null,
   }
 }
-
-describe('ratio', () => {
-  test('is sent over received', () => {
-    expect(ratio(50, 200)).toBe(0.25)
-  })
-
-  test('is undefined before anything is received', () => {
-    expect(ratio(0, 0)).toBeNull()
-    expect(ratio(10, 0)).toBeNull()
-  })
-
-  test('refuses a non-finite counter rather than reporting NaN', () => {
-    expect(ratio(Number.NaN, 10)).toBeNull()
-    expect(ratio(10, Number.POSITIVE_INFINITY)).toBeNull()
-  })
-})
-
-describe('formatRatio', () => {
-  test('is two decimals', () => {
-    expect(formatRatio(0.25)).toBe('0.25')
-    expect(formatRatio(1)).toBe('1.00')
-  })
-
-  test('renders an undefined ratio as a dash', () => {
-    expect(formatRatio(null)).toBe('—')
-  })
-})
 
 describe('peerCounts', () => {
   test('a relay-carried mount peer counts as connected', () => {
@@ -196,29 +165,6 @@ describe('formatPeers', () => {
   })
 })
 
-describe('formatBarRatio', () => {
-  test('zero-pads to a constant five cells', () => {
-    expect(formatBarRatio(0)).toBe('00.00')
-    expect(formatBarRatio(0.01)).toBe('00.01')
-    expect(formatBarRatio(1.13)).toBe('01.13')
-    expect(formatBarRatio(12.5)).toBe('12.50')
-  })
-
-  test('a null ratio reads as zero, since the bar never dashes', () => {
-    expect(formatBarRatio(null)).toBe('00.00')
-  })
-
-  test('clamps rather than widening', () => {
-    expect(formatBarRatio(1234.5)).toBe('99.99')
-  })
-
-  test('is always exactly its column', () => {
-    for (const value of [null, 0, 0.004, 1, 9.99, 10, 99.99, 100, 1e6]) {
-      expect(formatBarRatio(value).length).toBe(RATIO_CELLS)
-    }
-  })
-})
-
 describe('field widths', () => {
   /*
     What keeps the separators centred, and the reason the rate scale starts at
@@ -230,9 +176,6 @@ describe('field widths', () => {
   test('every field formatter emits exactly its column width', () => {
     for (const bps of [0, 1, 999, 1024, 1024 ** 2, 1024 ** 3, 1024 ** 4]) {
       expect(formatSampledRate(bps).length).toBe(RATE_CELLS)
-    }
-    for (const value of [null, 0, 1.13, 99.99, 1e6]) {
-      expect(formatBarRatio(value).length).toBe(RATIO_CELLS)
     }
     for (const known of [0, 1, 99, 5000]) {
       expect(formatPeers({ connected: 0, known }).length).toBe(PEERS_CELLS)

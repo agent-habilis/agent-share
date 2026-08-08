@@ -4,8 +4,8 @@
  * The numbers arrive already differenced: `sample_link()` in the wasm client
  * owns the rate calculation, because the same `Meter` has to serve both byte
  * sources (QUIC path stats and WebRTC `getStats`) and one differencing rule is
- * the point of that facade. Everything here is presentation — ratio, peer
- * arithmetic, and formatting.
+ * the point of that facade. Everything here is presentation: peer arithmetic
+ * and formatting.
  *
  * These are **wire** bytes on the mount connection, counted by the QUIC state
  * machine below the transport split, so they answer identically on the relay
@@ -65,36 +65,6 @@ export interface TransferSnapshot {
 }
 
 /**
- * Share ratio: bytes given back over bytes taken.
- *
- * `null` before anything has been received, which renders as a dash — a ratio
- * over nothing is undefined, not zero, and `0.00` would read as "you have
- * uploaded nothing" rather than "there is nothing to compare against yet".
- */
-export function ratio(sent: number, received: number): number | null {
-  if (!Number.isFinite(sent) || !Number.isFinite(received) || received <= 0) return null
-  return sent / received
-}
-
-/** Two decimals, the way every torrent client writes a ratio. */
-export function formatRatio(value: number | null): string {
-  return value === null ? '—' : value.toFixed(2)
-}
-
-/**
- * The same ratio as a constant five cells: `00.96`, `01.13`, `99.99`.
- *
- * Zero-padded and clamped, matching the rate's fixed-digit scheme, so the field
- * holds no slack and the separators either side of it stay centred. Clamping
- * rather than widening because a ratio in the hundreds is a curiosity, and the
- * exact figure is a hover away in the tooltip.
- */
-export function formatBarRatio(value: number | null): string {
-  const bounded = Math.min(Math.max(value ?? 0, 0), 99.99)
-  return bounded.toFixed(2).padStart(5, '0')
-}
-
-/**
  * Cell widths for the status bar's value texts.
  *
  * The bar re-renders every second, so *nothing* in it may change width: a field
@@ -102,13 +72,11 @@ export function formatBarRatio(value: number | null): string {
  * under whoever is reading it.
  *
  * Every formatter emits **exactly** its width — `000 KB/s` and `999 MB/s` are
- * both eight, `00.96` and `99.99` both five, `01/01` and `12/34` both five. No
- * field holds slack, so `fit` never pads and every gap in the row is the same
- * one cell, which is what puts the separators dead centre between their
- * neighbours.
+ * both eight, `01/01` and `12/34` both five. No field holds slack, so `fit`
+ * never pads and every gap in the row is the same one cell, which is what puts
+ * the separators dead centre between their neighbours.
  */
 export const RATE_CELLS = 8
-export const RATIO_CELLS = 5
 export const PEERS_CELLS = 5
 
 /**

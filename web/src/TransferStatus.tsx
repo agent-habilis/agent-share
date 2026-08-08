@@ -1,11 +1,11 @@
 /**
  * The middle of the top bar, in both the states it has.
  *
- * `TransferStatus` is the readout — `↓ rate · ↑ rate · ⇅ ratio · ⧉
- * connected/known`, refreshed once a second from the single sampler `Session`
- * owns. It takes the sample as a *signal* and reads it inside its own render
- * closure on purpose: if the session's render read it instead, the file list
- * would repaint every second along with these four numbers.
+ * `TransferStatus` is the readout — `↓ rate · ↑ rate · ⧉ connected/known`,
+ * refreshed once a second from the single sampler `Session` owns. It takes the
+ * sample as a *signal* and reads it inside its own render closure on purpose:
+ * if the session's render read it instead, the file list would repaint every
+ * second along with these three numbers.
  *
  * Every field is exactly as wide as its formatter's output, and every gap is
  * one cell, so the separators sit centred and nothing moves as the numbers
@@ -27,15 +27,11 @@ import { Style, css, raw } from 'visage-style'
 import {
   PEERS_CELLS,
   RATE_CELLS,
-  RATIO_CELLS,
   fit,
-  formatBarRatio,
   formatPeers,
-  formatRatio,
   formatSampledRate,
   laneSummary,
   peerCounts,
-  ratio,
   type TransferSnapshot,
 } from './transferStats.ts'
 import { humanBytes } from './tree.ts'
@@ -156,9 +152,9 @@ const READOUT = css({
  * Hover text, one segment at a time.
  *
  * Each field answers for itself rather than sharing one tooltip for the row: a
- * reader hovering `⇅` wants to know what a ratio is here, not to re-read what a
- * wire byte is. Every one carries the session total behind the rate, since that
- * is the number the readout deliberately does not have room for.
+ * reader hovering `⧉` wants to know what counts as a peer here, not to re-read
+ * what a wire byte is. Every one carries the session total behind the rate,
+ * since that is the number the readout deliberately does not have room for.
  *
  * The closing line of each is the caveat that specific number needs — what the
  * bytes are counted at, which path carried them, why upload is small. Written
@@ -197,17 +193,6 @@ function describeUp(snapshot: TransferSnapshot | null): string {
   )
 }
 
-function describeRatio(snapshot: TransferSnapshot | null): string {
-  if (!snapshot) return PENDING
-  const { total } = snapshot.link
-  return lines(
-    `Ratio — ${formatRatio(ratio(total.sent, total.received) ?? 0)}`,
-    `Sent ÷ received: ${humanBytes(total.sent)} ÷ ${humanBytes(total.received)}.`,
-    '',
-    'How much this tab has given back against what it took. It climbs once browsers seed to each other.',
-  )
-}
-
 function describePeers(snapshot: TransferSnapshot | null): string {
   if (!snapshot) return PENDING
   const peers = peerCounts(snapshot.gossip, snapshot.direct, snapshot.relayPeer)
@@ -241,7 +226,6 @@ export const TransferStatus = component<TransferStatusProps>(function* (props) {
     */
     const down = formatSampledRate(total?.down_bps ?? 0)
     const up = formatSampledRate(total?.up_bps ?? 0)
-    const share = formatBarRatio(total ? ratio(total.sent, total.received) : 0)
 
     return (
       <span>
@@ -260,14 +244,6 @@ export const TransferStatus = component<TransferStatusProps>(function* (props) {
           title={describeUp(snapshot)}
           cells={RATE_CELLS}
           value={up}
-        />
-        <Separator />
-        <Field
-          glyph="⇅"
-          label="ratio"
-          title={describeRatio(snapshot)}
-          cells={RATIO_CELLS}
-          value={share}
         />
         <Separator />
         {/*
