@@ -50,6 +50,7 @@ use std::rc::Rc;
 use fofoca_blobs::{BlobStore, FileId, IdbStore, extent_of};
 use std::sync::Arc;
 
+use agent_share_proto::PeerCard;
 use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::framing::{
     self, BENCH_ECHO_INTERVAL_SECS, DEFAULT_BENCH_DURATION_SECS, MAX_BENCH_ECHO_BYTES,
@@ -1639,140 +1640,226 @@ impl ShareClient {
         ids
     }
 
+    /// Every endpoint id that is *this tab*.
+    ///
+    /// Usually one. On the seeder path it is two: `connect_via_seeder` mints a
+    /// separate mount key so a seeder's one-registry rule sees a fresh peer
+    /// rather than the mesh lane's session, and the meta card is published
+    /// under the *mesh* key while `info_json`'s `local` is the *mount* key.
+    /// Both are us, so both have to be excluded from the mesh rows and both
+    /// have to be searched for our own card — reading either alone listed this
+    /// tab twice, once as `self` and once as a stranger on gossip.
+    fn self_endpoint_ids(&self) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        ids.insert(self._endpoint.id().to_string());
+        if let Some(mesh) = self.mesh_peer() {
+            ids.insert(mesh.hub().local_id().to_string());
+        }
+        ids
+    }
+
     fn swarm_peers_json(&self, local: &str, producer: &str) -> Vec<serde_json::Value> {
-        let cache = self.ip_cache.borrow();
-        let bytes = self.bytes_cache.borrow();
-        // Self label comes from the meta card the TS consumer published; this
-        // is only a last-resort row if the book has not been seeded yet.
-        let self_card = agent_share_proto::PeerCard::new(
-            local,
-            env!("CARGO_PKG_VERSION"),
-            "browser",
-            self.data_path.borrow().clone(),
-            Some("consumer".to_owned()),
-        );
         let mesh = self.mesh_peer();
-        let card_for = |id: &str| mesh.as_ref().and_then(|m| m.card_for(id));
-        let peer_row = |id: &str,
-                        role: &str,
-                        flags: String,
-                        fallback_proto: &str,
-                        ip: Option<String>,
-                        ip_kind: Option<String>| {
-            let card = card_for(id);
-            let client = card.as_ref().map(|c| c.client.clone()).unwrap_or_else(|| {
-                if id == local {
-                    self_card.client.clone()
+        let (present, all) = mesh
+            .as_ref()
+            .map(|mesh| (mesh.known_cards(), mesh.all_cards()))
+            .unwrap_or_default();
+        swarm_rows(
+            &SwarmView {
+                local,
+                ours: &self.self_endpoint_ids(),
+                producer,
+                direct: &self.direct_peer_ids(),
+                present: &present,
+                all: &all,
+                data_path: &self.data_path.borrow(),
+            },
+            &self.ip_cache.borrow(),
+            &self.bytes_cache.borrow(),
+        )
+    }
+}
+
+/// Everything the Peers list is built from, gathered off the live client.
+///
+/// A struct rather than nine arguments, and not only for the count: four of
+/// them are endpoint ids, which as positional `&str`s would be swappable in
+/// silence. Bundling them is also what makes [`swarm_rows`] a free function
+/// testable without a live `Connection` — the reason the row assembly moved
+/// out of `ShareClient` at all.
+struct SwarmView<'a> {
+    /// Our mount identity: the id the `self` row carries, and the key both
+    /// caches are on.
+    local: &'a str,
+    /// Every id that is us. See [`ShareClient::self_endpoint_ids`].
+    ours: &'a HashSet<String>,
+    producer: &'a str,
+    /// Peers we hold a live data channel with, across both hubs.
+    direct: &'a HashSet<String>,
+    /// Cards of the peers the mesh says are here — the gossip rows.
+    present: &'a [PeerCard],
+    /// Every card the document holds, for decorating a row that exists
+    /// whether or not the mesh still lists its peer.
+    all: &'a [PeerCard],
+    data_path: &'a str,
+}
+
+/// Assemble one row per peer, each from exactly one source.
+///
+/// The order is the precedence: ourselves, the producer, anyone we hold a
+/// channel to, then the rest of the mesh. Rows above the mesh do not come from
+/// the roster and so cannot vanish with it — a producer we are streaming from
+/// stays listed even if gossip has gone quiet entirely.
+fn swarm_rows(
+    view: &SwarmView<'_>,
+    ip: &HashMap<String, (Option<String>, Option<String>)>,
+    bytes: &HashMap<String, link::Meter>,
+) -> Vec<serde_json::Value> {
+    let card_for = |id: &str| view.all.iter().find(|card| card.endpoint == id).cloned();
+    // Our own card is published under whichever identity joined the mesh, and
+    // on the seeder path that is not the one the row is keyed by.
+    let own_card = || {
+        let mut ours: Vec<&String> = view.ours.iter().collect();
+        ours.sort();
+        card_for(view.local).or_else(|| ours.into_iter().find_map(|id| card_for(id)))
+    };
+    // Only reached before the tab has published anything of its own.
+    let self_label = PeerCard::new(
+        view.local,
+        env!("CARGO_PKG_VERSION"),
+        "browser",
+        view.data_path,
+        Some("consumer".to_owned()),
+    )
+    .client;
+    let peer_row = |id: &str,
+                    role: &str,
+                    flags: String,
+                    fallback_proto: &str,
+                    ip: Option<String>,
+                    ip_kind: Option<String>| {
+        let card = if role == "self" {
+            own_card()
+        } else {
+            card_for(id)
+        };
+        let client = card
+            .as_ref()
+            .map(|card| card.client.clone())
+            .unwrap_or_else(|| {
+                if id == view.local {
+                    self_label.clone()
                 } else {
                     "unknown".to_owned()
                 }
             });
-            let proto = card
-                .as_ref()
-                .map(|c| c.transport.clone())
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| fallback_proto.to_owned());
-            let version = card.as_ref().map(|c| c.version.clone());
-            let runtime = card.as_ref().map(|c| c.runtime.clone());
-            let app_role = card.as_ref().and_then(|c| c.role.clone());
-            // Availability, for the grid. `tree` rides along because a slot
-            // index means nothing without agreeing which manifest it indexes
-            // into — two peers on different trees must not be drawn as though
-            // their squares line up.
-            let serving = card.as_ref().and_then(|c| c.serving.clone());
-            let tree = card.as_ref().and_then(|c| c.tree.clone());
-            let stats = bytes.get(id).copied().unwrap_or_default();
-            serde_json::json!({
-                "id": id,
-                "role": role,
-                "bytes_sent": stats.sent,
-                "bytes_received": stats.received,
-                "up_bps": stats.up_bps,
-                "down_bps": stats.down_bps,
-                "rtt_ms": stats.rtt_ms,
-                "flags": flags,
-                "client": client,
-                "version": version,
-                "runtime": runtime,
-                "app_role": app_role,
-                "ip": ip,
-                "ip_kind": ip_kind,
-                "proto": proto,
-                "serving": serving,
-                "tree": tree,
-            })
-        };
+        let proto = card
+            .as_ref()
+            .map(|card| card.transport.clone())
+            .filter(|transport| !transport.is_empty())
+            .unwrap_or_else(|| fallback_proto.to_owned());
+        let version = card.as_ref().map(|card| card.version.clone());
+        let runtime = card.as_ref().map(|card| card.runtime.clone());
+        let app_role = card.as_ref().and_then(|card| card.role.clone());
+        // Availability, for the grid. `tree` rides along because a slot
+        // index means nothing without agreeing which manifest it indexes
+        // into — two peers on different trees must not be drawn as though
+        // their squares line up.
+        let serving = card.as_ref().and_then(|card| card.serving.clone());
+        let tree = card.as_ref().and_then(|card| card.tree.clone());
+        let stats = bytes.get(id).copied().unwrap_or_default();
+        serde_json::json!({
+            "id": id,
+            "role": role,
+            "bytes_sent": stats.sent,
+            "bytes_received": stats.received,
+            "up_bps": stats.up_bps,
+            "down_bps": stats.down_bps,
+            "rtt_ms": stats.rtt_ms,
+            "flags": flags,
+            "client": client,
+            "version": version,
+            "runtime": runtime,
+            "app_role": app_role,
+            "ip": ip,
+            "ip_kind": ip_kind,
+            "proto": proto,
+            "serving": serving,
+            "tree": tree,
+        })
+    };
 
-        let data_path = self.data_path.borrow().clone();
-        let mut rows = Vec::new();
-        let (local_ip, local_ip_kind) = cache.get(local).cloned().unwrap_or((None, None));
-        rows.push(peer_row(
-            local,
-            "self",
-            "*".to_owned(),
-            &data_path,
-            local_ip,
-            local_ip_kind,
-        ));
+    let mut rows = Vec::new();
+    let (local_ip, local_ip_kind) = ip.get(view.local).cloned().unwrap_or((None, None));
+    rows.push(peer_row(
+        view.local,
+        "self",
+        "*".to_owned(),
+        view.data_path,
+        local_ip,
+        local_ip_kind,
+    ));
 
-        // Both hubs: the producer's session lives in the mount's, every other
-        // direct peer in the mesh's. Reading one would drop the `D` flag off
-        // whichever half it missed.
-        let live: Vec<String> = self.direct_peer_ids().into_iter().collect();
-        let producer_direct = live.iter().any(|id| id == producer);
-        let (ip, ip_kind) = cache.get(producer).cloned().unwrap_or((None, None));
-        let mut flags = String::from("S");
-        if producer_direct {
-            flags.push('D');
-        }
-        rows.push(peer_row(
-            producer, "producer", flags, &data_path, ip, ip_kind,
-        ));
-
-        let mut seen: HashSet<String> = HashSet::new();
-        seen.insert(local.to_owned());
-        seen.insert(producer.to_owned());
-
-        for id in live {
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            let (ip, ip_kind) = cache.get(&id).cloned().unwrap_or((None, None));
-            rows.push(peer_row(
-                &id,
-                "direct",
-                "D".to_owned(),
-                "webrtc",
-                ip,
-                ip_kind,
-            ));
-        }
-
-        // Gossip-only members publish meta cards but may never open a direct
-        // hub session — still show them so the Peers list matches the roster.
-        if let Some(mesh) = mesh.as_ref() {
-            for card in mesh.known_cards() {
-                if !seen.insert(card.endpoint.clone()) {
-                    continue;
-                }
-                let fallback = if card.transport.is_empty() {
-                    "gossip"
-                } else {
-                    card.transport.as_str()
-                };
-                rows.push(peer_row(
-                    &card.endpoint,
-                    "gossip",
-                    String::new(),
-                    fallback,
-                    None,
-                    None,
-                ));
-            }
-        }
-
-        rows
+    // Both hubs: the producer's session lives in the mount's, every other
+    // direct peer in the mesh's. Reading one would drop the `D` flag off
+    // whichever half it missed.
+    let (producer_ip, producer_ip_kind) = ip.get(view.producer).cloned().unwrap_or((None, None));
+    let mut flags = String::from("S");
+    if view.direct.contains(view.producer) {
+        flags.push('D');
     }
+    rows.push(peer_row(
+        view.producer,
+        "producer",
+        flags,
+        view.data_path,
+        producer_ip,
+        producer_ip_kind,
+    ));
+
+    let mut seen: HashSet<&str> = view.ours.iter().map(String::as_str).collect();
+    seen.insert(view.local);
+    seen.insert(view.producer);
+
+    let mut direct: Vec<&str> = view.direct.iter().map(String::as_str).collect();
+    direct.sort_unstable();
+    for id in direct {
+        if !seen.insert(id) {
+            continue;
+        }
+        let (ip, ip_kind) = ip.get(id).cloned().unwrap_or((None, None));
+        rows.push(peer_row(
+            id,
+            "direct",
+            "D".to_owned(),
+            "webrtc",
+            ip,
+            ip_kind,
+        ));
+    }
+
+    // Mesh members publish meta cards but may never open a direct hub session
+    // — still show them, so the Peers list matches the mesh count.
+    for card in view.present {
+        if !seen.insert(card.endpoint.as_str()) {
+            continue;
+        }
+        let fallback = if card.transport.is_empty() {
+            "gossip"
+        } else {
+            card.transport.as_str()
+        };
+        rows.push(peer_row(
+            &card.endpoint,
+            "gossip",
+            String::new(),
+            fallback,
+            None,
+            None,
+        ));
+    }
+
+    rows
 }
 
 fn identity_fingerprint(token: &[u8; SECRET_LEN]) -> String {
@@ -3690,24 +3777,24 @@ async fn vet_seeder_candidate(
     // precisely than re-reading the settled path.
     let (connection, via_data_channel) =
         match seeder_webrtc_dial(waiting, id, relays, channel_wait).await {
-        Ok(connection) => (connection, true),
-        Err(webrtc_error) => {
-            let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
-            match waiting.endpoint.connect(addr, MOUNT_ALPN).await {
-                Ok(connection) => (connection, false),
-                Err(error) => {
-                    return Err(Refusal {
-                        endpoint,
-                        reason: format!(
-                            "{short}: webrtc: {}; relay: {error}",
-                            describe(&webrtc_error),
-                        ),
-                        unreached: true,
-                    });
+            Ok(connection) => (connection, true),
+            Err(webrtc_error) => {
+                let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
+                match waiting.endpoint.connect(addr, MOUNT_ALPN).await {
+                    Ok(connection) => (connection, false),
+                    Err(error) => {
+                        return Err(Refusal {
+                            endpoint,
+                            reason: format!(
+                                "{short}: webrtc: {}; relay: {error}",
+                                describe(&webrtc_error),
+                            ),
+                            unreached: true,
+                        });
+                    }
                 }
             }
-        }
-    };
+        };
     // A mount connection to a peer that is not us: the mesh demonstrably
     // holds this share, which is the only evidence that may cut the origin
     // dial short. Raised here rather than on the card that named this
@@ -4560,8 +4647,8 @@ fn pinned_ladder() -> Vec<fofoca::iroh::RelayUrl> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHANNEL_DISCONNECT_GRACE_MS, ProbeChunkSource, RaceOutcome, drain_with_stall_deadline,
-        first_success,
+        CHANNEL_DISCONNECT_GRACE_MS, PeerCard, ProbeChunkSource, RaceOutcome, SwarmView,
+        drain_with_stall_deadline, first_success, swarm_rows,
     };
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
@@ -4979,7 +5066,10 @@ mod tests {
         let outcome = super::capped_origin_dial(dial, 100, Some((flag, 0.0))).await;
         let message = outcome.expect_err("the cap must fire");
         assert!(
-            message.as_string().unwrap_or_default().contains("timed out"),
+            message
+                .as_string()
+                .unwrap_or_default()
+                .contains("timed out"),
             "the error must name the timeout: {message:?}"
         );
     }
@@ -5271,8 +5361,143 @@ mod tests {
         assert_eq!(list.len(), super::KNOWN_SEEDERS_CAP);
         assert_eq!(list[0].endpoint, "peer-3");
         assert_eq!(
-            list.iter().filter(|entry| entry.endpoint == "peer-3").count(),
+            list.iter()
+                .filter(|entry| entry.endpoint == "peer-3")
+                .count(),
             1
         );
+    }
+
+    /// A tab's endpoint ids and the cards the mesh has for it.
+    fn swarm_view<'a>(
+        local: &'a str,
+        ours: &'a std::collections::HashSet<String>,
+        producer: &'a str,
+        direct: &'a std::collections::HashSet<String>,
+        present: &'a [PeerCard],
+    ) -> SwarmView<'a> {
+        SwarmView {
+            local,
+            ours,
+            producer,
+            direct,
+            present,
+            all: present,
+            data_path: "webrtc",
+        }
+    }
+
+    fn id_set(names: &[&str]) -> std::collections::HashSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn listed_card(endpoint: &str) -> PeerCard {
+        PeerCard::new(
+            endpoint,
+            "9.9.9",
+            "browser",
+            "webrtc",
+            Some("consumer".to_owned()),
+        )
+    }
+
+    fn row_pairs(view: &SwarmView<'_>) -> Vec<(String, String)> {
+        swarm_rows(
+            view,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .into_iter()
+        .map(|row| {
+            let field = |key: &str| row[key].as_str().unwrap_or_default().to_owned();
+            (field("id"), field("role"))
+        })
+        .collect()
+    }
+
+    /// The seeder path mints a second key, so the tab's card is published
+    /// under its *mesh* id while the row is keyed by its *mount* id. Reading
+    /// only the mount id let the tab's own card fall through as a stranger,
+    /// which is half of why the Peers list outnumbered the mesh.
+    #[test]
+    fn a_tab_with_two_identities_lists_itself_once() {
+        let ours = id_set(&["mount-id", "mesh-id"]);
+        let direct = id_set(&[]);
+        let present = [listed_card("mesh-id"), listed_card("peer-b")];
+        let listed = row_pairs(&swarm_view(
+            "mount-id",
+            &ours,
+            "producer-id",
+            &direct,
+            &present,
+        ));
+        assert_eq!(
+            listed,
+            vec![
+                ("mount-id".to_owned(), "self".to_owned()),
+                ("producer-id".to_owned(), "producer".to_owned()),
+                ("peer-b".to_owned(), "gossip".to_owned()),
+            ]
+        );
+    }
+
+    /// And the card follows: our second identity published it, so the self
+    /// row must find it there rather than reporting us as an unknown client.
+    #[test]
+    fn the_self_row_takes_the_card_our_other_identity_published() {
+        let ours = id_set(&["mount-id", "mesh-id"]);
+        let direct = id_set(&[]);
+        let present = [listed_card("mesh-id")];
+        let listed = swarm_rows(
+            &swarm_view("mount-id", &ours, "producer-id", &direct, &present),
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(listed[0]["version"].as_str(), Some("9.9.9"));
+    }
+
+    /// One row per peer, whichever source claimed it. A peer that is both a
+    /// live channel and a mesh member is one peer, not two rows.
+    #[test]
+    fn every_row_names_a_different_peer() {
+        let ours = id_set(&["mount-id"]);
+        let direct = id_set(&["peer-b", "producer-id"]);
+        let present = [listed_card("peer-b"), listed_card("peer-c")];
+        let listed = row_pairs(&swarm_view(
+            "mount-id",
+            &ours,
+            "producer-id",
+            &direct,
+            &present,
+        ));
+        let mut seen: Vec<&str> = listed.iter().map(|(id, _)| id.as_str()).collect();
+        let count = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            count,
+            "a peer must not be listed twice: {listed:?}"
+        );
+    }
+
+    /// The mesh half of the list is the mesh's answer, so a peer it has
+    /// dropped produces no row — the other half of the count disagreement.
+    #[test]
+    fn a_peer_the_mesh_has_dropped_gets_no_row() {
+        let ours = id_set(&["mount-id"]);
+        let direct = id_set(&[]);
+        let listed = row_pairs(&swarm_view("mount-id", &ours, "producer-id", &direct, &[]));
+        assert_eq!(listed.len(), 2, "self and the producer only: {listed:?}");
+    }
+
+    /// But the rows above the mesh are not the mesh's to take away. A silent
+    /// roster must never hide the peer we are streaming from.
+    #[test]
+    fn the_producer_survives_a_mesh_that_knows_nobody() {
+        let ours = id_set(&["mount-id"]);
+        let direct = id_set(&["producer-id"]);
+        let listed = row_pairs(&swarm_view("mount-id", &ours, "producer-id", &direct, &[]));
+        assert!(listed.contains(&("producer-id".to_owned(), "producer".to_owned())));
     }
 }

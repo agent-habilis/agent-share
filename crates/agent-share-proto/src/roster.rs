@@ -141,21 +141,6 @@ impl Roster {
             .map(|entry| entry.card.clone())
             .collect()
     }
-
-    /// The card describing `endpoint`, from anywhere in the document.
-    ///
-    /// Searches [`Self::all`] rather than the present half, because this
-    /// decorates a row that already exists for its own reasons — our own, the
-    /// producer's, a live data channel's. Those rows do not come from the
-    /// roster, so letting the roster blank their version and runtime would
-    /// turn a peer we are talking to right now into an unnamed one.
-    #[must_use]
-    pub fn card_for(&self, endpoint: &str) -> Option<PeerCard> {
-        self.entries
-            .iter()
-            .find(|entry| entry.card.endpoint == endpoint)
-            .map(|entry| entry.card.clone())
-    }
 }
 
 #[cfg(test)]
@@ -301,19 +286,6 @@ mod tests {
         assert_eq!(endpoints(book().all()), vec!["ep-a", "ep-gone"]);
     }
 
-    /// A row we hold a live connection to must keep its name even when gossip
-    /// has written the peer off. This is why `card_for` reads `all`: the row
-    /// exists because of the connection, and blanking its version and runtime
-    /// would report a peer we are actively talking to as unknown.
-    #[test]
-    fn a_card_still_describes_a_peer_the_roster_has_dropped() {
-        assert_eq!(
-            book().card_for("ep-gone").map(|card| card.endpoint),
-            Some("ep-gone".to_owned())
-        );
-        assert!(book().card_for("ep-never-seen").is_none());
-    }
-
     /// A driver that has not run yet answers "nobody", not a panic — the
     /// browser seeds one of these before its event loop starts.
     #[test]
@@ -321,6 +293,5 @@ mod tests {
         let empty = Roster::default();
         assert!(empty.present().is_empty());
         assert!(empty.all().is_empty());
-        assert!(empty.card_for("ep-a").is_none());
     }
 }

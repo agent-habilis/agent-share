@@ -522,19 +522,6 @@ impl MeshPeer {
         &self.hub
     }
 
-    /// Meta peer card for `endpoint_id`, if published.
-    ///
-    /// Answers from every card the document holds, not only the present ones:
-    /// this decorates a row that exists for its own reasons — ours, the
-    /// producer's, a live data channel's — and a peer we are talking to right
-    /// now must not render as unknown because gossip wrote it off.
-    pub(crate) fn card_for(&self, endpoint_id: &str) -> Option<PeerCard> {
-        self.clients
-            .lock()
-            .ok()
-            .and_then(|book| book.card_for(endpoint_id))
-    }
-
     /// Publish the manifest fingerprint this tab is on.
     ///
     /// The browser cannot supply this at join — `join_share` runs from the
@@ -611,6 +598,20 @@ impl MeshPeer {
             .lock()
             .ok()
             .map(|book| book.present())
+            .unwrap_or_default()
+    }
+
+    /// Every meta peer card the document holds, present or not.
+    ///
+    /// For decorating a row that exists for its own reasons — ours, the
+    /// producer's, a live data channel's. Those rows do not come from the
+    /// roster, so filtering their cards by it would turn a peer we are
+    /// talking to right now into an unnamed one.
+    pub(crate) fn all_cards(&self) -> Vec<PeerCard> {
+        self.clients
+            .lock()
+            .ok()
+            .map(|book| book.all())
             .unwrap_or_default()
     }
 
