@@ -28,8 +28,8 @@ agent-share-proto = { path = "../agent-share-proto" }
 # socket, the filesystem and multihop, none of which exist in a tab. What
 # remains is the whole node runtime — `setup_mesh` → `Node::spawn` → the event
 # loop — so a browser peer is the same peer a CLI runs, not a reduced stand-in.
-fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "52a72f76c63b80b97e6113e81027b7db86eafbe1", default-features = false }
-fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "52a72f76c63b80b97e6113e81027b7db86eafbe1", features = ["web"] }
+fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b", default-features = false }
+fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b", features = ["web"] }
 # NOTE: no iroh entries -- taken from `fofoca::iroh` and
 # `fofoca_protocol::iroh_base`, which this crate already depends on.
 anyhow = "1"
@@ -69,7 +69,7 @@ web-sys = { version = "0.3", features = [
 # outboards or storage leaks into the share protocol — see `fofoca-blobs`'s
 # isolation tests. It lives in the `fofoca-network/fofoca` workspace; the
 # sibling-checkout path is interim, pending a rev-pinned git dependency.
-fofoca-blobs = { git = "https://github.com/fofoca-network/fofoca", rev = "52a72f76c63b80b97e6113e81027b7db86eafbe1" }
+fofoca-blobs = { git = "https://github.com/fofoca-network/fofoca", rev = "a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b" }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }

@@ -326,8 +326,19 @@ mod tests {
         let all = fofoca_blobs::ChunkRanges::all();
         let encoded = fofoca_blobs::encode_ranges(&contents, &all).expect("encode");
         let mut target = Vec::new();
-        fofoca_blobs::decode_into(root, contents.len() as u64, &encoded, &all, &mut target)
-            .expect("the file's own bytes must verify against its root");
+        // The outboard is an out-parameter now, and discarding it is a choice
+        // to write down: this assertion is the final consumer of these bytes,
+        // so there are no proofs to serve onward from them.
+        let mut discarded_outboard = fofoca_blobs::Outboard::new();
+        fofoca_blobs::decode_into(
+            root,
+            contents.len() as u64,
+            &encoded,
+            &all,
+            &mut target,
+            &mut discarded_outboard,
+        )
+        .expect("the file's own bytes must verify against its root");
         assert_eq!(target, contents);
 
         // And content that is *not* this file does not, which is the half that
@@ -335,9 +346,17 @@ mod tests {
         let impostor = vec![8u8; 200_000];
         let forged = fofoca_blobs::encode_ranges(&impostor, &all).expect("encode");
         let mut wrong = Vec::new();
+        let mut forged_outboard = fofoca_blobs::Outboard::new();
         assert!(
-            fofoca_blobs::decode_into(root, impostor.len() as u64, &forged, &all, &mut wrong)
-                .is_err(),
+            fofoca_blobs::decode_into(
+                root,
+                impostor.len() as u64,
+                &forged,
+                &all,
+                &mut wrong,
+                &mut forged_outboard,
+            )
+            .is_err(),
             "substituted content must not verify against the origin's root"
         );
 
