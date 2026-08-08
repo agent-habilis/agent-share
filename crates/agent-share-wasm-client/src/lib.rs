@@ -2015,6 +2015,62 @@ const PROBE_STALL_MS: i32 = 10_000;
 /// link renews the window on every chunk it manages to land.
 const PROBE_CHUNK_LEN: usize = 16 * 1024;
 
+/// Slack for the parts of vetting a candidate that carry no deadline of
+/// their own: the relay dial after the data channel concedes, then fetching
+/// and hashing the manifest. Both are ordinary round trips against a peer
+/// that has already answered something.
+const VET_OVERHEAD_MS: i32 = 10_000;
+
+/// How many [`PROBE_STALL_MS`] windows a lane allows a bulk probe.
+///
+/// One to set up and land first bytes, one for a slow drain to re-arm into.
+/// The probe re-arms per chunk with no total bound by design, so no finite
+/// deadline can promise every slow-but-moving seeder completes; what this
+/// buys is that a probe is not cut before it has had a fair chance.
+const PROBE_WINDOWS_ALLOWED: i32 = 2;
+
+/// The least a lane may allow one candidate and still finish it: a full
+/// channel wait, then the relay fallback and manifest fetch behind it.
+///
+/// A lane deadline under this can never complete a single candidate — it
+/// expires while the first one is still deciding whether to concede the
+/// relay — so the lane can only ever report failure, however healthy the
+/// peers are.
+const fn vet_floor_ms(channel_wait_ms: i32) -> i32 {
+    channel_wait_ms + VET_OVERHEAD_MS
+}
+
+/// What one candidate needs end to end, bulk probe included.
+const fn vet_budget_ms(channel_wait_ms: i32) -> i32 {
+    vet_floor_ms(channel_wait_ms) + PROBE_STALL_MS * PROBE_WINDOWS_ALLOWED
+}
+
+/// The tick a background tab's timers are clamped to.
+///
+/// Measured in this project against Safari at 13-20 s; the upper end is the
+/// one to size against, since being wrong the other way is what this guards.
+#[cfg(test)]
+const BACKGROUND_TICK_MS: f64 = 20_000.0;
+
+/// How many times a polled wait must actually run before its clock may
+/// expire it.
+const MIN_POLLS_BEFORE_GIVING_UP: u32 = 3;
+
+/// Whether a polled wait is out of time.
+///
+/// Wall clock alone is wrong for anything a hidden tab runs, and reconnect
+/// is exactly that: the browser throttles timers past the point where the
+/// connection survives, so hiding the tab is what kills it in the first
+/// place. A `wait_ms(500)` inside a hidden tab returns 13-20 s later, so a
+/// budget shorter than one tick gives that tab a single attempt at whatever
+/// it is waiting for — the first poll is also the last. Requiring a minimum
+/// number of polls keeps the budget honest in both worlds: a foreground tab
+/// blows through the poll count long before the clock, and a throttled one
+/// gets its chances however long the browser takes to hand them over.
+fn out_of_time(elapsed_ms: f64, polls: u32, budget_ms: f64) -> bool {
+    elapsed_ms > budget_ms && polls >= MIN_POLLS_BEFORE_GIVING_UP
+}
+
 /// One ranged read on `conn`, failed only if it stops moving.
 ///
 /// The connect-time bulk probe: between two browser tabs the data channel
@@ -2916,7 +2972,10 @@ async fn connect_via_seeder(
     }
 
     // Cards arrive over gossip; poll until somebody vouches or the deadline.
+    // The poll count is what keeps this honest in a hidden tab, where the
+    // deadline can pass inside a single clamped tick — see [`out_of_time`].
     let started = now_ms();
+    let mut polls = 0u32;
     let vouching = loop {
         let vouching: Vec<agent_share_proto::PeerCard> = mesh_peer
             .known_cards()
@@ -2934,7 +2993,8 @@ async fn connect_via_seeder(
             // deferred to the dial that actually reaches one of them.
             break vouching;
         }
-        if now_ms() - started > SEEDER_CARDS_DEADLINE_MS {
+        polls += 1;
+        if out_of_time(now_ms() - started, polls, SEEDER_CARDS_DEADLINE_MS) {
             let detail = format!(
                 "the origin is unreachable ({}) and no peer on the mesh vouches for the share",
                 describe(origin_error),
@@ -3001,7 +3061,7 @@ async fn connect_via_seeder(
     let terms = VetTerms {
         token: &token,
         tree: majority.as_str(),
-        channel_wait: SEEDER_CHANNEL_WAIT_MS,
+        channel_wait: f64::from(SEEDER_CHANNEL_WAIT_MS),
         can_serve: can_serve.as_ref(),
     };
     let mut attempts: Vec<
@@ -3078,12 +3138,17 @@ async fn connect_via_seeder(
 /// The redial lane's whole budget. One channel try plus the relay fallback
 /// per candidate must fit inside it; sized so a roster of corpses delays
 /// the card path by at most this before being pruned.
-const KNOWN_SEEDER_REDIAL_DEADLINE_MS: i32 = 10_000;
+const KNOWN_SEEDER_REDIAL_DEADLINE_MS: i32 = vet_floor_ms(KNOWN_SEEDER_CHANNEL_WAIT_MS);
+
+const _: () = assert!(
+    KNOWN_SEEDER_REDIAL_DEADLINE_MS >= vet_floor_ms(KNOWN_SEEDER_CHANNEL_WAIT_MS),
+    "the redial lane must at least reach and verify one candidate",
+);
 
 /// The channel wait inside the redial lane — much tighter than
 /// [`SEEDER_CHANNEL_WAIT_MS`], so the webrtc try and the relay fallback
 /// both fit the lane's deadline.
-const KNOWN_SEEDER_CHANNEL_WAIT_MS: f64 = 6_000.0;
+const KNOWN_SEEDER_CHANNEL_WAIT_MS: i32 = 6_000;
 
 /// Launch spacing inside the redial lane; tighter than the card race's
 /// because there are at most [`KNOWN_SEEDERS_CAP`] candidates and every one
@@ -3144,7 +3209,7 @@ async fn redial_known_seeders(
             let terms = VetTerms {
                 token,
                 tree: &tree,
-                channel_wait: KNOWN_SEEDER_CHANNEL_WAIT_MS,
+                channel_wait: f64::from(KNOWN_SEEDER_CHANNEL_WAIT_MS),
                 can_serve,
             };
             vet_seeder_candidate(waiting, endpoint, id, relays_ref, &terms).await
@@ -3356,7 +3421,21 @@ async fn adopt_vetted(
 /// not cut further without drill data: a demotion to relay is permanent for
 /// the connection, so a too-sharp wait converts webrtc wins into relay
 /// sessions.
-const SEEDER_CHANNEL_WAIT_MS: f64 = 15_000.0;
+const SEEDER_CHANNEL_WAIT_MS: i32 = MEASURED_CHANNEL_FORMATION_MS;
+
+const _: () = assert!(
+    SEEDER_CHANNEL_WAIT_MS >= MEASURED_CHANNEL_FORMATION_MS,
+    "conceding the relay before a session forms makes the relay permanent",
+);
+
+/// What channel formation was *measured* needing, rather than hoped to need.
+///
+/// fofoca's mesh negotiation was measured landing a session a minute after
+/// two freshly-reloaded tabs meet, and this repo's own drill records the
+/// both-tabs-reloaded byte lane at ~96 s. 30 s is the value that lane ran on
+/// before it was halved on the theory that beacon-failover fixes had covered
+/// it — but those fixes govern rendezvous, not JSEP, and no drill was run.
+const MEASURED_CHANNEL_FORMATION_MS: i32 = 30_000;
 
 /// Whether another JSEP offer is due: one at entry, one more once half the
 /// wait has passed with no session — STUN can lose a round transiently, and
@@ -3387,6 +3466,7 @@ async fn seeder_webrtc_dial(
     // the only path a connection can settle on.
     let started = now_ms();
     let mut offers = 0u32;
+    let mut polls = 0u32;
     loop {
         if waiting.mount_hub.has_session(&seeder) {
             return waiting
@@ -3417,7 +3497,17 @@ async fn seeder_webrtc_dial(
                 ))),
             }
         }
-        if now_ms() - started > wait {
+        // `negotiate` has no timeout of its own — it blocks on reading the
+        // answer — so it routinely returns *after* the wait has run out, and
+        // sometimes it returns having attached. Re-asking is the difference
+        // between taking that session and throwing away a data channel that
+        // exists, since the loop below would concede to the relay and a
+        // relay win is permanent for the connection's life.
+        if waiting.mount_hub.has_session(&seeder) {
+            continue;
+        }
+        polls += 1;
+        if out_of_time(now_ms() - started, polls, wait) {
             return Err(JsValue::from_str(
                 "no data channel formed inside the wait; conceding to the relay",
             ));
@@ -3445,7 +3535,12 @@ const SEEDER_RACE_STAGGER_MS: i32 = 2_000;
 /// to the forever-retrying caller in about half a minute. The caller's card
 /// poll (`SEEDER_CARDS_DEADLINE_MS`) plus this is the ceiling on one silent
 /// "connecting" stretch.
-const SEEDER_RACE_DEADLINE_MS: i32 = 35_000;
+const SEEDER_RACE_DEADLINE_MS: i32 = vet_budget_ms(SEEDER_CHANNEL_WAIT_MS);
+
+const _: () = assert!(
+    SEEDER_RACE_DEADLINE_MS >= vet_budget_ms(SEEDER_CHANNEL_WAIT_MS),
+    "the card race must let its first candidate finish a whole vet",
+);
 
 /// Everything the winning candidate hands back: a vetted connection plus
 /// the manifest bytes the vetting already paid for.
@@ -4886,6 +4981,54 @@ mod tests {
             super::judge_adopted_tree(&[card("me", Some("tree1"))], "me", "tree1"),
             TreeVerdict::Unknown
         );
+    }
+
+    /// The derivation the lane deadlines are built from, exercised as a
+    /// function rather than as the constants it happens to produce — those
+    /// are held by compile-time assertions beside them. A budget has to
+    /// leave room for the probe on top of reaching and verifying a peer,
+    /// and a longer channel wait has to buy a longer budget, or a lane
+    /// could be lengthened into being cut short again.
+    #[test]
+    fn a_vet_budget_grows_with_what_it_has_to_contain() {
+        use super::{vet_budget_ms, vet_floor_ms};
+        assert!(vet_budget_ms(6_000) > vet_floor_ms(6_000));
+        assert!(vet_floor_ms(30_000) > vet_floor_ms(6_000));
+        assert!(vet_budget_ms(30_000) > vet_budget_ms(6_000));
+        // The floor is what a candidate needs before its probe begins, so
+        // it can never be under the channel wait it contains.
+        assert!(vet_floor_ms(30_000) >= 30_000);
+    }
+
+    /// A hidden tab's timers are clamped, and hiding the tab is what kills
+    /// the connection, so the reconnect path runs throttled by definition.
+    /// A budget shorter than one clamped tick used to give such a tab a
+    /// single poll: the first wake was already past the deadline.
+    #[test]
+    fn a_throttled_tab_still_gets_its_chances() {
+        use super::{BACKGROUND_TICK_MS, MIN_POLLS_BEFORE_GIVING_UP, out_of_time};
+        let budget = 12_000.0;
+        // Every wake in a background tab lands a whole tick later, so the
+        // clock is blown from the very first one.
+        for poll in 1..MIN_POLLS_BEFORE_GIVING_UP {
+            let elapsed = BACKGROUND_TICK_MS * f64::from(poll);
+            assert!(
+                !out_of_time(elapsed, poll, budget),
+                "poll {poll} at {elapsed} ms must still count as a chance"
+            );
+        }
+        assert!(
+            out_of_time(
+                BACKGROUND_TICK_MS * f64::from(MIN_POLLS_BEFORE_GIVING_UP),
+                MIN_POLLS_BEFORE_GIVING_UP,
+                budget
+            ),
+            "the budget still has to end, once the chances are actually spent"
+        );
+        // A foreground tab is governed by its clock, exactly as before: the
+        // poll count is spent long before the budget runs out.
+        assert!(!out_of_time(budget / 2.0, 12, budget));
+        assert!(out_of_time(budget + 1.0, 24, budget));
     }
 
     fn refusal(endpoint: &str, unreached: bool) -> super::Refusal {
