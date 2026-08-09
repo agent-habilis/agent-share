@@ -48,7 +48,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use fofoca_chunks::{
-    ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, FileId, IdbStore, Root, chunk_hash,
+    ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, Coverage, FileId, IdbStore, Root,
+    chunk_hash,
 };
 use std::sync::Arc;
 
@@ -74,6 +75,7 @@ mod live_state;
 mod mesh;
 mod produce;
 mod seed;
+mod swarm;
 mod transport_mode;
 
 pub use mesh::MeshPeer;
@@ -256,7 +258,46 @@ pub struct ShareClient {
     /// dial. `None` on origin connections: the origin is the one peer with
     /// the *right* to change the tree.
     pinned_tree: Option<String>,
+    /// The mount identity's relay-bearing half, kept for dialling other peers.
+    ///
+    /// A **second handle** rather than a read of `mesh_endpoint`, which is
+    /// `take`n at connect and handed to the background mesh join. A dial that
+    /// reached for it there would always find `None` — which is exactly the bug
+    /// that made the swarm below silently never form, on the one path where it
+    /// helps most.
+    signal_endpoint: Option<Endpoint>,
+    /// Extra peers to pull chunks from, beyond the one this tab is homed on.
+    ///
+    /// Deliberately *beside* `connection` rather than replacing it. The home
+    /// connection is what the info pane samples, what `watch` follows, what a
+    /// close is detected on, and what a password refusal surfaces through —
+    /// one peer with a distinguished role. These are extra bandwidth for bulk
+    /// only, so a swarm that fails to form costs nothing but the speed.
+    ///
+    /// Dialled once, lazily, on the first transfer that could use them, and
+    /// kept afterwards: a dial costs a JSEP round, which is far too expensive
+    /// to pay per file.
+    swarm: RefCell<Vec<SwarmPeer>>,
+    /// Whether the lazy dial above has already run.
+    swarm_dialled: Cell<bool>,
 }
+
+/// One extra source of chunks.
+struct SwarmPeer {
+    connection: Connection,
+    /// The peer's endpoint id, for the log line that says where bytes came
+    /// from. A transfer spread over peers is otherwise impossible to explain
+    /// after the fact.
+    endpoint: String,
+}
+
+/// How many extra peers to dial for bulk.
+///
+/// Small on purpose. Each one costs a JSEP round and a data channel, and the
+/// gain flattens quickly — the point of a swarm here is that the *rare* chunk
+/// gets a second holder, not that a file arrives on twelve connections. The
+/// home connection is not counted, so this is a ceiling of four sources.
+const SWARM_WIDTH: usize = 3;
 
 /// `author` is the ticket's authorship key, and is a parameter rather than a
 /// field set afterwards on purpose: a connect path that forgot it would verify
@@ -297,6 +338,7 @@ fn new_share_client(
         link_cache: RefCell::new(HashMap::new()),
         _hub: hub,
         _session: session,
+        signal_endpoint: mesh_endpoint.as_ref().map(|shared| shared.endpoint.clone()),
         mesh_endpoint,
         _endpoint: endpoint,
         mesh: Rc::new(RefCell::new(MeshSlot::Pending)),
@@ -304,6 +346,8 @@ fn new_share_client(
         settle_pending: false,
         prefetched_manifest: Rc::new(RefCell::new(None)),
         manifest_fetched: Rc::new(Cell::new(false)),
+        swarm: RefCell::new(Vec::new()),
+        swarm_dialled: Cell::new(false),
         store: RefCell::new(None),
         held: RefCell::new(BTreeSet::new()),
         rows: RefCell::new(HashMap::new()),
@@ -1337,19 +1381,11 @@ impl ShareClient {
                 continue;
             }
 
-            // Only the missing chunks. Pressing Seed after a preview therefore
-            // costs the difference, which is often nothing at all.
-            for position in before.missing() {
-                let Some(address) = row.leaf(position) else {
-                    continue;
-                };
-                let chunk = self.fetch_or_read_chunk(&row, index, position, address).await?;
-                total += chunk.len() as u64;
-                store
-                    .put(address, &chunk)
-                    .await
-                    .map_err(|error| err("storing a chunk", &error))?;
-            }
+            // Only the missing chunks, and spread over every peer that holds
+            // them. Pressing Seed after a preview therefore costs the
+            // difference, which is often nothing at all.
+            let missing: Vec<usize> = before.missing().collect();
+            total += self.fetch_missing(&row, index, &missing, store.as_ref()).await?;
             store
                 .put_map(&row)
                 .await
@@ -1522,6 +1558,285 @@ impl ShareClient {
     /// The fallback exists because a peer may serve `OP_READ` and nothing else
     /// — an older producer, or one with no chunk table. Bytes taken that way
     /// are still verified against the row before they are used.
+    /// Dial up to [`SWARM_WIDTH`] other holders of this share, once.
+    ///
+    /// Best-effort throughout: a peer that will not answer is skipped, and a
+    /// swarm that fails to form entirely leaves the transfer exactly as it was
+    /// before this existed — one connection, which still works.
+    ///
+    /// Candidates come from the mesh roster rather than from any memory of past
+    /// transfers, so a peer that arrived a moment ago is usable and one that
+    /// left is not offered.
+    ///
+    /// # Known limitation: browser peers currently refuse the dial
+    ///
+    /// Against another tab this reliably fails with *"a WebRTC session with you
+    /// already exists; dial the custom addr"*. Two tabs on one mesh already
+    /// hold a data channel, so the remote refuses a fresh JSEP round — but our
+    /// own `mount_hub.has_session` says no session exists, so the direct dial
+    /// the refusal recommends has nothing to route over either. The two lanes
+    /// disagree about what is attached, and reconciling them is work in the
+    /// transport, not here.
+    ///
+    /// The consequence is bounded and safe: no extra peer joins, every chunk
+    /// falls through to the home connection, and transfers complete exactly as
+    /// they did before. The scheduling half above is finished and tested; this
+    /// is the half that does not yet pay off.
+    async fn dial_swarm(&self) {
+        if self.swarm_dialled.replace(true) {
+            return;
+        }
+        let Some(peer) = self.mesh_peer() else {
+            return;
+        };
+        // Never ourselves, and never the peer we are already homed on — a
+        // second connection to it would add a lane, not a source.
+        let home = self.connection.remote_id().to_string();
+        let own = peer.hub().local_id().to_string();
+        let candidates: Vec<String> = peer
+            .known_cards()
+            .into_iter()
+            .filter(|card| card.endpoint != home && card.endpoint != own)
+            // A card with no `serving` holds nothing worth dialling for bulk.
+            .filter(|card| card.serving.is_some())
+            .map(|card| card.endpoint)
+            .take(SWARM_WIDTH)
+            .collect();
+        if candidates.is_empty() {
+            // Said out loud, once. A swarm that never forms is indistinguishable
+            // from one that formed and helped, and the difference is the whole
+            // feature — silence here is what made an early bug look like
+            // ordinary single-peer behaviour.
+            web_sys::console::log_1(&JsValue::from_str(
+                "[share] swarm: no other holder on the mesh; pulling from the home peer alone",
+            ));
+            return;
+        }
+        // This tab's own lanes, not the waiting registry's: a client that
+        // reached the origin consumed its waiting membership at connect, so
+        // looking the entry up here found nothing and the swarm silently never
+        // formed on the one path where it is most useful.
+        let (Some(hub), Some(signal)) = (self._hub.as_ref(), self.signal_endpoint.as_ref()) else {
+            // A relay-only mount has no data-channel hub to negotiate over.
+            // Bulk still works; it just works from one peer.
+            return;
+        };
+        let lanes = DialLanes {
+            signal_endpoint: signal,
+            mount_endpoint: &self._endpoint,
+            mount_hub: hub,
+        };
+        // The relay ladder this tab is itself reachable on, which is the one
+        // the ticket configured for everybody on this share — a JSEP round has
+        // to meet somewhere, and that somewhere is the same for every peer.
+        let relays: Vec<TransportAddr> = signal
+            .addr()
+            .relay_urls()
+            .cloned()
+            .map(TransportAddr::Relay)
+            .collect();
+        web_sys::console::debug_1(&JsValue::from_str(&format!(
+            "[share] swarm: home={} self={} candidates={candidates:?}",
+            &home[..8.min(home.len())],
+            &own[..8.min(own.len())]
+        )));
+        for endpoint in candidates {
+            let Ok(id) = endpoint.parse::<fofoca::protocol::iroh_base::EndpointId>() else {
+                continue;
+            };
+            // Try the channel first, before offering. Two tabs on one mesh
+            // usually *already* have a data channel, and a peer in that state
+            // refuses a fresh JSEP round outright — "a WebRTC session with you
+            // already exists; dial the custom addr". Its own instruction, taken
+            // literally. A dial that finds no session simply fails and falls
+            // through to negotiating one.
+            let existing = self
+                ._endpoint
+                .connect(
+                    EndpointAddr::from_parts(id, [TransportAddr::Custom(custom_addr(id))]),
+                    MOUNT_ALPN,
+                )
+                .await;
+            let dialled = match existing {
+                Ok(connection) => Ok(connection),
+                Err(_) => {
+                    seeder_webrtc_dial(lanes, id, &relays, f64::from(SEEDER_CHANNEL_WAIT_MS)).await
+                }
+            };
+            match dialled {
+                Ok(connection) => {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "[share] swarm: {} joined as a chunk source",
+                        &endpoint[..8.min(endpoint.len())]
+                    )));
+                    self.swarm.borrow_mut().push(SwarmPeer {
+                        connection,
+                        endpoint,
+                    });
+                }
+                Err(error) => {
+                    web_sys::console::debug_1(&JsValue::from_str(&format!(
+                        "[share] swarm: {} did not answer ({})",
+                        &endpoint[..8.min(endpoint.len())],
+                        describe(&error)
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Fetch every missing chunk of `row`, spread across the swarm.
+    ///
+    /// The plan is pinned to `row.root()`: every peer answered `OP_HAVE` for
+    /// that root, so a file edited mid-transfer produces a *different* root and
+    /// a different download. This one finishes from peers still holding the old
+    /// one or fails; it cannot mix, because each chunk is checked against the
+    /// address the plan asked for.
+    ///
+    /// Returns the bytes fetched, for the tally.
+    async fn fetch_missing(
+        &self,
+        row: &ChunkMap,
+        index: u32,
+        missing: &[usize],
+        store: &IdbStore,
+    ) -> Result<u64, JsValue> {
+        if missing.is_empty() {
+            return Ok(0);
+        }
+        web_sys::console::debug_1(&JsValue::from_str(&format!(
+            "[share] swarm: slot {index} wants {} chunks",
+            missing.len()
+        )));
+        self.dial_swarm().await;
+
+        // Snapshotted, not borrowed: a `RefCell` borrow held across an await is
+        // the panic this type is built to avoid — see the note on the `mesh`
+        // field. A `Connection` is a handle, so cloning is cheap.
+        let peers: Vec<(String, Connection)> = self
+            .swarm
+            .borrow()
+            .iter()
+            .map(|peer| (peer.endpoint.clone(), peer.connection.clone()))
+            .collect();
+
+        // Ask every extra peer what it holds of this root. Concurrently: the
+        // answers are independent and a slow peer must not delay the plan.
+        let coverages: Vec<Option<Coverage>> = futures::future::join_all(
+            peers
+                .iter()
+                .map(|(_, conn)| fetch_have_on(conn, &self.token, row.root(), row.len())),
+        )
+        .await;
+        let usable: Vec<(&(String, Connection), Coverage)> = peers
+            .iter()
+            .zip(coverages)
+            .filter_map(|(peer, coverage)| Some((peer, coverage?)))
+            .collect();
+
+        let plan = swarm::plan(
+            missing,
+            &usable
+                .iter()
+                .map(|(_, coverage)| coverage.clone())
+                .collect::<Vec<_>>(),
+        );
+        if !plan.peers.is_empty() {
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "[share] swarm: {} chunks over {} peers, {} from the home peer",
+                missing.len() - plan.unheld.len(),
+                plan.peers.len(),
+                plan.unheld.len()
+            )));
+        }
+
+        let mut fetched = 0u64;
+        // Each peer works its own queue; the queues run together. A peer that
+        // fails mid-queue does not fail the download — its remaining positions
+        // fall through to the home connection below, which is the simplest
+        // form of the rescheduling BitTorrent calls endgame.
+        let mut refused: Vec<usize> = Vec::new();
+        let assigned = futures::future::join_all(plan.peers.iter().map(|peer_plan| {
+            let (peer, _) = &usable[peer_plan.peer];
+            self.drain_queue(peer, row, &peer_plan.positions)
+        }))
+        .await;
+        for (bytes, missed) in assigned {
+            for (address, chunk) in bytes {
+                fetched += chunk.len() as u64;
+                store
+                    .put(address, &chunk)
+                    .await
+                    .map_err(|error| err("storing a chunk", &error))?;
+            }
+            refused.extend(missed);
+        }
+
+        // Whatever the swarm could not serve, from the peer we are homed on —
+        // including every position no peer advertised at all.
+        for position in plan.unheld.iter().copied().chain(refused) {
+            let Some(address) = row.leaf(position) else {
+                continue;
+            };
+            if store.has(address).await.unwrap_or(false) {
+                continue;
+            }
+            let chunk = self
+                .fetch_or_read_chunk(row, index, position, address)
+                .await?;
+            fetched += chunk.len() as u64;
+            store
+                .put(address, &chunk)
+                .await
+                .map_err(|error| err("storing a chunk", &error))?;
+        }
+        Ok(fetched)
+    }
+
+    /// Pull one peer's assigned positions in order.
+    ///
+    /// Returns what arrived and verified, plus the positions it could not
+    /// serve. A peer that lies costs its own bandwidth and nothing else: the
+    /// bytes are hashed here, and a mismatch is treated exactly as a refusal.
+    async fn drain_queue(
+        &self,
+        peer: &(String, Connection),
+        row: &ChunkMap,
+        positions: &[usize],
+    ) -> (Vec<(ChunkHash, Vec<u8>)>, Vec<usize>) {
+        let (endpoint, connection) = peer;
+        let mut got = Vec::new();
+        let mut missed = Vec::new();
+        for &position in positions {
+            let Some(address) = row.leaf(position) else {
+                continue;
+            };
+            match fetch_chunk_on(connection, &self.token, address).await {
+                Ok(Some(bytes)) if chunk_hash(&bytes) == address => got.push((address, bytes)),
+                Ok(_) => missed.push(position),
+                Err(error) => {
+                    web_sys::console::debug_1(&JsValue::from_str(&format!(
+                        "[share] swarm: {} dropped out ({})",
+                        &endpoint[..8.min(endpoint.len())],
+                        describe(&error)
+                    )));
+                    // The rest of this queue goes with it: a connection that
+                    // errored will not answer the next request either.
+                    missed.push(position);
+                    missed.extend(
+                        positions
+                            .iter()
+                            .skip_while(|&&at| at != position)
+                            .skip(1)
+                            .copied(),
+                    );
+                    break;
+                }
+            }
+        }
+        (got, missed)
+    }
+
     async fn fetch_or_read_chunk(
         &self,
         row: &ChunkMap,
@@ -1749,35 +2064,9 @@ impl ShareClient {
         Ok(Some(row))
     }
 
-    /// One chunk from the connected peer, by address alone.
-    ///
-    /// `None` means "I do not hold that", which is how a peer holding part of a
-    /// file declines the parts it lacks. The bytes are **not** trusted here —
-    /// the caller checks them against the address it asked for.
+    /// One chunk from the peer this tab is homed on, by address alone.
     async fn fetch_chunk(&self, address: ChunkHash) -> Result<Option<Vec<u8>>, JsValue> {
-        let (mut send, mut recv) = self
-            .connection
-            .open_bi()
-            .await
-            .map_err(|error| err("open chunk stream", &error))?;
-        send.write_all(&framing::encode_chunk_request(&self.token, address.as_bytes()))
-            .await
-            .map_err(|error| err("send chunk request", &error))?;
-        send.finish().map_err(|error| err("finish", &error))?;
-
-        let mut status = [0u8; 1];
-        if recv.read_exact(&mut status).await.is_err() {
-            return Ok(None);
-        }
-        if status[0] != agent_share_proto::manifest::ReadStatus::Ok.to_byte() {
-            return Ok(None);
-        }
-        let len = read_len(&mut recv, framing::MAX_CHUNK_LEN).await?;
-        let mut bytes = vec![0u8; len as usize];
-        recv.read_exact(&mut bytes)
-            .await
-            .map_err(|error| err("read chunk", &error))?;
-        Ok(Some(bytes))
+        fetch_chunk_on(&self.connection, &self.token, address).await
     }
 
     /// Connect using the transport encoded in the ticket and measure for
@@ -2400,6 +2689,85 @@ fn percentile(sorted: &[f64], fraction: f64) -> f64 {
     )]
     let idx = ((sorted.len() as f64 - 1.0) * fraction).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
+}
+
+/// One chunk from `conn`, by address alone.
+///
+/// `None` means "I do not hold that", which is how a peer holding part of a
+/// file declines the parts it lacks. The bytes are **not** trusted here — the
+/// caller checks them against the address it asked for, which is what lets a
+/// chunk be taken from a peer nobody has any reason to trust.
+///
+/// Free of `ShareClient` because the swarm asks several peers at once, and only
+/// one of them is the connection this tab is homed on.
+async fn fetch_chunk_on(
+    conn: &Connection,
+    token: &[u8; SECRET_LEN],
+    address: ChunkHash,
+) -> Result<Option<Vec<u8>>, JsValue> {
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|error| err("open chunk stream", &error))?;
+    send.write_all(&framing::encode_chunk_request(token, address.as_bytes()))
+        .await
+        .map_err(|error| err("send chunk request", &error))?;
+    send.finish().map_err(|error| err("finish", &error))?;
+
+    let mut status = [0u8; 1];
+    if recv.read_exact(&mut status).await.is_err() {
+        return Ok(None);
+    }
+    if status[0] != agent_share_proto::manifest::ReadStatus::Ok.to_byte() {
+        return Ok(None);
+    }
+    let len = read_len(&mut recv, framing::MAX_CHUNK_LEN).await?;
+    let mut bytes = vec![0u8; len as usize];
+    recv.read_exact(&mut bytes)
+        .await
+        .map_err(|error| err("read chunk", &error))?;
+    Ok(Some(bytes))
+}
+
+/// Which chunks of `root` a peer says it can serve.
+///
+/// **The first consumer `OP_HAVE` has ever had.** It was implemented and served
+/// from the start of the chunk work and called by nobody, because with one
+/// connection there was nothing to schedule across; asking a single peer what
+/// it holds only to ask it for the same bytes anyway buys a round trip and no
+/// information.
+///
+/// `None` for a peer that will not answer — no chunk table, a root it never
+/// heard of, or a version of the protocol without the op. All three mean "plan
+/// without this peer", which costs a fallback and never a wrong chunk.
+async fn fetch_have_on(
+    conn: &Connection,
+    token: &[u8; SECRET_LEN],
+    root: Root,
+    chunks: usize,
+) -> Option<Coverage> {
+    let (mut send, mut recv) = conn.open_bi().await.ok()?;
+    send.write_all(&framing::encode_have_request(token, root.as_bytes()))
+        .await
+        .ok()?;
+    send.finish().ok()?;
+
+    let mut status = [0u8; 1];
+    recv.read_exact(&mut status).await.ok()?;
+    if status[0] != agent_share_proto::manifest::ReadStatus::Ok.to_byte() {
+        return None;
+    }
+    let len = read_len(&mut recv, framing::MAX_CHUNK_MAP_BYTES).await.ok()?;
+    let mut body = vec![0u8; len as usize];
+    recv.read_exact(&mut body).await.ok()?;
+    let (claimed, bitmap) = framing::decode_have(&body).ok()?;
+    // Held to the length *we* know the row to be, not the one the answer
+    // claims. A peer that overstates its row would otherwise have chunks
+    // scheduled at positions the file does not have.
+    if claimed as usize != chunks {
+        return None;
+    }
+    Coverage::from_bits(&bitmap, chunks).ok()
 }
 
 /// One manifest round on `conn`: the exact bytes served, and their decoding.
@@ -4058,8 +4426,34 @@ fn reoffer_due(offers: u32, elapsed: f64, wait: f64) -> bool {
     }
 }
 
+/// The three handles a peer dial needs, wherever the caller keeps them.
+///
+/// A parameter rather than a `&WaitingMesh` because the registry entry is not
+/// always there to borrow: a client that reached the origin **consumes** its
+/// waiting membership at connect and carries the pieces on itself. Taking the
+/// pieces lets a live client dial too, which is what the swarm does.
+#[derive(Clone, Copy)]
+struct DialLanes<'a> {
+    /// The mount identity's relay-bearing half, for JSEP only — a seeder's
+    /// refusal is keyed to the TLS-proven id of the *signal* connection.
+    signal_endpoint: &'a Endpoint,
+    /// Relay-free, so the connection can settle nowhere but the channel.
+    mount_endpoint: &'a Endpoint,
+    mount_hub: &'a Arc<BrowserHubTransport>,
+}
+
+impl WaitingMesh {
+    fn lanes(&self) -> DialLanes<'_> {
+        DialLanes {
+            signal_endpoint: &self.signal_endpoint,
+            mount_endpoint: &self.mount_endpoint,
+            mount_hub: &self.mount_hub,
+        }
+    }
+}
+
 async fn seeder_webrtc_dial(
-    waiting: &WaitingMesh,
+    waiting: DialLanes<'_>,
     seeder: fofoca::protocol::iroh_base::EndpointId,
     relays: &[TransportAddr],
     wait: f64,
@@ -4089,7 +4483,7 @@ async fn seeder_webrtc_dial(
             offers += 1;
             let addr = EndpointAddr::from_parts(seeder, relays.iter().cloned());
             match negotiate(
-                &waiting.signal_endpoint,
+                waiting.signal_endpoint,
                 addr,
                 waiting.mount_hub.local_id(),
                 &waiting.mount_hub,
@@ -4228,7 +4622,7 @@ async fn vet_seeder_candidate(
     // data channel is suspect, and provenance says it more cheaply and more
     // precisely than re-reading the settled path.
     let (connection, via_data_channel) =
-        match seeder_webrtc_dial(waiting, id, relays, channel_wait).await {
+        match seeder_webrtc_dial(waiting.lanes(), id, relays, channel_wait).await {
             Ok(connection) => (connection, true),
             Err(webrtc_error) => {
                 let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
