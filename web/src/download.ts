@@ -23,6 +23,39 @@ interface Reader {
    * `fileStream`.
    */
   readonly source_is_origin?: boolean
+  /**
+   * Hand bytes that just arrived back to the client, so this tab can seed them.
+   *
+   * The whole point of routing every path through `fileStream`: a download, a
+   * folder-as-ZIP and a preview all pull the same bytes, and without this they
+   * were thrown away — so pressing Seed afterwards pulled them a second time.
+   *
+   * Optional because a plain reader has nowhere to put them, and because the
+   * call must never be load-bearing: see `keepChunks` for why its failures are
+   * swallowed.
+   */
+  keep?(index: number, offset: bigint, bytes: Uint8Array): Promise<void>
+}
+
+/**
+ * Feed fetched bytes to the client's chunk store, and never let it matter.
+ *
+ * Fire-and-forget on purpose, in both directions:
+ *
+ * - **Not awaited**, so storing never sits between two reads and slows a
+ *   transfer down. The bytes are already in hand; keeping them is bookkeeping.
+ * - **Never rethrown**, so a full quota or a private-mode refusal costs seeding
+ *   and not the download. A user who asked for a file gets the file.
+ *
+ * The client keeps only chunks lying wholly inside what it is given, so the
+ * sequential 256 KiB pieces this sends — exactly four aligned 64 KiB chunks —
+ * are kept in full.
+ */
+function keepChunks(reader: Reader, index: number, offset: number, bytes: Uint8Array): void {
+  if (!reader.keep) return
+  void reader.keep(index, BigInt(offset), bytes).catch((error: unknown) => {
+    console.debug('[share] keeping a chunk failed; not seeding these bytes', error)
+  })
 }
 
 export interface Progress {
@@ -75,6 +108,9 @@ function fileStream(
         controller.close()
         return
       }
+      // Kept before the offset moves, so the bytes are labelled with where they
+      // actually came from rather than where the next read will start.
+      keepChunks(reader, file.index, offset, chunk)
       offset += chunk.length
       controller.enqueue(chunk)
     },
@@ -154,6 +190,10 @@ function countingReader(
     // Forwarded, not defaulted: the wrapper must not launder a seeder into
     // looking like the origin, or guard #2 silently switches off.
     source_is_origin: reader.source_is_origin,
+    // Forwarded for the same reason in the other direction: a wrapper that
+    // dropped this would silently turn seeding off for every path that goes
+    // through it, which is all of them.
+    keep: reader.keep ? (index, offset, bytes) => reader.keep!(index, offset, bytes) : undefined,
   }
 }
 

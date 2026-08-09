@@ -64,9 +64,9 @@ pub(crate) use produce::serve;
 // under their long-standing names; the golden pin that guards them moved with
 // them (`agent_share_proto::framing` — `wire_constants_are_pinned`).
 pub(crate) use agent_share_proto::framing::{
-    MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_OUTBOARD_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH,
-    OP_HASH, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_DELTA,
-    WATCH_FRAME_MANIFEST,
+    MAX_CHUNK_MAP_BYTES, MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH,
+    OP_CHUNK, OP_CHUNK_MAP, OP_HAVE, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN,
+    SECRET_LEN, WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST,
 };
 pub(crate) use agent_share_proto::manifest::{MountManifest, ReadStatus};
 pub(crate) use agent_share_proto::ticket::MountTicket;
@@ -182,7 +182,7 @@ mod tests {
     /// standing for a producer that cannot vouch for anything.
     async fn producer_with_hashes(
         root: &std::path::Path,
-        hashes: Option<Arc<super::hash::HashCache>>,
+        hashes: Option<Arc<super::hash::ChunkCache>>,
     ) -> (
         fofoca::iroh::Endpoint,
         RemoteClient,
@@ -289,21 +289,21 @@ mod tests {
         RemoteClient::new(endpoint, ticket, auth)
     }
 
-    /// **Stage 3, end to end.** A consumer asks the origin for a file's root
-    /// over `OP_HASH`, then checks the file's actual bytes against it.
+    /// **Stage 3, end to end.** A consumer asks the origin for a file's chunk
+    /// row over `OP_CHUNK_MAP`, then fetches each chunk by address and checks
+    /// it.
     ///
-    /// This is the whole trust chain in one test: the root comes from the
-    /// origin over a channel authenticated to the ticket's endpoint id, and
-    /// afterwards the *bytes* can come from anyone, because they either verify
-    /// against that root or they do not.
+    /// This is the whole trust chain in one test: the row comes from the origin
+    /// over a channel authenticated to the ticket's endpoint id, and afterwards
+    /// the *chunks* can come from anyone, because each one either addresses
+    /// what was asked for or it does not.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_consumer_learns_a_root_and_the_bytes_verify_against_it() {
+    async fn a_consumer_learns_a_row_and_every_chunk_verifies_against_it() {
         let tree = fixture_tree();
         let contents = vec![9u8; 200_000];
         std::fs::write(tree.path.join("big.bin"), &contents).expect("write");
 
-        let cache_dir = TempDir::new();
-        let cache = Arc::new(super::hash::HashCache::open(&cache_dir.path).expect("cache"));
+        let cache = Arc::new(super::hash::ChunkCache::new());
         let (endpoint, client, producer) =
             producer_with_hashes(&tree.path, Some(Arc::clone(&cache))).await;
 
@@ -315,69 +315,73 @@ mod tests {
             .expect("big.bin listed");
         let index = u32::try_from(index).expect("index");
 
-        let (root, outboard) = client
-            .fetch_hash(index)
+        let map = client
+            .fetch_chunk_map(index)
             .await
-            .expect("hash request")
-            .expect("the origin can vouch for this file");
-        assert!(!outboard.is_empty(), "200 KB needs a tree");
+            .expect("chunk map request")
+            .expect("the origin can address this file");
+        assert_eq!(map.size(), contents.len() as u64);
+        assert_eq!(
+            map.len(),
+            contents.len().div_ceil(fofoca_chunks::CHUNK_BYTES_USIZE)
+        );
+        assert_eq!(map, fofoca_chunks::ChunkMap::build(&contents));
 
-        // The bytes verify against the root the origin gave us.
-        let all = fofoca_blobs::ChunkRanges::all();
-        let encoded = fofoca_blobs::encode_ranges(&contents, &all).expect("encode");
-        let mut target = Vec::new();
-        // The outboard is an out-parameter now, and discarding it is a choice
-        // to write down: this assertion is the final consumer of these bytes,
-        // so there are no proofs to serve onward from them.
-        let mut discarded_outboard = fofoca_blobs::Outboard::new();
-        fofoca_blobs::decode_into(
-            root,
-            contents.len() as u64,
-            &encoded,
-            &all,
-            &mut target,
-            &mut discarded_outboard,
-        )
-        .expect("the file's own bytes must verify against its root");
-        assert_eq!(target, contents);
+        // Every chunk comes back by address alone, and reassembles the file.
+        let mut rebuilt = Vec::new();
+        for position in 0..map.len() {
+            let address = map.leaf(position).expect("in range");
+            let chunk = client
+                .fetch_chunk(address)
+                .await
+                .expect("chunk request")
+                .expect("the origin holds it");
+            assert!(map.verify(position, &chunk));
+            rebuilt.extend_from_slice(&chunk);
+        }
+        assert_eq!(rebuilt, contents);
 
-        // And content that is *not* this file does not, which is the half that
-        // makes the first half worth anything.
-        let impostor = vec![8u8; 200_000];
-        let forged = fofoca_blobs::encode_ranges(&impostor, &all).expect("encode");
-        let mut wrong = Vec::new();
-        let mut forged_outboard = fofoca_blobs::Outboard::new();
+        // And an address this share knows nothing about is declined, which is
+        // both the honest answer and what stops the op being a way to probe
+        // what else this host holds.
+        let elsewhere = fofoca_chunks::chunk_hash(b"content from another share");
         assert!(
-            fofoca_blobs::decode_into(
-                root,
-                impostor.len() as u64,
-                &forged,
-                &all,
-                &mut wrong,
-                &mut forged_outboard,
-            )
-            .is_err(),
-            "substituted content must not verify against the origin's root"
+            client
+                .fetch_chunk(elsewhere)
+                .await
+                .expect("chunk request")
+                .is_none(),
+            "an origin must not answer for an address outside its own share"
         );
 
         endpoint.close().await;
         producer.abort();
     }
 
-    /// A producer with no hash cache answers `BadIndex`, and the consumer reads
-    /// that as "cannot vouch" rather than as a failure.
+    /// A producer with no chunk table answers `BadIndex`, and the consumer
+    /// reads that as "cannot address" rather than as a failure.
     ///
-    /// The fallback RFC 01 phase 4 requires: a file with no hash is read from
-    /// the origin exactly as it is today.
+    /// The fallback the design requires: a file with no row is read from the
+    /// origin over `OP_READ` exactly as it always was.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_producer_without_a_cache_says_it_cannot_vouch() {
         let tree = fixture_tree();
         let (endpoint, client, producer) = producer_with_hashes(&tree.path, None).await;
 
-        assert_eq!(
-            client.fetch_hash(0).await.expect("hash request"),
-            None,
-            "no cache must read as 'cannot vouch', not as an error"
+        assert!(
+            client
+                .fetch_chunk_map(0)
+                .await
+                .expect("chunk map request")
+                .is_none(),
+            "no table must read as 'cannot address', not as an error"
+        );
+        assert!(
+            client
+                .fetch_chunk(fofoca_chunks::chunk_hash(b"anything"))
+                .await
+                .expect("chunk request")
+                .is_none()
         );
         // And the ordinary read path is untouched.
         assert_eq!(client.read_range(0, 0, 5).await.expect("read").len(), 5);
@@ -550,6 +554,7 @@ mod tests {
             kind: agent_share_proto::ticket::TICKET_KIND_SHARE,
             flags: 0,
             mesh_id: None,
+            author: None,
         };
         let mut protected = plain.clone();
         protected.flags |= agent_share_proto::ticket::TICKET_FLAG_PASSWORD;
@@ -784,6 +789,7 @@ mod tests {
             kind: agent_share_proto::ticket::TICKET_KIND_SHARE,
             flags: 0,
             mesh_id: None,
+            author: None,
         };
         let bad_endpoint = build_endpoint(&bad_ticket.lookups, None, None, Vec::new(), None, false)
             .await

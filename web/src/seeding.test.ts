@@ -71,3 +71,59 @@ describe('seedLabel', () => {
     expect(seedLabel('partial', tree, new Set([0, 2]))).toBe('seeding 2 of 3')
   })
 })
+
+describe('partial holdings', () => {
+  // A file can be `partial` now, which it never could before: chunks are
+  // addressed and verified one at a time, so a peer holding part of a file
+  // serves that part. These cases pin the states a cancelled download, an
+  // abandoned preview and a transfer in flight all land in.
+
+  test('a partly-held file reads as partial, not as absent', () => {
+    const root = dir('', [file('movie.mkv', 0)])
+    const target = root.children[0] as FileNode
+    const coverage = new Map([[0, 0.6]])
+    expect(fileSeedState(target, new Set(), coverage)).toBe('partial')
+    expect(seedLabel('partial', target, new Set(), coverage)).toBe('seeding 60%')
+  })
+
+  test('a fraction that rounds to zero still reads as seeding, not as nothing', () => {
+    // The one number that would make a genuinely useful source look useless.
+    const root = dir('', [file('huge.bin', 0)])
+    const target = root.children[0] as FileNode
+    const coverage = new Map([[0, 0.0001]])
+    expect(fileSeedState(target, new Set(), coverage)).toBe('partial')
+    expect(seedLabel('partial', target, new Set(), coverage)).toBe('seeding 1%')
+  })
+
+  test('a fully-covered file reads as full even before the held set catches up', () => {
+    // `held` is refreshed synchronously and coverage lands a tick later, so the
+    // two disagree briefly. Neither ordering may report less than is held.
+    const root = dir('', [file('done.bin', 0)])
+    const target = root.children[0] as FileNode
+    expect(fileSeedState(target, new Set(), new Map([[0, 1]]))).toBe('full')
+    expect(fileSeedState(target, new Set([0]), new Map())).toBe('full')
+  })
+
+  test('a folder holding part of one file is partial rather than empty', () => {
+    const root = dir('', [file('a.bin', 0), file('b.bin', 1)])
+    const coverage = new Map([[0, 0.5]])
+    expect(dirSeedState(root, new Set(), coverage)).toBe('partial')
+    expect(dirSeedState(root, new Set(), new Map())).toBe('none')
+  })
+
+  test('a folder is only full when every file is', () => {
+    const root = dir('', [file('a.bin', 0), file('b.bin', 1)])
+    expect(dirSeedState(root, new Set([0, 1]), new Map())).toBe('full')
+    expect(dirSeedState(root, new Set([0]), new Map([[1, 0.9]]))).toBe('partial')
+  })
+
+  test('no coverage means the old behaviour, exactly', () => {
+    // Every existing caller passes nothing, so the default must not change what
+    // they see.
+    const root = dir('', [file('a.bin', 0)])
+    const target = root.children[0] as FileNode
+    expect(fileSeedState(target, new Set())).toBe('none')
+    expect(fileSeedState(target, new Set([0]))).toBe('full')
+    expect(seedLabel('none', target, new Set())).toBe('not held')
+  })
+})

@@ -40,6 +40,12 @@ pub const TICKET_KIND_BENCH_QUIC: u8 = 3;
 /// password up front instead of discovering the need from a dropped connection.
 pub const TICKET_FLAG_PASSWORD: u8 = 0b0001;
 
+/// The share carries an authorship key, and its manifests are signed.
+///
+/// Set independently of [`TICKET_FLAG_PASSWORD`] — a share may be signed,
+/// protected, both, or neither.
+pub const TICKET_FLAG_SIGNED: u8 = 0b0010;
+
 /// A decoded mount ticket — the bearer secret, the share's discovery config,
 /// and the producer's address.
 ///
@@ -100,6 +106,14 @@ pub struct MountTicket {
     /// producer that is switched off does not weaken the check, which matters
     /// because a share is designed to outlive its producer.
     pub mesh_id: Option<String>,
+    /// The creator's **authorship** public key, carried when
+    /// [`TICKET_FLAG_SIGNED`] is set.
+    ///
+    /// Deliberately not the endpoint key already in `addr`. `agent-share mirror`
+    /// hands the endpoint secret to every copy on purpose, so signing with it
+    /// would make impersonation convincing rather than impossible. This key
+    /// never leaves the creator's machine; see [`crate::authorship`].
+    pub author: Option<[u8; 32]>,
 }
 
 /// Read the length-prefixed mesh id a protected ticket carries at `pos`.
@@ -168,6 +182,11 @@ impl MountTicket {
                     .to_le_bytes(),
             );
             payload.extend_from_slice(mesh_id.as_bytes());
+            // After the mesh id, so a reader that predates this field stops at
+            // the same place it always did and simply ignores the tail.
+            if let Some(author) = self.author {
+                payload.extend_from_slice(&author);
+            }
         }
         token::encode(TokenType::Mount, &payload)
     }
@@ -208,6 +227,22 @@ impl MountTicket {
         } else {
             read_mesh_id(&payload, pos)?
         };
+        // The authorship key sits past the mesh id, which is length-prefixed —
+        // so its position depends on how long that id was, even when empty.
+        let author = if flags & TICKET_FLAG_SIGNED == 0 {
+            None
+        } else {
+            let after_mesh = pos
+                + 2
+                + payload
+                    .get(pos..pos + 2)
+                    .map_or(0, |raw| usize::from(u16::from_le_bytes([raw[0], raw[1]])));
+            payload.get(after_mesh..after_mesh + 32).map(|raw| {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(raw);
+                key
+            })
+        };
         // Trailing bytes past the mesh id are tolerated, not rejected: that is
         // what makes the layout extensible. A later field appended here is
         // ignored by this build rather than failing it.
@@ -221,6 +256,7 @@ impl MountTicket {
             kind,
             flags,
             mesh_id,
+            author,
         })
     }
 }
@@ -245,6 +281,7 @@ mod tests {
             kind: TICKET_KIND_SHARE,
             flags: 0,
             mesh_id: None,
+            author: None,
         }
     }
 
@@ -414,5 +451,83 @@ mod tests {
     fn rejects_a_truncated_payload() {
         let short = token::encode(TokenType::Mount, &[0u8; 8]);
         assert!(MountTicket::decode(&short).is_err());
+    }
+}
+
+#[cfg(test)]
+mod author_tests {
+    use super::{
+        MountTicket, SECRET_LEN, TICKET_FLAG_PASSWORD, TICKET_FLAG_SIGNED, TICKET_KIND_SHARE,
+    };
+    use crate::lookup::LookupOpts;
+    use fofoca_protocol::iroh_base::{EndpointAddr, SecretKey};
+
+    fn base() -> MountTicket {
+        let id = SecretKey::from_bytes(&[7u8; 32]).public();
+        MountTicket {
+            addr: EndpointAddr::new(id).with_ip_addr("127.0.0.1:4242".parse().expect("addr")),
+            secret: [5u8; SECRET_LEN],
+            lookups: LookupOpts::public_preset(),
+            kind: TICKET_KIND_SHARE,
+            flags: 0,
+            mesh_id: None,
+            author: None,
+        }
+    }
+
+    #[test]
+    fn a_signed_ticket_carries_its_authorship_key() {
+        let mut ticket = base();
+        ticket.flags = TICKET_FLAG_SIGNED;
+        ticket.author = Some([3u8; 32]);
+        let decoded = MountTicket::decode(&ticket.encode()).expect("decode");
+        assert_eq!(decoded.flags, TICKET_FLAG_SIGNED);
+        assert_eq!(decoded.author, Some([3u8; 32]));
+    }
+
+    /// The key sits *past* the length-prefixed mesh id, so its offset depends on
+    /// how long that id is. Both flags together is the case that would catch an
+    /// offset computed as if the mesh id were never there.
+    #[test]
+    fn a_signed_and_protected_ticket_carries_both_fields() {
+        let mut ticket = base();
+        ticket.flags = TICKET_FLAG_PASSWORD | TICKET_FLAG_SIGNED;
+        ticket.mesh_id = Some("a-fairly-long-mesh-identifier-here".to_owned());
+        ticket.author = Some([9u8; 32]);
+        let decoded = MountTicket::decode(&ticket.encode()).expect("decode");
+        assert_eq!(
+            decoded.mesh_id.as_deref(),
+            Some("a-fairly-long-mesh-identifier-here")
+        );
+        assert_eq!(decoded.author, Some([9u8; 32]));
+    }
+
+    /// **An unsigned ticket must be byte-for-byte what it was.** This field is
+    /// only reachable through a flag, so a share that does not use it pays
+    /// nothing and older readers are unaffected.
+    #[test]
+    fn an_unsigned_ticket_is_unchanged() {
+        let ticket = base();
+        let decoded = MountTicket::decode(&ticket.encode()).expect("decode");
+        assert_eq!(decoded.author, None);
+        assert_eq!(decoded.flags, 0);
+        // A protected-but-unsigned ticket must not grow the field either.
+        let mut protected = base();
+        protected.flags = TICKET_FLAG_PASSWORD;
+        protected.mesh_id = Some("mesh".to_owned());
+        let protected = MountTicket::decode(&protected.encode()).expect("decode");
+        assert_eq!(protected.author, None);
+    }
+
+    /// A ticket claiming to be signed but truncated before the key decodes with
+    /// `None` rather than failing — the producer-side refusal then applies, the
+    /// same way a missing mesh id is handled.
+    #[test]
+    fn a_signed_ticket_missing_its_key_decodes_as_absent() {
+        let mut ticket = base();
+        ticket.flags = TICKET_FLAG_SIGNED;
+        ticket.author = None;
+        let decoded = MountTicket::decode(&ticket.encode()).expect("decode");
+        assert_eq!(decoded.author, None);
     }
 }

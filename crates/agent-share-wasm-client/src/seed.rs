@@ -1,71 +1,80 @@
 //! The seeder half of "every peer a seeder": serve what this tab holds.
 //!
-//! A viewer that synced files into its store used to *advertise* them on its
+//! A viewer that fetched chunks into its store used to *advertise* them on its
 //! peer card and serve nothing — the card said "seeding" while no protocol
-//! handler existed to answer a read. This module is the missing listener: a
+//! handler existed to answer a read. This module is that listener: a
 //! [`ServeSource`] backed by the tab's [`IdbStore`], registered on the mesh
 //! Router next to the signal handler, exactly the shape the producer uses.
 //!
 //! Three properties, each load-bearing:
 //!
 //! - **The origin's manifest bytes are served verbatim.** A seeder is not a
-//!   second origin: every READ index means what the origin says it means, and
-//!   the tree fingerprint is defined over these exact bytes. Re-encoding would
-//!   be a different fingerprint for the same tree — guard #1 would read that
-//!   as a diverged peer.
-//! - **A slot answers only when held in full** (guard #3). Anything else is
-//!   `BadIndex` — "I don't have it" — never a short read, which a consumer
-//!   cannot tell from EOF.
-//! - **Reads are decoded through the store's own verification.** The store
-//!   hands out bao-encoded ranges; decoding them against the bound root means
-//!   a corrupted database serves an error, not garbage. The encode→decode
-//!   round-trip costs ~2× a hash pass (~GiB/s); a raw-read seam on
-//!   `BlobStore` is the upstream optimization if this ever shows up in a
-//!   profile.
+//!   second origin: every index means what the origin says it means, and the
+//!   tree fingerprint is defined over these exact bytes. Re-encoding would be a
+//!   different fingerprint for the same tree, which reads as a diverged peer.
+//! - **A partial holding is served, not withheld.** A tab that fetched half a
+//!   file answers for that half. This is what a cancelled download, an
+//!   abandoned preview and a transfer still in flight all contribute, and it is
+//!   the difference between a swarm that survives its origin and one that does
+//!   not. There is no short read to be confused with EOF here, because a chunk
+//!   is asked for by address and answered whole or not at all.
+//! - **Answers are scoped to this share.** The chunk store is global — a chunk
+//!   addressed by content is the same chunk whichever share it arrived through,
+//!   and keeping copies per share would mean fetching the same bytes twice. But
+//!   `OP_CHUNK` names no file and no share, so answering *any* address would let
+//!   anyone holding one link discover, one address at a time, what else this tab
+//!   is storing. So a seeder answers only for addresses reachable from a chunk
+//!   row in **this** share.
+//!
+//! # Verification
+//!
+//! There is none to do here beyond what the store already does. A chunk proves
+//! itself: whoever receives it hashes it and compares against the address they
+//! asked for. That is why a partial holder can serve safely, why a chunk can
+//! cross shares, and why this file is a fraction of the size of the bao-shaped
+//! version it replaces.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use agent_share_proto::framing::{MAX_READ_LEN, WATCH_FRAME_MANIFEST};
-use agent_share_proto::manifest::{MountManifest, ReadStatus};
-use anyhow::{Context as _, Result, bail};
-use fofoca_blobs::{
-    BlobStore as _, CHUNK_GROUP_BYTES, ChunkNum, ChunkRanges, FileId, IdbStore, Outboard,
-    SparseBlocks, decode_sparse,
-};
+use agent_share_proto::manifest::ReadStatus;
+use fofoca_chunks::{ChunkHash, ChunkMap, ChunkSource as _, Coverage, IdbStore, Root};
 use futures::channel::mpsc;
 
 use crate::produce::{ServeSource, WatchFeed};
-
-/// Bytes per bao chunk, fixed by BLAKE3. Byte offsets become chunk numbers
-/// through this and nothing else.
-const CHUNK_BYTES: u64 = 1024;
 
 /// What this tab can serve, once it holds something.
 struct SeederState {
     /// The origin's manifest bytes, verbatim. See the module docs.
     manifest: Rc<Vec<u8>>,
-    /// Slot → the store's name for that file, aligned to the origin's `files`
-    /// vector. `Some` only for slots held **in full**; tombstones and
-    /// never-fetched slots are `None`, which answers `BadIndex`.
-    slots: Vec<Option<FileId>>,
+    /// Chunk rows for slots this tab knows about, by manifest index.
+    rows: HashMap<u32, ChunkMap>,
+    /// Root → the slot it describes, for answering `OP_HAVE`.
+    slot_of_root: HashMap<Root, u32>,
+    /// Every address reachable from a row above.
+    ///
+    /// **This is the whole of the scoping rule**, and the reason it is a set
+    /// rather than a lookup into the store: the store holds chunks from every
+    /// share this browser has ever touched, and only these belong to this one.
+    in_scope: HashSet<ChunkHash>,
     store: Rc<IdbStore>,
 }
 
 struct SeederInner {
-    /// `None` until the first sync lands — a tab that only browses serves
-    /// nothing and refuses manifest requests rather than answering with a
-    /// tree it cannot back.
+    /// `None` until the first chunk lands — a tab that only browses serves
+    /// nothing and refuses manifest requests rather than answering with a tree
+    /// it cannot back.
     state: Option<SeederState>,
     /// Live `OP_WATCH` subscribers. A seeder's stream moves only when its own
-    /// snapshot does (it follows the origin while the origin lives, and
-    /// freezes when it dies); it never fabricates deltas of its own.
+    /// snapshot does (it follows the origin while the origin lives, and freezes
+    /// when it dies); it never fabricates deltas of its own.
     watchers: Vec<mpsc::UnboundedSender<Rc<Vec<u8>>>>,
 }
 
-/// Shared handle: one per [`crate::ShareClient`], cloned into the mount
-/// handler on the mesh Router.
+/// Shared handle: one per [`crate::ShareClient`], cloned into the mount handler
+/// on the mesh Router.
 #[derive(Clone)]
 pub(crate) struct SeederShared(Rc<RefCell<SeederInner>>);
 
@@ -77,31 +86,28 @@ impl SeederShared {
         })))
     }
 
-    /// Adopt what the tab now holds: the origin's manifest and the slots held
-    /// in full. Called after every sync / held-refresh, right where those
-    /// already know all four inputs.
+    /// Adopt what this tab now knows: the origin's manifest, the chunk rows it
+    /// has learned, and the store behind them.
+    ///
+    /// Called after every fetch, right where those are already known.
+    /// Deliberately takes rows rather than a held-set: what this tab can serve
+    /// is derived from the store, chunk by chunk, at the moment somebody asks —
+    /// so a coverage figure cached here could never go stale.
     ///
     /// Notifies watchers only when the manifest bytes actually changed —
-    /// held-set changes alter what we *serve*, not what the tree *is*.
+    /// holdings alter what we *serve*, not what the tree *is*.
     pub(crate) fn update(
         &self,
         manifest_bytes: Rc<Vec<u8>>,
-        manifest: &MountManifest,
+        rows: HashMap<u32, ChunkMap>,
         store: Rc<IdbStore>,
-        held: &BTreeSet<u32>,
     ) {
-        let slots = manifest
-            .files
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| {
-                if entry.is_tombstone() {
-                    return None;
-                }
-                let index = u32::try_from(index).ok()?;
-                held.contains(&index).then(|| crate::file_id(entry))
-            })
-            .collect();
+        let mut slot_of_root = HashMap::with_capacity(rows.len());
+        let mut in_scope = HashSet::new();
+        for (index, row) in &rows {
+            slot_of_root.insert(row.root(), *index);
+            in_scope.extend(row.leaves().iter().copied());
+        }
 
         let mut inner = self.0.borrow_mut();
         let changed = inner
@@ -110,7 +116,9 @@ impl SeederShared {
             .is_none_or(|state| *state.manifest != *manifest_bytes);
         inner.state = Some(SeederState {
             manifest: Rc::clone(&manifest_bytes),
-            slots,
+            rows,
+            slot_of_root,
+            in_scope,
             store,
         });
         if changed {
@@ -145,113 +153,101 @@ impl ServeSource for SeederShared {
         Some((frame, rx))
     }
 
+    /// A seeder answers byte ranges too, so an old-style reader and the NFS
+    /// lazy mount still work against it. Assembled from the chunks it holds; a
+    /// gap means `BadIndex` rather than a short read, because a caller of
+    /// `OP_READ` cannot tell a short answer from EOF.
     async fn answer_read(&self, index: u32, offset: u64, len: u32) -> (ReadStatus, Vec<u8>) {
         if len > MAX_READ_LEN {
             return (ReadStatus::LenOverCap, Vec::new());
         }
-        // Cloned out, never borrowed across the await below: `update` can run
-        // while a read is in flight.
-        let (file, store) = {
+        // Cloned out, never borrowed across an await: `update` can run while a
+        // read is in flight.
+        let (row, store) = {
             let inner = self.0.borrow();
             let Some(state) = inner.state.as_ref() else {
                 return (ReadStatus::BadIndex, Vec::new());
             };
-            let Some(Some(file)) = state.slots.get(index as usize) else {
+            let Some(row) = state.rows.get(&index) else {
                 return (ReadStatus::BadIndex, Vec::new());
             };
-            (file.clone(), Rc::clone(&state.store))
+            (row.clone(), Rc::clone(&state.store))
         };
-        match read_window(store.as_ref(), &file, offset, len).await {
-            Ok(bytes) => (ReadStatus::Ok, bytes),
-            // Guard #3: a seeder that isn't sure says "I don't have it". A
-            // version-gate refusal, a hole, or a failed verification all mean
-            // the same thing to the reader — this peer cannot answer — and
-            // `BadIndex` is the answer that makes it try someone else instead
-            // of trusting whatever we could scrape together.
-            Err(error) => {
-                web_sys::console::debug_1(&wasm_bindgen::JsValue::from_str(&format!(
-                    "[seed] read refused (index {index}): {error}"
-                )));
-                (ReadStatus::BadIndex, Vec::new())
+        if offset >= row.size() || len == 0 {
+            return (ReadStatus::Ok, Vec::new());
+        }
+        let end = offset.saturating_add(u64::from(len)).min(row.size());
+        let mut out = Vec::with_capacity(usize::try_from(end - offset).unwrap_or(0));
+        let mut cursor = offset;
+        while cursor < end {
+            let position = row.index_at(cursor);
+            let Some(address) = row.leaf(position) else {
+                return (ReadStatus::BadIndex, Vec::new());
+            };
+            let Ok(Some(chunk)) = store.get(address).await else {
+                // A hole. Refusing outright is the only honest answer, since a
+                // partial `OP_READ` is indistinguishable from end-of-file.
+                return (ReadStatus::BadIndex, Vec::new());
+            };
+            let range = row.range_of(position);
+            let within = usize::try_from(cursor - range.start).unwrap_or(0);
+            let take = usize::try_from(end - cursor)
+                .unwrap_or(usize::MAX)
+                .min(chunk.len().saturating_sub(within));
+            if take == 0 {
+                return (ReadStatus::BadIndex, Vec::new());
             }
+            out.extend_from_slice(&chunk[within..within + take]);
+            cursor += take as u64;
         }
+        (ReadStatus::Ok, out)
     }
-}
 
-/// Read `[offset, offset+len)` of `file` out of the store, verified.
-///
-/// The store speaks chunk ranges and bao encoding; this maps the byte window
-/// onto chunks, decodes against the bound root, and slices the window back
-/// out. Reading past the end answers the empty vec, matching the origin.
-pub(crate) async fn read_window(
-    store: &IdbStore,
-    file: &FileId,
-    offset: u64,
-    len: u32,
-) -> Result<Vec<u8>> {
-    if offset >= file.size || len == 0 {
-        return Ok(Vec::new());
+    async fn answer_chunk_map(&self, index: u32) -> Option<ChunkMap> {
+        let inner = self.0.borrow();
+        inner.state.as_ref()?.rows.get(&index).cloned()
     }
-    let end = (offset + u64::from(len)).min(file.size);
-    let ranges =
-        ChunkRanges::from(ChunkNum(offset / CHUNK_BYTES)..ChunkNum(end.div_ceil(CHUNK_BYTES)));
 
-    // The version gate: a file the store cannot bind any more (it changed, or
-    // was never hashed) must not be served from a stale outboard.
-    let root = store
-        .bind(file)
-        .await?
-        .context("this file is unbound: never hashed, or changed since")?;
-    let encoded = store.read_ranges(file, &ranges).await?;
-
-    let mut blocks = SparseBlocks::empty(file.size, CHUNK_GROUP_BYTES);
-    let mut outboard = Outboard::new();
-    decode_sparse(
-        root,
-        file.size,
-        &encoded,
-        &ranges,
-        &mut blocks,
-        &mut outboard,
-    )?;
-
-    // Reassemble the byte window from the decoded blocks. The decode proved
-    // every chunk group covering the window, so a missing block here is a
-    // logic error worth failing loudly on, not padding over.
-    let map = blocks.into_blocks();
-    let mut out = Vec::with_capacity(usize::try_from(end - offset).context("window over usize")?);
-    let mut cursor = offset;
-    while cursor < end {
-        let block_index = cursor / CHUNK_GROUP_BYTES;
-        let within = usize::try_from(cursor - block_index * CHUNK_GROUP_BYTES)
-            .context("offset within block over usize")?;
-        let block = map
-            .get(&block_index)
-            .context("a decoded block is missing from the window")?;
-        let available = block.len().saturating_sub(within);
-        if available == 0 {
-            bail!("a decoded block is shorter than the window needs");
-        }
-        let take = usize::try_from(end - cursor)
-            .unwrap_or(usize::MAX)
-            .min(available);
-        out.extend_from_slice(&block[within..within + take]);
-        cursor += take as u64;
+    async fn answer_chunk(&self, address: ChunkHash) -> Option<Vec<u8>> {
+        let store = {
+            let inner = self.0.borrow();
+            let state = inner.state.as_ref()?;
+            // The scoping rule. An address this share does not reference is
+            // declined with the same answer as one nobody holds, so the two are
+            // indistinguishable from outside.
+            if !state.in_scope.contains(&address) {
+                return None;
+            }
+            Rc::clone(&state.store)
+        };
+        store.get(address).await.ok().flatten()
     }
-    Ok(out)
+
+    async fn answer_have(&self, root: Root) -> Option<Coverage> {
+        let store = {
+            let inner = self.0.borrow();
+            let state = inner.state.as_ref()?;
+            // Same scoping: a peer must not learn what this tab holds of a file
+            // belonging to a share it was not given.
+            state.slot_of_root.get(&root)?;
+            Rc::clone(&state.store)
+        };
+        store.coverage(root).await.ok()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::SeederShared;
+    use crate::produce::ServeSource as _;
+    use fofoca_chunks::{ChunkMap, Root, chunk_hash};
 
     // wasm32 harness — see `transport_mode.rs` for why.
     use wasm_bindgen_test::wasm_bindgen_test as test;
 
-    /// Guard #3, before the first sync: a tab that holds nothing refuses
-    /// everything — no invented manifest, no watch feed, `BadIndex` for any
-    /// read. Advertising happens elsewhere; this is the half that must never
-    /// answer for a tree it cannot back.
+    /// Before anything is held: no invented manifest, no watch feed, and every
+    /// address declined. Advertising happens elsewhere; this is the half that
+    /// must never answer for a tree it cannot back.
     #[test]
     fn an_empty_seeder_refuses_everything() {
         let seeder = SeederShared::new();
@@ -259,19 +255,39 @@ mod tests {
         assert!(seeder.subscribe().is_none());
         futures::executor::block_on(async {
             let (status, bytes) = seeder.answer_read(0, 0, 1024).await;
-            assert_eq!(status, ReadStatus::BadIndex);
+            assert_eq!(status, agent_share_proto::manifest::ReadStatus::BadIndex);
             assert!(bytes.is_empty());
+            assert!(seeder.answer_chunk_map(0).await.is_none());
+            assert!(seeder.answer_chunk(chunk_hash(b"anything")).await.is_none());
+            assert!(
+                seeder
+                    .answer_have(ChunkMap::build(b"anything").root())
+                    .await
+                    .is_none()
+            );
         });
     }
 
-    /// The length cap is enforced before any store work: an oversized ask is
-    /// `LenOverCap` even on an empty seeder, matching the producer.
+    /// The length cap is enforced before any store work, matching the producer.
     #[test]
     fn an_oversized_read_is_capped() {
         let seeder = SeederShared::new();
         futures::executor::block_on(async {
-            let (status, _) = seeder.answer_read(0, 0, MAX_READ_LEN + 1).await;
-            assert_eq!(status, ReadStatus::LenOverCap);
+            let (status, _) = seeder
+                .answer_read(0, 0, agent_share_proto::framing::MAX_READ_LEN + 1)
+                .await;
+            assert_eq!(status, agent_share_proto::manifest::ReadStatus::LenOverCap);
+        });
+    }
+
+    /// A root that belongs to no slot of this share is declined, whatever the
+    /// store happens to hold. The probe oracle, closed.
+    #[test]
+    fn a_root_outside_this_share_is_declined() {
+        let seeder = SeederShared::new();
+        futures::executor::block_on(async {
+            let elsewhere = Root::from_bytes([9u8; 32]);
+            assert!(seeder.answer_have(elsewhere).await.is_none());
         });
     }
 }

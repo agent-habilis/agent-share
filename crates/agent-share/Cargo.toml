@@ -38,14 +38,16 @@ path = "src/main.rs"
 # The wire format, shared verbatim with the browser client. Anything both
 # ends must agree on lives there, not here.
 agent-share-proto = { path = "../agent-share-proto" }
-# The verified byte store. The dependency runs one way only: `agent-share` knows
-# about `fofoca-blobs`, and `fofoca-blobs` knows nothing about shares — enforced
-# on its side by `tests/isolation.rs`.
+# The content-addressed chunk store. The dependency runs one way only:
+# `agent-share` knows about `fofoca-chunks`, and `fofoca-chunks` knows nothing
+# about shares — enforced on its side by `tests/isolation.rs`.
 #
-# It lives in the `fofoca-network/fofoca` workspace, not here, because the
-# network layer's other consumers want it too. A sibling-checkout path dep is
-# the interim: swap it for a rev-pinned git dependency once the move is pushed.
-fofoca-blobs = { workspace = true }
+# Developed here and named for `fofoca-network/fofoca`, where it is meant to
+# land once it settles; the move is then a `git mv` plus a path edit. It
+# replaces `fofoca-blobs`, whose bao outboards prove *placement* rather than
+# content and therefore can never dedup or be served by a peer that does not
+# know the file.
+fofoca-chunks = { path = "../fofoca-chunks" }
 # The gossip engine. A share joins a mesh derived from its own ticket secret, so
 # everyone holding the link becomes a peer of everyone else rather than only of
 # the producer. Note this pulls the vendored mesh into `default-members`, which

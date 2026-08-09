@@ -88,6 +88,21 @@ interface Client {
   /** Peers we hold a direct WebRTC data channel with. */
   readonly peers_direct: number
   readonly max_direct: number
+  /**
+   * How much of each known file this tab holds, as `{ index: fraction }`.
+   *
+   * Slots held whole are also in `held`; this adds the partial ones, which are
+   * real and servable now that chunks are addressed individually.
+   */
+  coverage_map(): Promise<unknown>
+  /**
+   * Adopt what this tab holds into the seeder and advertise it.
+   *
+   * Called after a transfer rather than during: chunks land continuously, and
+   * republishing per chunk would rewrite the peer card thousands of times for
+   * one file — on a CRDT that keeps every revision.
+   */
+  republish_holdings(): Promise<void>
   /** Sync tech-info snapshot for the Info panel. */
   info(): unknown
   /** Refresh ICE remote-candidate addresses (slower cadence). */
@@ -779,6 +794,8 @@ const Session = component<{
    * would drift from it on every reload.
    */
   const held = signal<ReadonlySet<number>>(new Set())
+  /** How much of each partially-held file this tab has. See `seeding.ts`. */
+  const coverage = signal<ReadonlyMap<number, number>>(new Map())
   /** Whether a seed is in flight, so the button can say it is busy. */
   const seeding = signal(false)
   const seedError = signal<string | null>(null)
@@ -1238,12 +1255,52 @@ const Session = component<{
       }
     } finally {
       if (transfer.peek()?.kind === 'download') transfer.value = null
+      // Whatever landed — including a cancelled transfer's whole chunks — is
+      // now servable, so adopt it into the seeder and say so. After the
+      // `finally`, deliberately: a download that failed still leaves real
+      // chunks behind, and refusing to seed them would throw away the one
+      // thing a partial transfer is still good for.
+      void publishHoldings(current.client)
     }
+  }
+
+  /**
+   * Adopt what this tab now holds into the seeder, then advertise it.
+   *
+   * Serving before advertising is the client's own ordering rule; this just
+   * asks for it and repaints. Failures are logged, never surfaced: a tab that
+   * cannot seed is still a tab that downloaded its file.
+   */
+  function publishHoldings(client: Client): void {
+    void client
+      .republish_holdings()
+      .then(() => {
+        refreshHeld(client)
+      })
+      .catch((error: unknown) => {
+        console.debug('[share] publishing what we hold failed', error)
+      })
   }
 
   /** Take the client's held set into the signal, and repaint. */
   function refreshHeld(client: Client): void {
     held.value = new Set(Array.from(client.held))
+    // Coverage is asynchronous — it reads the store — so it lands a tick after
+    // the complete-slot set. Fire-and-forget: a tab whose storage is refused
+    // still shows everything it holds whole.
+    void client
+      .coverage_map()
+      .then((raw: unknown) => {
+        const next = new Map<number, number>()
+        for (const [key, value] of Object.entries(raw as Record<string, number>)) {
+          const index = Number.parseInt(key, 10)
+          if (Number.isInteger(index) && typeof value === 'number') next.set(index, value)
+        }
+        coverage.value = next
+      })
+      .catch(() => {
+        // Losing the fractions costs the partial shading, nothing else.
+      })
   }
 
   /**
@@ -1379,6 +1436,7 @@ const Session = component<{
               onDownload={noop}
               downloadDisabled
               held={held.value}
+              coverage={coverage.value}
               onSeed={noop}
               seedDisabled
               onPreview={noop}
@@ -1441,6 +1499,10 @@ const Session = component<{
       only way out of a preview link is the root of the share.
     */
     const closePreview = () => {
+      // A preview pulls the whole file through the same reader a download does,
+      // so leaving one is the moment those chunks become servable. Abandoning
+      // it part-way still leaves the chunks that landed, and those count.
+      if (current.phase === 'ready') publishHoldings(current.client)
       if (canGoBack()) {
         window.history.back()
         return
@@ -1489,7 +1551,7 @@ const Session = component<{
       it: once everything is held there is nothing to act on, and the number
       of files still missing is already in the detail column.
     */
-    const idle = !seeding.value && seedState(built.root, held.value) !== 'full'
+    const idle = !seeding.value && seedState(built.root, held.value, coverage.value) !== 'full'
     const seedButton = (
       <Button variant="ghost" onclick={() => void seedShare()} disabled={!idle}>
         {idle ? 'Seed' : 'Seeding'}
@@ -1657,6 +1719,7 @@ const Session = component<{
             onDownload={onDownload}
             downloadDisabled={active !== null || redialling}
             held={held.value}
+            coverage={coverage.value}
             onSeed={onSeed}
             seedDisabled={seeding.value || redialling}
             onPreview={onPreview}

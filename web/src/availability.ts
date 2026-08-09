@@ -15,6 +15,49 @@
 /** Marker a peer publishes when it holds every live slot. */
 export const SERVING_ALL = '*'
 
+/**
+ * Prefix marking a base64 bitmap rather than a run list.
+ *
+ * A peer that seeds whatever it looked at holds scattered singletons, which is
+ * the worst case for runs — ~70-100 of them used to overflow the frame and the
+ * whole field was dropped, so a peer holding a hundred files advertised
+ * nothing. A bitmap is one bit per slot however scattered, so it cannot fall
+ * off that cliff.
+ */
+export const SERVING_BITMAP = '~'
+
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+/**
+ * Decode a bitmap into slot indices.
+ *
+ * Mirrors `agent_share_proto::serving`, including its tolerance: an unreadable
+ * character ends the run rather than failing the field, so corruption costs the
+ * tail and never invents a slot the peer does not hold. Over-claiming is the
+ * dangerous direction — `missingSlots` uses this to say a file is *lost*.
+ */
+function decodeBitmap(body: string, total: number): number[] {
+  const bytes: number[] = []
+  let packed = 0
+  let filled = 0
+  for (const symbol of body) {
+    const value = BASE64.indexOf(symbol)
+    if (value === -1) break
+    packed = (packed << 6) | value
+    filled += 6
+    if (filled >= 8) {
+      filled -= 8
+      bytes.push((packed >> filled) & 0xff)
+    }
+  }
+  const held: number[] = []
+  for (let slot = 0; slot < total; slot += 1) {
+    const byte = bytes[slot >> 3]
+    if (byte !== undefined && (byte & (1 << (slot % 8))) !== 0) held.push(slot)
+  }
+  return held
+}
+
 /** What one peer can serve, and of which tree. */
 export interface PeerAvailability {
   /** Peer endpoint id. */
@@ -47,6 +90,9 @@ export function decodeServing(encoded: string, total: number): number[] {
   if (text === SERVING_ALL) {
     return Array.from({ length: total }, (_, index) => index)
   }
+  if (text.startsWith(SERVING_BITMAP)) {
+    return decodeBitmap(text.slice(1), total)
+  }
   const held: number[] = []
   for (const rawRun of text.split(',')) {
     const run = rawRun.trim()
@@ -75,9 +121,11 @@ export function peerAvailability(
 ): PeerAvailability {
   if (serving == null || serving === '') {
     // Absent is *cannot vouch*, not *holds nothing*. A peer that has not worked
-    // out its availability, or whose ranges were too scattered to fit a frame,
-    // looks the same here — and in both cases the honest render is "unknown"
-    // rather than an empty row implying it has nothing.
+    // out its availability looks the same here, and the honest render is
+    // "unknown" rather than an empty row implying it has nothing.
+    //
+    // Scattered holdings no longer land here: they used to overflow the frame
+    // and drop the field, which is exactly what `SERVING_BITMAP` fixes.
     return { id, held: [], tree: tree ?? null, complete: false, unknown: true }
   }
   return {

@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 
 use agent_share_proto::auth::ShareAuth;
 use anyhow::{Context, Result, bail};
-use fofoca_blobs::{BlobStore, FileId, FsStore};
+use fofoca_chunks::ChunkMap;
 
 use super::MountTicket;
 use super::consume::RemoteClient;
@@ -195,7 +195,12 @@ async fn copy_all(
     // The store lives *beside* the copy, not inside it, so `agent-share serve`
     // on the destination shares the user's files and not our bookkeeping.
     let sidecar = sidecar_dir(dest);
-    let store = FsStore::open(&sidecar).context("opening the mirror's hash store")?;
+    // The sidecar still exists — it carries the origin's manifest, secret and
+    // mesh id — but it no longer holds a byte of content. A mirror re-serves
+    // the copy it just wrote, in place, and addresses it lazily the way the
+    // origin does; keeping a second copy under here would double the disk cost
+    // of mirroring for nothing.
+    std::fs::create_dir_all(&sidecar).with_context(|| format!("creating {}", sidecar.display()))?;
     // Kept so `serve` can re-serve the origin's manifest rather than deriving
     // one from this directory. Written before any byte is fetched, so even an
     // interrupted mirror is re-servable for what it did get.
@@ -245,7 +250,7 @@ async fn copy_all(
                 )
             })?;
         write_file(&path, &bytes)?;
-        let verified = record(&store, client, index, &path, &bytes).await?;
+        let verified = record(client, index, &path, &bytes).await?;
 
         tally.files += 1;
         tally.bytes += bytes.len() as u64;
@@ -331,8 +336,44 @@ pub(super) fn origin_auth_for(root: &Path) -> Option<ShareAuth> {
     Some(ShareAuth::from_token(token, true))
 }
 
-/// Read a whole file over `OP_READ`, one capped chunk at a time.
+/// Read a whole file, by chunk address where the peer can address, else by
+/// byte range.
+///
+/// Preferring addresses is not a micro-optimisation. A peer holding *part* of
+/// a file can answer for the chunks it has and decline the rest, so a mirror
+/// can be assembled from several partial seeders — which is exactly the case a
+/// dead origin leaves behind. `OP_READ` can only ever ask one peer for a range
+/// and take what it gets.
+///
+/// Every chunk is verified against the row before it is used, so the bytes are
+/// safe to take from anyone.
 async fn fetch_whole(client: &RemoteClient, index: u32, size: u64) -> Result<Vec<u8>> {
+    if let Some(row) = client.fetch_chunk_map(index).await? {
+        let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+        for position in 0..row.len() {
+            let address = row
+                .leaf(position)
+                .context("a chunk row is shorter than it says")?;
+            // `None` means the peer addressed the file but cannot serve this
+            // chunk — ordinary for a partial holder. Falling back to a byte
+            // range is what a whole-file holder can always answer.
+            let chunk = if let Some(chunk) = client.fetch_chunk(address).await? {
+                chunk
+            } else {
+                let range = row.range_of(position);
+                let len =
+                    u32::try_from(range.end - range.start).context("a chunk is under 4 GiB")?;
+                read_exact_range(client, index, range.start, len).await?
+            };
+            if !row.verify(position, &chunk) {
+                bail!("a peer answered chunk {position} of {index} with the wrong bytes");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok(bytes);
+    }
+
+    // No row: this peer cannot address the file at all, so read it as bytes.
     let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
     let mut offset = 0u64;
     loop {
@@ -354,6 +395,30 @@ async fn fetch_whole(client: &RemoteClient, index: u32, size: u64) -> Result<Vec
     Ok(bytes)
 }
 
+/// Read exactly `len` bytes at `offset`, looping over the protocol's cap.
+async fn read_exact_range(
+    client: &RemoteClient,
+    index: u32,
+    offset: u64,
+    len: u32,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    loop {
+        let taken = u32::try_from(out.len()).context("a chunk is under 4 GiB")?;
+        if taken >= len {
+            break;
+        }
+        let piece = client
+            .read_range(index, offset + u64::from(taken), len - taken)
+            .await?;
+        if piece.is_empty() {
+            bail!("the peer stopped short of the size its own chunk row describes");
+        }
+        out.extend_from_slice(&piece);
+    }
+    Ok(out)
+}
+
 fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -362,37 +427,25 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
 }
 
-/// Hash the copy, cross-check it against the origin, and record the binding.
+/// Address the copy and cross-check it against the origin.
 ///
 /// Returns whether the origin was able to vouch for the content *and* agreed.
-async fn record(
-    store: &FsStore,
-    client: &RemoteClient,
-    index: u32,
-    path: &Path,
-    bytes: &[u8],
-) -> Result<bool> {
-    let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-    let file = FileId {
-        key: path.to_string_lossy().into_owned(),
-        size: meta.len(),
-        mtime: meta
-            .modified()
-            .ok()
-            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |since| since.as_secs().cast_signed()),
-    };
-    let ours = store.insert_complete(&file, bytes).await?;
+///
+/// Comparing roots rather than bytes is the whole point of the row: the origin
+/// never sends its content twice, and a single 32-byte answer settles whether
+/// what landed here is what it meant to send.
+async fn record(client: &RemoteClient, index: u32, path: &Path, bytes: &[u8]) -> Result<bool> {
+    let ours = ChunkMap::build(bytes);
 
-    // `None` is ordinary — the origin keeps no hash cache, or cannot vouch for
+    // `None` is ordinary — the peer keeps no chunk table, or cannot address
     // that index. The copy stands; it simply is not provable from here.
-    let Some((theirs, _)) = client.fetch_hash(index).await? else {
+    let Some(theirs) = client.fetch_chunk_map(index).await? else {
         return Ok(false);
     };
-    if ours != theirs {
+    if ours.root() != theirs.root() {
         bail!(
             "{} does not match the origin: the bytes were altered in transit, \
-             or the origin is serving content it did not hash",
+             or the origin is serving content it did not address",
             path.display()
         );
     }

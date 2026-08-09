@@ -99,6 +99,77 @@ pub const OP_HASH: u8 = 5;
 /// memory.
 pub const MAX_OUTBOARD_BYTES: u32 = 64 * 1024 * 1024;
 
+/// Request the ordered chunk addresses of one file, by manifest index.
+///
+/// The op that makes a third-party read safe, and the successor to
+/// [`OP_HASH`]. A consumer learns a file's leaf row — the `blake3` address of
+/// each 64 `KiB` chunk, in order — and can then accept **each chunk** from any
+/// peer and check it on its own. A hostile peer can refuse or fail
+/// verification; it cannot substitute content.
+///
+/// The difference from [`OP_HASH`] is what a peer can be asked for afterwards.
+/// A bao outboard proves a range *of a particular file at a particular offset*,
+/// so a reader must first agree with its source about which file it is reading.
+/// A leaf row is a list of self-proving addresses, so a chunk can come from a
+/// peer that has never heard of this share.
+///
+/// **The origin hashes on demand, never at scan time**, exactly as [`OP_HASH`]
+/// did — a file gets a row the first time somebody asks for one, and not
+/// before, so serving a 500 GB tree stays a `stat` walk.
+///
+/// Request body: `index(u32)`. Response: the status byte, then
+/// `root(32) ‖ size(u64) ‖ count(u32) ‖ addresses(32 × count)`.
+///
+/// The size is carried because the root commits to it: a row of *n* addresses
+/// describes a range of sizes (the last chunk may be short), and two files
+/// differing only in that last chunk's length must not share a name.
+pub const OP_CHUNK_MAP: u8 = 6;
+
+/// Request one chunk, by its content address alone.
+///
+/// **No file, no offset, no manifest index.** That absence is the point: a peer
+/// answers because it holds those bytes, not because it holds that file, so a
+/// chunk can be served by someone who fetched it through an entirely different
+/// share. It is also what lets a peer holding *part* of a file serve that part.
+///
+/// Still carries the request header's token, and a source **must answer only
+/// for chunks reachable from a chunk map in that token's share**. A store
+/// shared across shares would otherwise let anyone with one link probe what
+/// else this peer holds, one address at a time.
+///
+/// Request body: `address(32)`. Response: the status byte, then
+/// `len(u32) ‖ bytes`.
+pub const OP_CHUNK: u8 = 7;
+
+/// Ask a peer which chunks of a file it can actually serve.
+///
+/// The exact answer that a peer card cannot carry. Availability on the card is
+/// a bounded hint — it rides a CRDT broadcast to everyone, which keeps its
+/// history — so it says whether a peer is worth dialling. This says precisely
+/// what that peer holds, over a connection that already exists.
+///
+/// Request body: `root(32)`. Response: the status byte, then
+/// `chunks(u32) ‖ bitmap`, where bit *i* of the bitmap is chunk *i*, least
+/// significant bit first, and the bitmap is `chunks.div_ceil(8)` bytes.
+pub const OP_HAVE: u8 = 8;
+
+/// Bytes in one chunk address.
+pub const CHUNK_ADDRESS_LEN: usize = 32;
+
+/// Ceiling on one [`OP_CHUNK`] body.
+///
+/// Every chunk but a file's last is exactly this, and the last is shorter, so
+/// anything larger is a peer answering a question nobody asked.
+pub const MAX_CHUNK_LEN: u32 = 64 * 1024;
+
+/// Ceiling on one [`OP_CHUNK_MAP`] answer.
+///
+/// A leaf row is 32 bytes per 64 `KiB`, or ~0.05 % of the file — half the size
+/// of the outboard it replaces. At this cap a single file may be up to 128 `GiB`
+/// before its row stops fitting, which is well past anything the manifest's own
+/// limits admit.
+pub const MAX_CHUNK_MAP_BYTES: u32 = 64 * 1024 * 1024;
+
 /// [`OP_BENCH`] kind: consumer sends `n` bytes; producer echoes them back.
 pub const BENCH_KIND_ECHO: u8 = 0;
 
@@ -181,6 +252,165 @@ pub fn decode_hash_request(body: &[u8]) -> Result<u32> {
         .try_into()
         .map_err(|_| anyhow::anyhow!("hash request body must be 4 bytes, got {}", body.len()))?;
     Ok(u32::from_le_bytes(bytes))
+}
+
+/// Build a complete [`OP_CHUNK_MAP`] request: header followed by `index(u32)`.
+#[must_use]
+pub fn encode_chunk_map_request(token: &[u8; SECRET_LEN], index: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(REQUEST_HEADER_LEN + 4);
+    out.extend_from_slice(token);
+    out.push(OP_CHUNK_MAP);
+    out.extend_from_slice(&index.to_le_bytes());
+    out
+}
+
+/// Decode an [`OP_CHUNK_MAP`] request body.
+///
+/// # Errors
+/// The body is not exactly four bytes.
+pub fn decode_chunk_map_request(body: &[u8]) -> Result<u32> {
+    let bytes: [u8; 4] = body.try_into().map_err(|_| {
+        anyhow::anyhow!("chunk map request body must be 4 bytes, got {}", body.len())
+    })?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+/// Fixed prefix of an [`OP_CHUNK_MAP`] answer: `root(32) ‖ size(u64) ‖ count(u32)`.
+pub const CHUNK_MAP_PREFIX_LEN: usize = 44;
+
+/// Encode an [`OP_CHUNK_MAP`] answer body.
+#[must_use]
+pub fn encode_chunk_map(root: &[u8; 32], size: u64, addresses: &[[u8; 32]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(CHUNK_MAP_PREFIX_LEN + addresses.len() * CHUNK_ADDRESS_LEN);
+    out.extend_from_slice(root);
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(
+        &u32::try_from(addresses.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    for address in addresses {
+        out.extend_from_slice(address);
+    }
+    out
+}
+
+/// Decode an [`OP_CHUNK_MAP`] answer body into `(root, size, addresses)`.
+///
+/// # Errors
+/// The body is truncated, or claims more addresses than it carries. The count
+/// is checked against the *actual* length before anything is allocated, so a
+/// peer cannot make this reserve memory it never intends to fill.
+///
+/// # Panics
+/// Never: the slices taken below are inside the length checked immediately
+/// above them, so the `try_into` conversions cannot fail.
+pub fn decode_chunk_map(body: &[u8]) -> Result<([u8; 32], u64, Vec<[u8; 32]>)> {
+    if body.len() < CHUNK_MAP_PREFIX_LEN {
+        anyhow::bail!(
+            "a chunk map answer is at least {CHUNK_MAP_PREFIX_LEN} bytes, got {}",
+            body.len()
+        );
+    }
+    let mut root = [0u8; 32];
+    root.copy_from_slice(&body[..32]);
+    let size = u64::from_le_bytes(body[32..40].try_into().expect("8 bytes"));
+    let count = u32::from_le_bytes(body[40..44].try_into().expect("4 bytes")) as usize;
+    let needed = CHUNK_MAP_PREFIX_LEN
+        .checked_add(
+            count
+                .checked_mul(CHUNK_ADDRESS_LEN)
+                .ok_or_else(|| anyhow::anyhow!("chunk map length overflows"))?,
+        )
+        .ok_or_else(|| anyhow::anyhow!("chunk map length overflows"))?;
+    if body.len() < needed {
+        anyhow::bail!(
+            "a {count}-address chunk map needs {needed} bytes, got {}",
+            body.len()
+        );
+    }
+    let mut addresses = Vec::with_capacity(count);
+    for index in 0..count {
+        let start = CHUNK_MAP_PREFIX_LEN + index * CHUNK_ADDRESS_LEN;
+        let mut address = [0u8; 32];
+        address.copy_from_slice(&body[start..start + CHUNK_ADDRESS_LEN]);
+        addresses.push(address);
+    }
+    Ok((root, size, addresses))
+}
+
+/// Build a complete [`OP_CHUNK`] request: header followed by `address(32)`.
+#[must_use]
+pub fn encode_chunk_request(token: &[u8; SECRET_LEN], address: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(REQUEST_HEADER_LEN + CHUNK_ADDRESS_LEN);
+    out.extend_from_slice(token);
+    out.push(OP_CHUNK);
+    out.extend_from_slice(address);
+    out
+}
+
+/// Decode an [`OP_CHUNK`] request body.
+///
+/// # Errors
+/// The body is not exactly 32 bytes.
+pub fn decode_chunk_request(body: &[u8]) -> Result<[u8; 32]> {
+    body.try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "chunk request body must be {CHUNK_ADDRESS_LEN} bytes, got {}",
+            body.len()
+        )
+    })
+}
+
+/// Build a complete [`OP_HAVE`] request: header followed by `root(32)`.
+#[must_use]
+pub fn encode_have_request(token: &[u8; SECRET_LEN], root: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(REQUEST_HEADER_LEN + 32);
+    out.extend_from_slice(token);
+    out.push(OP_HAVE);
+    out.extend_from_slice(root);
+    out
+}
+
+/// Decode an [`OP_HAVE`] request body.
+///
+/// # Errors
+/// The body is not exactly 32 bytes.
+pub fn decode_have_request(body: &[u8]) -> Result<[u8; 32]> {
+    body.try_into()
+        .map_err(|_| anyhow::anyhow!("have request body must be 32 bytes, got {}", body.len()))
+}
+
+/// Encode an [`OP_HAVE`] answer body: `chunks(u32) ‖ bitmap`.
+#[must_use]
+pub fn encode_have(chunks: u32, bitmap: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + bitmap.len());
+    out.extend_from_slice(&chunks.to_le_bytes());
+    out.extend_from_slice(bitmap);
+    out
+}
+
+/// Decode an [`OP_HAVE`] answer body into `(chunks, bitmap)`.
+///
+/// # Errors
+/// The body is truncated, or the bitmap is too short for the count it claims.
+///
+/// # Panics
+/// Never: the four bytes read below are inside the length checked immediately
+/// above them.
+pub fn decode_have(body: &[u8]) -> Result<(u32, Vec<u8>)> {
+    if body.len() < 4 {
+        anyhow::bail!("a have answer is at least 4 bytes, got {}", body.len());
+    }
+    let chunks = u32::from_le_bytes(body[..4].try_into().expect("4 bytes"));
+    let needed = (chunks as usize).div_ceil(8);
+    if body.len() - 4 < needed {
+        anyhow::bail!(
+            "a {chunks}-chunk bitmap needs {needed} bytes, got {}",
+            body.len() - 4
+        );
+    }
+    Ok((chunks, body[4..4 + needed].to_vec()))
 }
 
 /// Build the header for an [`OP_WATCH`] request. Like the manifest op it has
@@ -468,5 +698,137 @@ mod tests {
             decode_response_header(&[ReadStatus::Ok.to_byte(), 0, 0], 100).is_err(),
             "truncated length"
         );
+    }
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::{
+        CHUNK_ADDRESS_LEN, MAX_CHUNK_LEN, MAX_CHUNK_MAP_BYTES, OP_CHUNK, OP_CHUNK_MAP, OP_HAVE,
+        REQUEST_HEADER_LEN, SECRET_LEN, decode_chunk_map, decode_chunk_map_request,
+        decode_chunk_request, decode_have, decode_have_request, encode_chunk_map,
+        encode_chunk_map_request, encode_chunk_request, encode_have, encode_have_request,
+    };
+
+    fn token() -> [u8; SECRET_LEN] {
+        [7u8; SECRET_LEN]
+    }
+
+    fn address(seed: u8) -> [u8; 32] {
+        [seed; 32]
+    }
+
+    /// The op bytes are wire format. Changing one silently reroutes every
+    /// request built by an older peer into a different handler, so they are
+    /// pinned here rather than left to whoever renumbers next.
+    #[test]
+    fn the_op_bytes_are_pinned() {
+        assert_eq!(OP_CHUNK_MAP, 6);
+        assert_eq!(OP_CHUNK, 7);
+        assert_eq!(OP_HAVE, 8);
+        assert_eq!(CHUNK_ADDRESS_LEN, 32);
+        assert_eq!(MAX_CHUNK_LEN, 64 * 1024);
+        assert_eq!(MAX_CHUNK_MAP_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_chunk_map_request_round_trips() {
+        let request = encode_chunk_map_request(&token(), 42);
+        assert_eq!(request[SECRET_LEN], OP_CHUNK_MAP);
+        assert_eq!(
+            decode_chunk_map_request(&request[REQUEST_HEADER_LEN..]).expect("decode"),
+            42
+        );
+        assert!(decode_chunk_map_request(&[1, 2]).is_err());
+    }
+
+    #[test]
+    fn a_chunk_map_round_trips() {
+        let addresses = vec![address(1), address(2), address(3)];
+        let body = encode_chunk_map(&address(9), 131_073, &addresses);
+        let (root, size, decoded) = decode_chunk_map(&body).expect("decode");
+        assert_eq!(root, address(9));
+        assert_eq!(size, 131_073);
+        assert_eq!(decoded, addresses);
+    }
+
+    #[test]
+    fn an_empty_chunk_map_round_trips() {
+        // A zero-byte file has a root and no addresses, and that has to survive
+        // the wire rather than being mistaken for a truncated answer.
+        let body = encode_chunk_map(&address(4), 0, &[]);
+        let (root, size, decoded) = decode_chunk_map(&body).expect("decode");
+        assert_eq!(root, address(4));
+        assert_eq!(size, 0);
+        assert!(decoded.is_empty());
+    }
+
+    /// A count larger than the body is a peer trying to make us allocate for
+    /// data it never sends. The length is checked before the `Vec` is reserved.
+    #[test]
+    fn a_chunk_map_claiming_more_than_it_carries_is_refused() {
+        let mut body = encode_chunk_map(&address(5), 64 * 1024, &[address(6)]);
+        body[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_chunk_map(&body).is_err());
+        // Truncated bodies too.
+        assert!(decode_chunk_map(&body[..10]).is_err());
+        assert!(decode_chunk_map(&[]).is_err());
+    }
+
+    #[test]
+    fn a_chunk_request_round_trips() {
+        let request = encode_chunk_request(&token(), &address(11));
+        assert_eq!(request[SECRET_LEN], OP_CHUNK);
+        assert_eq!(
+            decode_chunk_request(&request[REQUEST_HEADER_LEN..]).expect("decode"),
+            address(11)
+        );
+        assert!(decode_chunk_request(&[0u8; 31]).is_err());
+        assert!(decode_chunk_request(&[0u8; 33]).is_err());
+    }
+
+    /// The op that buys the resilience carries no file and no offset. If a body
+    /// ever grows one, a peer stops being able to answer for bytes it got
+    /// through a different share — which is the whole point of the op.
+    #[test]
+    fn a_chunk_request_names_only_an_address() {
+        let request = encode_chunk_request(&token(), &address(12));
+        assert_eq!(request.len(), REQUEST_HEADER_LEN + CHUNK_ADDRESS_LEN);
+    }
+
+    #[test]
+    fn a_have_request_round_trips() {
+        let request = encode_have_request(&token(), &address(13));
+        assert_eq!(request[SECRET_LEN], OP_HAVE);
+        assert_eq!(
+            decode_have_request(&request[REQUEST_HEADER_LEN..]).expect("decode"),
+            address(13)
+        );
+        assert!(decode_have_request(&[0u8; 8]).is_err());
+    }
+
+    #[test]
+    fn a_have_answer_round_trips() {
+        // 10 chunks, holding 0, 3 and 9.
+        let bitmap = [0b0000_1001u8, 0b0000_0010u8];
+        let body = encode_have(10, &bitmap);
+        let (chunks, decoded) = decode_have(&body).expect("decode");
+        assert_eq!(chunks, 10);
+        assert_eq!(decoded, bitmap);
+    }
+
+    #[test]
+    fn a_have_answer_with_a_short_bitmap_is_refused() {
+        let body = encode_have(64, &[0u8; 2]);
+        assert!(decode_have(&body).is_err());
+        assert!(decode_have(&[1, 2]).is_err());
+    }
+
+    #[test]
+    fn a_have_answer_for_an_empty_file_round_trips() {
+        let body = encode_have(0, &[]);
+        let (chunks, bitmap) = decode_have(&body).expect("decode");
+        assert_eq!(chunks, 0);
+        assert!(bitmap.is_empty());
     }
 }

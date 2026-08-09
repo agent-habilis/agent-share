@@ -89,3 +89,46 @@ describe('missingSlots', () => {
     expect(missingSlots([peerAvailability('a', '*', 't', 5)], 5)).toEqual([])
   })
 })
+
+describe('bitmap availability', () => {
+  // A peer that seeds what it previewed holds scattered singletons. Under runs
+  // alone those overflowed the frame and the field was dropped, so the grid
+  // showed `unknown` for a peer holding half the share.
+
+  test('a scattered holding decodes exactly', () => {
+    // Slots 0, 2, 4 … 18 of a 20-slot tree: 10 runs, encoded as one bitmap.
+    const held = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
+    const bytes = [0, 0, 0]
+    for (const slot of held) bytes[slot >> 3]! |= 1 << slot % 8
+    const b64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    let packed = 0
+    let filled = 0
+    let text = ''
+    for (const byte of bytes) {
+      packed = (packed << 8) | byte
+      filled += 8
+      while (filled >= 6) {
+        filled -= 6
+        text += b64[(packed >> filled) & 0x3f]
+      }
+    }
+    if (filled > 0) text += b64[(packed << (6 - filled)) & 0x3f]
+    expect(decodeServing(`~${text}`, 20)).toEqual(held)
+  })
+
+  test('a bitmap never claims a slot past the tree', () => {
+    // All bits set, but the tree is only 5 slots — the decode must clamp.
+    expect(decodeServing('~////', 5)).toEqual([0, 1, 2, 3, 4])
+  })
+
+  test('a corrupted bitmap costs its tail, never invents a slot', () => {
+    const held = decodeServing('~A!!!!', 40)
+    // Whatever survives must be a subset of what the first symbol can express.
+    expect(held.every((slot) => slot < 6)).toBe(true)
+  })
+
+  test('the other two encodings still decode as before', () => {
+    expect(decodeServing('*', 3)).toEqual([0, 1, 2])
+    expect(decodeServing('0-2,7', 10)).toEqual([0, 1, 2, 7])
+  })
+})

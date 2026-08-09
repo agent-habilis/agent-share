@@ -52,6 +52,8 @@ interface ColumnViewProps {
   downloadDisabled?: boolean
   /** Manifest indices this tab holds in full, and can seed. */
   held: ReadonlySet<number>
+  /** Fraction of each partially-held file. See `seeding.ts`. */
+  coverage?: ReadonlyMap<number, number>
   /** Pull the current selection into local storage, so this tab can seed it. */
   onSeed: () => void
   seedDisabled?: boolean
@@ -245,6 +247,7 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
               }
               onFit={() => setWidth(depth, fitColumnWidth(column, 2))}
               held={props.held}
+              coverage={props.coverage}
               onPreview={props.onPreview}
               previewDisabled={props.previewDisabled}
             />
@@ -264,6 +267,7 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
             detailWidth.value = fitDetailWidth(node, 2)
           }}
           held={props.held}
+              coverage={props.coverage}
           onSeed={props.onSeed}
           seedDisabled={props.seedDisabled}
           onPreview={props.onPreview}
@@ -316,6 +320,7 @@ function Column({
   onResizeStart,
   onFit,
   held,
+  coverage,
   onPreview,
   previewDisabled,
 }: {
@@ -328,6 +333,8 @@ function Column({
   onResizeStart: (event: MouseEvent) => void
   onFit: () => void
   held: ReadonlySet<number>
+  /** Fraction of each partially-held file. See `seeding.ts`. */
+  coverage?: ReadonlyMap<number, number>
   onPreview: () => void
   previewDisabled?: boolean
 }) {
@@ -361,6 +368,7 @@ function Column({
               padX={padX}
               onSelect={() => onSelect(child)}
               held={held}
+              coverage={coverage}
               onPreview={onPreview}
               previewDisabled={previewDisabled}
             />
@@ -378,6 +386,7 @@ function Row({
   padX,
   onSelect,
   held,
+  coverage,
   onPreview,
   previewDisabled,
 }: {
@@ -386,10 +395,12 @@ function Row({
   padX: number
   onSelect: () => void
   held: ReadonlySet<number>
+  /** Fraction of each partially-held file. See `seeding.ts`. */
+  coverage?: ReadonlyMap<number, number>
   onPreview: () => void
   previewDisabled?: boolean
 }) {
-  const state = seedState(node, held)
+  const state = seedState(node, held, coverage)
   return (
     <div
       role="button"
@@ -450,7 +461,7 @@ function Row({
       <div style={SLOT}>
         <Text
           color={state === 'full' ? 'accent' : 'fgSubtle'}
-          title={seedLabel(state, node, held)}
+          title={seedLabel(state, node, held, coverage)}
         >
           {state === 'full' ? '\u25cf' : state === 'partial' ? '\u25d0' : '\u00b7'}
         </Text>
@@ -475,6 +486,7 @@ function Detail({
   onResizeStart,
   onFit,
   held,
+  coverage,
   onSeed,
   seedDisabled,
   onPreview,
@@ -487,13 +499,15 @@ function Detail({
   onResizeStart: (event: MouseEvent) => void
   onFit: (node: Node) => void
   held: ReadonlySet<number>
+  /** Fraction of each partially-held file. See `seeding.ts`. */
+  coverage?: ReadonlyMap<number, number>
   onSeed: () => void
   seedDisabled?: boolean
   onPreview: () => void
   previewDisabled?: boolean
 }) {
   if (!node) return null
-  const state = seedState(node, held)
+  const state = seedState(node, held, coverage)
   return (
     <div
       onclick={(event: MouseEvent) => event.stopPropagation()}

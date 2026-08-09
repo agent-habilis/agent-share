@@ -163,6 +163,7 @@ impl SourceSet {
             kind: self.ticket.kind,
             flags: self.ticket.flags,
             mesh_id: self.ticket.mesh_id.clone(),
+            author: None,
         };
         Ok(Arc::new(RemoteClient::new(
             self.endpoint.clone(),

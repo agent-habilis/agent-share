@@ -19,8 +19,8 @@ use super::ReadStatus;
 use super::WEBRTC_SIGNAL_ALPN;
 use super::live::LiveTree;
 use super::{
-    MAX_READ_LEN, MOUNT_ALPN, OP_HASH, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN,
-    SECRET_LEN, wait_online,
+    MAX_READ_LEN, MOUNT_ALPN, OP_CHUNK, OP_CHUNK_MAP, OP_HAVE, OP_MANIFEST, OP_READ, OP_WATCH,
+    REQUEST_HEADER_LEN, SECRET_LEN, wait_online,
 };
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 
@@ -98,7 +98,7 @@ pub(crate) async fn serve(
             .map(|target| target.mesh_id().to_owned())
     });
 
-    let hashes = open_hash_cache(auth.token());
+    let hashes = Some(open_hash_cache(auth.token()));
 
     // Shell-quoted: the hint is printed for copy-paste (and captured verbatim
     // by scripts in json mode), so a dir name with a space must stay one word.
@@ -317,7 +317,7 @@ fn mint_share_mesh(
 fn share_protocols(
     auth: ShareAuth,
     tree: &Arc<LiveTree>,
-    hashes: Option<Arc<super::hash::HashCache>>,
+    hashes: Option<Arc<super::hash::ChunkCache>>,
     endpoint: &Endpoint,
     webrtc: &WebRtcHandle,
     ice: &IceConfig,
@@ -350,17 +350,15 @@ fn share_protocols(
 /// Never fatal. Without a cache a consumer cannot verify bytes from a third
 /// party and falls back to reading from this origin, which is exactly today's
 /// behaviour.
-fn open_hash_cache(token: &[u8; SECRET_LEN]) -> Option<Arc<super::hash::HashCache>> {
-    let cache_dir = std::env::temp_dir()
-        .join("agent-share-hashes")
-        .join(&agent_share_proto::mesh_key::share_mesh_key(token)[..16]);
-    match super::hash::HashCache::open(&cache_dir) {
-        Ok(cache) => Some(Arc::new(cache)),
-        Err(error) => {
-            tracing::warn!(%error, "hash cache unavailable; serving without verifiable hashes");
-            None
-        }
-    }
+fn open_hash_cache(_token: &[u8; SECRET_LEN]) -> Arc<super::hash::ChunkCache> {
+    // Always available now, and holding nothing until somebody asks. The table
+    // is in memory rather than a sidecar directory, so there is no longer an
+    // open that can fail — and nothing on disk that could describe content
+    // which has since moved.
+    //
+    // The callers still take an `Option`, because "a producer with no chunk
+    // table" is a state the tests exercise and the protocol has an answer for.
+    Arc::new(super::hash::ChunkCache::new())
 }
 
 /// Bind the producer endpoint and mint its ticket + secret — no I/O, no print.
@@ -423,6 +421,7 @@ pub(super) async fn bind(
         // binding an endpoint knows nothing about that.
         flags: 0,
         mesh_id: None,
+        author: None,
     };
     Ok((endpoint, ticket, secret, webrtc))
 }
@@ -437,7 +436,7 @@ pub async fn serve_established(
     conn: Connection,
     auth: ShareAuth,
     tree: Arc<LiveTree>,
-    hashes: Option<Arc<super::hash::HashCache>>,
+    hashes: Option<Arc<super::hash::ChunkCache>>,
 ) -> Result<()> {
     // `accept_bi` errors once the connection is gone (peer closed, or a bad
     // token closed it from within a stream task) — that ends the loop.
@@ -469,7 +468,7 @@ async fn serve_stream(
     mut recv: RecvStream,
     auth: &ShareAuth,
     tree: &LiveTree,
-    hashes: Option<&super::hash::HashCache>,
+    hashes: Option<&super::hash::ChunkCache>,
 ) -> Result<()> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
     if recv.read_exact(&mut header).await.is_err() {
@@ -507,30 +506,85 @@ async fn serve_stream(
             send.write_all(&data_len.to_le_bytes()).await?;
             send.write_all(&data).await?;
         }
-        OP_HASH => {
+        OP_CHUNK_MAP => {
             let mut request = [0u8; 4];
             if recv.read_exact(&mut request).await.is_err() {
                 return Ok(());
             }
             let index = u32::from_le_bytes(request);
             // `None` covers two cases that look identical from the far side and
-            // should: this producer keeps no hash cache, or it cannot vouch for
-            // that index. Either way the consumer must fall back to reading
-            // from the origin, which is exactly what `BadIndex` tells it.
+            // should: this producer keeps no chunk table, or it cannot address
+            // that index. Either way the consumer falls back to reading from
+            // this origin, which is exactly what `BadIndex` tells it.
             let answer = match hashes {
-                Some(cache) => cache.root_of_index(tree, index).await,
+                Some(cache) => cache.map_of_index(tree, index).await,
                 None => None,
             };
-            let Some((root, outboard)) = answer else {
+            let Some(map) = answer else {
+                send.write_all(&[ReadStatus::BadIndex.to_byte()]).await?;
+                let _ = send.finish();
+                return Ok(());
+            };
+            let addresses: Vec<[u8; 32]> =
+                map.leaves().iter().map(|leaf| *leaf.as_bytes()).collect();
+            let body = agent_share_proto::framing::encode_chunk_map(
+                map.root().as_bytes(),
+                map.size(),
+                &addresses,
+            );
+            send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
+            let len = u32::try_from(body.len()).context("chunk map too large")?;
+            send.write_all(&len.to_le_bytes()).await?;
+            send.write_all(&body).await?;
+        }
+        OP_CHUNK => {
+            let mut request = [0u8; 32];
+            if recv.read_exact(&mut request).await.is_err() {
+                return Ok(());
+            }
+            // An origin only ever knows addresses it computed from files in
+            // this share, so answering by address alone cannot be used to probe
+            // what the host holds elsewhere. A store shared across shares has
+            // to scope this deliberately; see the browser seeder.
+            let answer = match hashes {
+                Some(cache) => {
+                    cache
+                        .chunk(fofoca_chunks::ChunkHash::from_bytes(request))
+                        .await
+                }
+                None => None,
+            };
+            let Some(bytes) = answer else {
                 send.write_all(&[ReadStatus::BadIndex.to_byte()]).await?;
                 let _ = send.finish();
                 return Ok(());
             };
             send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
-            send.write_all(&root).await?;
-            let len = u32::try_from(outboard.len()).context("outboard too large")?;
+            let len = u32::try_from(bytes.len()).context("chunk too large")?;
             send.write_all(&len.to_le_bytes()).await?;
-            send.write_all(&outboard).await?;
+            send.write_all(&bytes).await?;
+        }
+        OP_HAVE => {
+            let mut request = [0u8; 32];
+            if recv.read_exact(&mut request).await.is_err() {
+                return Ok(());
+            }
+            let root = fofoca_chunks::Root::from_bytes(request);
+            let coverage = match hashes {
+                Some(cache) => cache.have(root).await.ok(),
+                None => None,
+            };
+            let Some(coverage) = coverage else {
+                send.write_all(&[ReadStatus::BadIndex.to_byte()]).await?;
+                let _ = send.finish();
+                return Ok(());
+            };
+            let chunks = u32::try_from(coverage.len()).context("coverage too large")?;
+            let body = agent_share_proto::framing::encode_have(chunks, coverage.as_bits());
+            send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
+            let len = u32::try_from(body.len()).context("coverage too large")?;
+            send.write_all(&len.to_le_bytes()).await?;
+            send.write_all(&body).await?;
         }
         other => {
             // Unknown op: drop just this stream, keep the connection.

@@ -30,6 +30,8 @@
 //! really is intended, update them in the same commit that makes it.
 
 pub mod auth;
+/// Who may change a share: the creator's signature over each manifest version.
+pub mod authorship;
 pub mod client;
 pub mod framing;
 pub mod lookup;

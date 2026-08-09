@@ -20,14 +20,15 @@ use super::mesh::ShareMesh;
 use super::nfs;
 use super::nfs::{ByteSource, RemoteFs, TreeIds, build_tree};
 use super::{
-    MAX_MANIFEST_BYTES, MAX_OUTBOARD_BYTES, MOUNT_ALPN, OP_HASH, OP_MANIFEST, OP_READ, OP_WATCH,
+    MAX_CHUNK_MAP_BYTES, MAX_MANIFEST_BYTES, MOUNT_ALPN, OP_CHUNK, OP_CHUNK_MAP, OP_MANIFEST,
+    OP_READ, OP_WATCH,
 };
 // The root type comes from the store, not from this crate: `agent-share` names
 // what `fofoca-blobs` verifies against rather than defining a second one.
 use super::{MountManifest, ReadStatus};
 use super::{WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
 use agent_share_proto::auth::ShareAuth;
-use fofoca_blobs::Root;
+use fofoca_chunks::{ChunkHash, ChunkMap};
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
 
 /// How long to keep retrying the dial while the producer's address propagates
@@ -530,6 +531,7 @@ async fn bootstrap_from_seeders(
             kind: origin_ticket.kind,
             flags: origin_ticket.flags,
             mesh_id: origin_ticket.mesh_id.clone(),
+            author: None,
         };
         // The same `auth` the origin dial used. A seeder authenticated with the
         // password once and now checks the token exactly as the origin did, so
@@ -821,47 +823,89 @@ impl RemoteClient {
         unreachable!("the loop returns on success and on the second failure")
     }
 
-    /// Ask the origin for a file's BLAKE3 root and bao outboard.
+    /// Ask a peer for a file's ordered chunk addresses.
     ///
-    /// `Ok(None)` means *this producer cannot vouch for that index* — no hash
-    /// cache, an index out of range, or a file that changed under it. All three
-    /// are ordinary and all three mean the same thing to a caller: read those
-    /// bytes from the origin, which is what happens today anyway. Only a
-    /// protocol failure is an error.
+    /// `Ok(None)` means *this peer cannot address that index* — no chunk table,
+    /// an index out of range, or a file that changed under it. All three are
+    /// ordinary and all three mean the same thing to a caller: fall back to
+    /// reading those bytes from the origin. Only a protocol failure is an error.
     ///
-    /// The root is learned from the **origin**, over a channel already
-    /// authenticated to the ticket's endpoint id. That is what makes it safe to
-    /// take the bytes from anybody afterwards.
-    pub(super) async fn fetch_hash(&self, index: u32) -> Result<Option<(Root, Vec<u8>)>> {
-        let (mut send, mut recv) = self.request(OP_HASH).await?;
+    /// The row is learned over a channel already authenticated to the ticket's
+    /// endpoint id. That is what makes it safe to take **each chunk** from
+    /// anybody afterwards — every address in the row proves its own bytes, with
+    /// no further reference to whoever supplied them.
+    pub(super) async fn fetch_chunk_map(&self, index: u32) -> Result<Option<ChunkMap>> {
+        let (mut send, mut recv) = self.request(OP_CHUNK_MAP).await?;
         send.write_all(&index.to_le_bytes()).await?;
         let _ = send.finish();
 
         let mut status = [0u8; 1];
         recv.read_exact(&mut status)
             .await
-            .context("reading the hash status failed")?;
+            .context("reading the chunk map status failed")?;
         match ReadStatus::from_byte(status[0])? {
             ReadStatus::Ok => {}
             // Not an error: see the note above. Named rather than wildcarded so
             // a future status has to be considered here rather than silently
-            // folded into "cannot vouch".
+            // folded into "cannot address".
             ReadStatus::BadIndex | ReadStatus::Io | ReadStatus::LenOverCap => return Ok(None),
         }
 
-        let mut root = [0u8; 32];
-        recv.read_exact(&mut root)
-            .await
-            .context("reading the root failed")?;
         let len = read_u32(&mut recv).await?;
-        if len > MAX_OUTBOARD_BYTES {
-            bail!("outboard too large: {len} bytes");
+        if len > MAX_CHUNK_MAP_BYTES {
+            bail!("chunk map too large: {len} bytes");
         }
-        let mut outboard = vec![0u8; usize::try_from(len).expect("u32 fits usize")];
-        recv.read_exact(&mut outboard)
+        let mut body = vec![0u8; usize::try_from(len).expect("u32 fits usize")];
+        recv.read_exact(&mut body)
             .await
-            .context("reading the outboard failed")?;
-        Ok(Some((root, outboard)))
+            .context("reading the chunk map failed")?;
+        let (root, size, addresses) = agent_share_proto::framing::decode_chunk_map(&body)?;
+        let leaves: Vec<ChunkHash> = addresses.into_iter().map(ChunkHash::from_bytes).collect();
+        // The root is **recomputed** from the row and the size rather than
+        // taken on trust, so a peer that sends a row and a root which disagree
+        // is caught right here instead of at every later verification.
+        let map = ChunkMap::from_leaves(leaves, size)?;
+        if map.root().as_bytes() != &root {
+            bail!("a peer sent a chunk map whose root does not match its own addresses");
+        }
+        Ok(Some(map))
+    }
+
+    /// Ask a peer for one chunk, by address alone.
+    ///
+    /// `Ok(None)` is "I do not hold that", which is ordinary — it is how a peer
+    /// holding part of a file declines the parts it lacks, and how a peer
+    /// declines an address outside the share whose token was presented.
+    ///
+    /// **The bytes are verified against the address before they are returned**,
+    /// so a peer that answers with anything else costs its own bandwidth and
+    /// nothing more.
+    pub(super) async fn fetch_chunk(&self, address: ChunkHash) -> Result<Option<Vec<u8>>> {
+        let (mut send, mut recv) = self.request(OP_CHUNK).await?;
+        send.write_all(address.as_bytes()).await?;
+        let _ = send.finish();
+
+        let mut status = [0u8; 1];
+        recv.read_exact(&mut status)
+            .await
+            .context("reading the chunk status failed")?;
+        match ReadStatus::from_byte(status[0])? {
+            ReadStatus::Ok => {}
+            ReadStatus::BadIndex | ReadStatus::Io | ReadStatus::LenOverCap => return Ok(None),
+        }
+
+        let len = read_u32(&mut recv).await?;
+        if len > agent_share_proto::framing::MAX_CHUNK_LEN {
+            bail!("chunk too large: {len} bytes");
+        }
+        let mut bytes = vec![0u8; usize::try_from(len).expect("u32 fits usize")];
+        recv.read_exact(&mut bytes)
+            .await
+            .context("reading the chunk failed")?;
+        if fofoca_chunks::chunk_hash(&bytes) != address {
+            bail!("a peer answered {address} with bytes that address something else");
+        }
+        Ok(Some(bytes))
     }
 
     /// The manifest as the origin sent it, before decoding.

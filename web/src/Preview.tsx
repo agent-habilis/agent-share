@@ -31,6 +31,15 @@ import { humanBytes, type FileNode } from './tree.ts'
 export interface PreviewClient {
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
   readonly source_is_origin?: boolean
+  /**
+   * Keep what was read, so previewing a file also seeds it.
+   *
+   * Optional here only because the type is structural; the real client always
+   * supplies it. `singleFileStream` does the calling — this view does not touch
+   * bytes itself, which is exactly why hooking the reader rather than each
+   * consumer was the right seam.
+   */
+  keep?(index: number, offset: bigint, bytes: Uint8Array): Promise<void>
 }
 
 export interface PreviewProps {

@@ -38,14 +38,14 @@ pub(crate) struct MountHandler {
     /// Outboards for files somebody has asked to verify. `None` when the cache
     /// directory could not be opened — the share still serves every byte, it
     /// just cannot vouch for them to a third party.
-    hashes: Option<Arc<super::hash::HashCache>>,
+    hashes: Option<Arc<super::hash::ChunkCache>>,
 }
 
 impl MountHandler {
     pub(crate) fn new(
         auth: ShareAuth,
         tree: Arc<LiveTree>,
-        hashes: Option<Arc<super::hash::HashCache>>,
+        hashes: Option<Arc<super::hash::ChunkCache>>,
     ) -> Self {
         Self { auth, tree, hashes }
     }

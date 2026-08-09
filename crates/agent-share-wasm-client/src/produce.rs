@@ -12,9 +12,9 @@ use std::sync::Arc;
 use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::framing::{
     BENCH_KIND_ECHO, BENCH_KIND_FILL, MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES,
-    MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_HASH, OP_MANIFEST, OP_READ,
-    OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_MANIFEST, WEBRTC_SIGNAL_ALPN,
-    decode_bench_request_prefix,
+    MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_CHUNK, OP_CHUNK_MAP, OP_HAVE,
+    OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_MANIFEST,
+    WEBRTC_SIGNAL_ALPN, decode_bench_request_prefix, encode_chunk_map, encode_have,
 };
 use agent_share_proto::lookup::LookupOpts;
 use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
@@ -34,11 +34,58 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::FileSystemFileHandle;
 
+use fofoca_chunks::{
+    CHUNK_BYTES, ChunkHash, ChunkMap, ChunkMapBuilder, Coverage, Root, chunk_hash,
+};
+use std::collections::HashMap;
+
 use crate::live_state::LiveState;
+
+/// Chunk rows for files somebody has asked about, plus the reverse index that
+/// lets a bare address find its way back to a slot.
+///
+/// Built lazily, exactly like the native origin's: a tab sharing a folder does
+/// not read a byte until a peer asks about a specific file, so publishing a
+/// large directory stays instant.
+#[derive(Default)]
+struct ChunkTable {
+    rows: HashMap<u32, ChunkMap>,
+    slot_of_root: HashMap<Root, u32>,
+    /// Address → the slot and position it was computed from. This is what makes
+    /// answering a bare `OP_CHUNK` possible for a source that owns no bytes.
+    slot_of_address: HashMap<ChunkHash, (u32, usize)>,
+}
+
+impl ChunkTable {
+    /// Forget everything derived from `index`, because the file behind it moved.
+    fn forget(&mut self, index: u32) {
+        if let Some(row) = self.rows.remove(&index) {
+            self.slot_of_root.remove(&row.root());
+            for leaf in row.leaves() {
+                // Only drop an address that still points at this slot: two
+                // files sharing a chunk both registered it, and whichever
+                // claimed it first is still able to answer.
+                if self.slot_of_address.get(leaf).is_some_and(|(slot, _)| *slot == index) {
+                    self.slot_of_address.remove(leaf);
+                }
+            }
+        }
+    }
+
+    fn insert(&mut self, index: u32, row: ChunkMap) {
+        self.forget(index);
+        self.slot_of_root.insert(row.root(), index);
+        for (position, leaf) in row.leaves().iter().enumerate() {
+            self.slot_of_address.entry(*leaf).or_insert((index, position));
+        }
+        self.rows.insert(index, row);
+    }
+}
 
 struct ProducerShared {
     state: LiveState<FileSystemFileHandle>,
     watchers: Vec<mpsc::UnboundedSender<Rc<Vec<u8>>>>,
+    chunks: ChunkTable,
 }
 
 type Shared = Rc<RefCell<ProducerShared>>;
@@ -77,6 +124,20 @@ pub(crate) trait ServeSource: Clone + 'static {
         offset: u64,
         len: u32,
     ) -> impl Future<Output = (ReadStatus, Vec<u8>)>;
+    /// Answer one `OP_CHUNK_MAP`: the ordered addresses of a file's chunks,
+    /// computed on first ask and kept afterwards.
+    fn answer_chunk_map(&self, index: u32) -> impl Future<Output = Option<ChunkMap>>;
+    /// Answer one `OP_CHUNK`: the bytes at an address, or `None`.
+    ///
+    /// **A source must answer only for addresses reachable from a row it holds
+    /// for this share.** Otherwise a peer with one link could ask, one address
+    /// at a time, what else this host is storing.
+    fn answer_chunk(&self, address: ChunkHash) -> impl Future<Output = Option<Vec<u8>>>;
+    /// Answer one `OP_HAVE`: exactly which chunks of `root` can be served.
+    ///
+    /// Partial is a first-class answer — a source holding half a file serves
+    /// that half and says so.
+    fn answer_have(&self, root: Root) -> impl Future<Output = Option<Coverage>>;
 }
 
 impl ServeSource for Shared {
@@ -97,6 +158,96 @@ impl ServeSource for Shared {
     async fn answer_read(&self, index: u32, offset: u64, len: u32) -> (ReadStatus, Vec<u8>) {
         answer_read(self, index, offset, len).await
     }
+
+    async fn answer_chunk_map(&self, index: u32) -> Option<ChunkMap> {
+        producer_chunk_map(self, index).await
+    }
+
+    async fn answer_chunk(&self, address: ChunkHash) -> Option<Vec<u8>> {
+        producer_chunk(self, address).await
+    }
+
+    async fn answer_have(&self, root: Root) -> Option<Coverage> {
+        let index = { self.borrow().chunks.slot_of_root.get(&root).copied()? };
+        // Recomputing rather than trusting the cached row is what notices a
+        // file that moved: if it did, the row is rebuilt under a new root and
+        // this one stops being served at all.
+        let row = producer_chunk_map(self, index).await?;
+        if row.root() != root {
+            return None;
+        }
+        Some(Coverage::complete(row.len()))
+    }
+}
+
+/// The leaf row for `index`, reading the file once if this is the first ask.
+///
+/// Streamed in chunk-sized pieces rather than slurped: a tab sharing a 4 GB
+/// video must not be asked to hold it in memory to describe it.
+async fn producer_chunk_map(shared: &Shared, index: u32) -> Option<ChunkMap> {
+    let handle = {
+        let borrowed = shared.borrow();
+        borrowed.state.slot(index)?.clone()
+    };
+    // The live size is the version gate. A cached row describing a different
+    // length is a file that moved, and answering from it would hand out
+    // addresses whose bytes are gone.
+    let live = live_size(&handle).await?;
+    if let Some(row) = shared.borrow().chunks.rows.get(&index)
+        && row.size() == live
+    {
+        return Some(row.clone());
+    }
+
+    let mut builder = ChunkMapBuilder::new();
+    let mut offset = 0u64;
+    while offset < live {
+        let want = u32::try_from((live - offset).min(CHUNK_BYTES)).ok()?;
+        let piece = read_from_handle(&handle, offset, want).await.ok()?;
+        if piece.is_empty() {
+            // The file shrank while being read; the row would describe neither
+            // version, so there is nothing honest to answer with.
+            return None;
+        }
+        offset += piece.len() as u64;
+        builder.push(&piece);
+    }
+    let row = builder.finish();
+    if row.size() != live {
+        return None;
+    }
+    shared.borrow_mut().chunks.insert(index, row.clone());
+    Some(row)
+}
+
+/// The bytes at one address, read back out of the file they came from.
+async fn producer_chunk(shared: &Shared, address: ChunkHash) -> Option<Vec<u8>> {
+    let (index, position) = { shared.borrow().chunks.slot_of_address.get(&address).copied()? };
+    let handle = {
+        let borrowed = shared.borrow();
+        borrowed.state.slot(index)?.clone()
+    };
+    let range = {
+        let borrowed = shared.borrow();
+        borrowed.chunks.rows.get(&index)?.range_of(position)
+    };
+    let want = u32::try_from(range.end - range.start).ok()?;
+    let bytes = read_from_handle(&handle, range.start, want).await.ok()?;
+    // Re-verify before answering. The file is the user's and can change between
+    // the row being built and this read; serving unverified bytes is how a tab
+    // becomes the peer everyone else has to defend against.
+    if chunk_hash(&bytes) != address {
+        shared.borrow_mut().chunks.forget(index);
+        return None;
+    }
+    Some(bytes)
+}
+
+/// The file's size right now, straight from the handle.
+async fn live_size(handle: &FileSystemFileHandle) -> Option<u64> {
+    let file = JsFuture::from(handle.get_file()).await.ok()?;
+    let file: web_sys::File = file.dyn_into().ok()?;
+    Some(file.size() as u64)
 }
 
 /// An in-browser share, serving until [`ShareProducer::stop`].
@@ -147,6 +298,7 @@ impl ShareProducer {
         let shared: Shared = Rc::new(RefCell::new(ProducerShared {
             state,
             watchers: Vec::new(),
+            chunks: ChunkTable::default(),
         }));
 
         let key = SecretKey::generate();
@@ -235,6 +387,7 @@ impl ShareProducer {
             // Only on a protected share: an ordinary one needs no id in its
             // ticket, because every peer derives the same mesh from the secret.
             mesh_id: auth.password_protected().then(|| mesh_id.clone()),
+            author: None,
         };
         let ticket_str = ticket.encode();
 
@@ -530,6 +683,7 @@ impl BenchProducer {
             lookups,
             kind,
             mesh_id: None,
+            author: None,
             // A bench share is synthetic — no directory, no bytes, nothing
             // worth protecting — so it never carries a password.
             flags: 0,
@@ -695,22 +849,15 @@ async fn serve_bench_stream(
                 left -= take;
             }
         }
-        OP_HASH => {
-            let mut request = [0u8; 4];
-            if recv.read_exact(&mut request).await.is_err() {
-                return Ok(());
-            }
-            // A browser source keeps no hash cache, so it can never vouch for a
-            // file's root — but it must *say* so rather than drop the stream.
-            // `BadIndex` is exactly that sentence, and it is the same answer a
-            // native producer without a cache gives (`produce.rs`'s `OP_HASH`
-            // arm). Dropping it instead read as a broken connection on the far
-            // side: `fetch_hash` treats a vanished stream as an error, not as
-            // "cannot vouch", so `agent-share mirror` could not copy a
-            // browser-produced share at all.
+        OP_CHUNK_MAP | OP_CHUNK | OP_HAVE => {
+            // A bench producer serves synthetic traffic and no content at all,
+            // so it can address nothing — but it must *say* so rather than drop
+            // the stream. A vanished stream reads as a broken connection on the
+            // far side; `BadIndex` reads as "I cannot answer for that", which
+            // every caller already handles.
             send.write_all(&[ReadStatus::BadIndex.to_byte()])
                 .await
-                .map_err(|error| err("write hash status", &error))?;
+                .map_err(|error| err("write chunk status", &error))?;
         }
         _ => return Ok(()),
     }
@@ -926,22 +1073,57 @@ async fn serve_stream<S: ServeSource>(
                 .await
                 .map_err(|error| err("write body", &error))?;
         }
-        OP_HASH => {
+        OP_CHUNK_MAP => {
             let mut request = [0u8; 4];
             if recv.read_exact(&mut request).await.is_err() {
                 return Ok(());
             }
-            // A browser source keeps no hash cache, so it can never vouch for a
-            // file's root — but it must *say* so rather than drop the stream.
-            // `BadIndex` is exactly that sentence, and it is the same answer a
-            // native producer without a cache gives (`produce.rs`'s `OP_HASH`
-            // arm). Dropping it instead read as a broken connection on the far
-            // side: `fetch_hash` treats a vanished stream as an error, not as
-            // "cannot vouch", so `agent-share mirror` could not copy a
-            // browser-produced share at all.
-            send.write_all(&[ReadStatus::BadIndex.to_byte()])
-                .await
-                .map_err(|error| err("write hash status", &error))?;
+            // A browser source *can* address its own files now, which it could
+            // not before: it reads them once, lazily, exactly as the native
+            // origin does. Until this existed, `agent-share mirror` could not
+            // verify a browser-produced share at all.
+            let index = u32::from_le_bytes(request);
+            let Some(row) = source.answer_chunk_map(index).await else {
+                send.write_all(&[ReadStatus::BadIndex.to_byte()])
+                    .await
+                    .map_err(|error| err("write chunk map status", &error))?;
+                let _ = send.finish();
+                return Ok(());
+            };
+            let addresses: Vec<[u8; 32]> =
+                row.leaves().iter().map(|leaf| *leaf.as_bytes()).collect();
+            let body = encode_chunk_map(row.root().as_bytes(), row.size(), &addresses);
+            write_ok_body(&mut send, &body).await?;
+        }
+        OP_CHUNK => {
+            let mut request = [0u8; 32];
+            if recv.read_exact(&mut request).await.is_err() {
+                return Ok(());
+            }
+            let Some(bytes) = source.answer_chunk(ChunkHash::from_bytes(request)).await else {
+                send.write_all(&[ReadStatus::BadIndex.to_byte()])
+                    .await
+                    .map_err(|error| err("write chunk status", &error))?;
+                let _ = send.finish();
+                return Ok(());
+            };
+            write_ok_body(&mut send, &bytes).await?;
+        }
+        OP_HAVE => {
+            let mut request = [0u8; 32];
+            if recv.read_exact(&mut request).await.is_err() {
+                return Ok(());
+            }
+            let Some(coverage) = source.answer_have(Root::from_bytes(request)).await else {
+                send.write_all(&[ReadStatus::BadIndex.to_byte()])
+                    .await
+                    .map_err(|error| err("write have status", &error))?;
+                let _ = send.finish();
+                return Ok(());
+            };
+            let chunks = u32::try_from(coverage.len()).unwrap_or(u32::MAX);
+            let body = encode_have(chunks, coverage.as_bits());
+            write_ok_body(&mut send, &body).await?;
         }
         _ => return Ok(()),
     }

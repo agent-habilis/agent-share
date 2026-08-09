@@ -47,7 +47,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-use fofoca_blobs::{BlobStore, FileId, IdbStore, extent_of};
+use fofoca_chunks::{
+    ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, FileId, IdbStore, Root, chunk_hash,
+};
 use std::sync::Arc;
 
 use agent_share_proto::PeerCard;
@@ -222,6 +224,13 @@ pub struct ShareClient {
     /// accumulated, so a reload shows what actually survived instead of what
     /// this session happened to fetch.
     held: RefCell<BTreeSet<u32>>,
+    /// Chunk rows for slots this tab has learned, by manifest index.
+    ///
+    /// The row is what makes a chunk addressable: without it an address is
+    /// just 32 bytes, and this tab could neither ask for the right ones nor
+    /// scope what it answers for. Learned lazily — one `OP_CHUNK_MAP` per file
+    /// somebody actually wants — and kept in the store so a reload re-arms.
+    rows: RefCell<HashMap<u32, ChunkMap>>,
     /// The serving half of seeding: the mount-protocol source registered on
     /// the mesh Router at connect, fed by [`Self::sync`] /
     /// [`Self::refresh_held`]. Empty until the first sync, and an empty
@@ -284,6 +293,7 @@ fn new_share_client(
         manifest_fetched: Rc::new(Cell::new(false)),
         store: RefCell::new(None),
         held: RefCell::new(BTreeSet::new()),
+        rows: RefCell::new(HashMap::new()),
         seeder: seed::SeederShared::new(),
         from_origin: true,
         pinned_tree: None,
@@ -1265,43 +1275,63 @@ impl ShareClient {
                 continue;
             }
             let index = u32::try_from(index).map_err(|_| JsValue::from_str("index over u32"))?;
-            let file = file_id(entry);
-            if is_held(store.as_ref(), &file).await {
+
+            // The row first. Without one this peer cannot address the file, and
+            // the only honest fallback is a whole-file read from the origin.
+            let Some(row) = self.row_for(index, store.as_ref()).await? else {
+                let body = self.read_whole(index, entry.size).await?;
+                let built = ChunkMap::build(&body);
+                self.store_row_and_chunks(store.as_ref(), index, &built, 0, &body)
+                    .await?;
+                let _ = store.set_bind(&file_id(entry), built.root()).await;
+                unverified += 1;
+                files += 1;
+                total += body.len() as u64;
+                continue;
+            };
+
+            let before = store
+                .coverage(row.root())
+                .await
+                .map_err(|error| err("reading coverage", &error))?;
+            if before.is_complete() {
                 skipped += 1;
-                self.held.borrow_mut().insert(index);
+                let _ = store.set_bind(&file_id(entry), row.root()).await;
+                self.remember_row(index, &row);
                 continue;
             }
 
-            let body = self.read_whole(index, entry.size).await?;
-            let ours = store
-                .insert_complete(&file, &body)
-                .await
-                .map_err(|error| err("storing a file", &error))?;
-            match self.fetch_hash(index).await? {
-                Some(theirs) if theirs != ours => {
-                    return Err(JsValue::from_str(&format!(
-                        "{} does not match the origin: the bytes were altered in transit, \
-                         or the origin is serving content it did not hash",
-                        entry.rel_path
-                    )));
-                }
-                Some(_) => verified += 1,
-                None => unverified += 1,
+            // Only the missing chunks. Pressing Seed after a preview therefore
+            // costs the difference, which is often nothing at all.
+            for position in before.missing() {
+                let Some(address) = row.leaf(position) else {
+                    continue;
+                };
+                let chunk = self.fetch_or_read_chunk(&row, index, position, address).await?;
+                total += chunk.len() as u64;
+                store
+                    .put(address, &chunk)
+                    .await
+                    .map_err(|error| err("storing a chunk", &error))?;
             }
-            self.held.borrow_mut().insert(index);
+            store
+                .put_map(&row)
+                .await
+                .map_err(|error| err("storing a chunk row", &error))?;
+            // The bind is what survives a reload: without it the store holds
+            // chunks and rows but nothing maps this file to its root, so
+            // `rows_in_store` finds nothing and the tab seeds none of what it
+            // actually has.
+            let _ = store.set_bind(&file_id(entry), row.root()).await;
+            self.remember_row(index, &row);
+            verified += 1;
             files += 1;
-            total += body.len() as u64;
         }
 
         // The sidecar: what lets a refreshed tab stand this share back up
         // with no live source at all.
-        persist_manifest(&self.token, &store, &bytes).await;
-        // Serving before advertising: the seeder must answer for a slot by
-        // the time the card claims it, or a reader lands on `BadIndex`.
-        let held = self.held.borrow().clone();
-        self.seeder
-            .update(Rc::new(bytes.clone()), &manifest, store, &held);
-        self.publish_serving(&bytes, &manifest).await;
+        persist_manifest(&self.token, store.as_ref(), &bytes).await;
+        self.republish(&bytes, &manifest, Rc::clone(&store)).await?;
 
         let out = serde_json::json!({
             "files": files,
@@ -1312,6 +1342,215 @@ impl ShareClient {
             "held": self.held.borrow().len(),
         });
         js_sys::JSON::parse(&out.to_string())
+    }
+
+    /// Hand back bytes this tab already fetched, so it can seed them.
+    ///
+    /// **The point of the whole design.** A download, a ZIP of a folder and a
+    /// preview all pull the same bytes through the same reader; without this
+    /// they were thrown away and pressing Seed pulled them a second time.
+    ///
+    /// `offset` is where `bytes` sit in the file at `index`. Only chunks lying
+    /// **wholly** inside the supplied range are kept — a partial chunk cannot
+    /// be addressed, so it is dropped rather than stored under a guess. Feeding
+    /// sequential 256 `KiB` pieces from the start therefore keeps every one of
+    /// them, since that is exactly four aligned chunks.
+    ///
+    /// Cheap to call and safe to ignore: a failure here costs seeding, never
+    /// the transfer that produced the bytes.
+    ///
+    /// # Errors
+    /// Storage is unavailable. A verification mismatch is *not* an error — it
+    /// means these bytes are not the file this tab thinks they are, and they
+    /// are silently skipped rather than stored under an address they do not
+    /// match.
+    pub async fn keep(&self, index: u32, offset: u64, bytes: Vec<u8>) -> Result<(), JsValue> {
+        let store = self.open_store().await?;
+        let Some(row) = self.row_for(index, store.as_ref()).await? else {
+            return Ok(());
+        };
+        self.store_row_and_chunks(store.as_ref(), index, &row, offset, &bytes)
+            .await?;
+        // Bind the row to this file version, or a reload would find a store
+        // full of chunks and no way to tell which file they belong to.
+        if let Ok((_, manifest)) = self.fetch_manifest().await
+            && let Some(entry) = manifest.files.get(index as usize)
+        {
+            let _ = store.set_bind(&file_id(entry), row.root()).await;
+        }
+        Ok(())
+    }
+
+    /// Publish what this tab now holds, in the order that keeps it honest.
+    ///
+    /// Serving before advertising: the seeder must be able to answer for a
+    /// chunk by the time the card claims it, or a reader lands on `BadIndex`.
+    pub async fn republish_holdings(&self) -> Result<(), JsValue> {
+        let (bytes, manifest) = self.fetch_manifest().await?;
+        let store = self.open_store().await?;
+        self.republish(&bytes, &manifest, store).await
+    }
+
+    /// What share of each known slot this tab holds, as `{ index: fraction }`.
+    ///
+    /// Fractions rather than flags, because a partial holding is now a real
+    /// state that a peer can serve from: a cancelled download seeds what it
+    /// got, and a view that showed nothing for it would understate the swarm
+    /// exactly where it matters most.
+    ///
+    /// Only slots this tab has a row for appear. An absent slot is "we know
+    /// nothing about that file", which is not the same as holding none of it.
+    ///
+    /// # Errors
+    /// Storage is unavailable — which costs this view, never the share.
+    pub async fn coverage_map(&self) -> Result<JsValue, JsValue> {
+        let Ok(store) = self.open_store().await else {
+            return js_sys::JSON::parse("{}");
+        };
+        let rows = self.rows.borrow().clone();
+        let mut out = serde_json::Map::new();
+        for (index, row) in &rows {
+            let fraction = store
+                .coverage(row.root())
+                .await
+                .map_or(0.0, |coverage| coverage.fraction());
+            if let Some(number) = serde_json::Number::from_f64(fraction) {
+                out.insert(index.to_string(), serde_json::Value::Number(number));
+            }
+        }
+        js_sys::JSON::parse(&serde_json::Value::Object(out).to_string())
+    }
+
+    /// The row for `index`, from memory, then the store, then the peer.
+    async fn row_for(&self, index: u32, store: &IdbStore) -> Result<Option<ChunkMap>, JsValue> {
+        if let Some(row) = self.rows.borrow().get(&index) {
+            return Ok(Some(row.clone()));
+        }
+        if let Some(row) = self.fetch_chunk_map(index).await? {
+            let _ = store.put_map(&row).await;
+            self.remember_row(index, &row);
+            return Ok(Some(row));
+        }
+        Ok(None)
+    }
+
+    fn remember_row(&self, index: u32, row: &ChunkMap) {
+        self.rows.borrow_mut().insert(index, row.clone());
+    }
+
+    /// Store whichever whole chunks of `row` lie inside `bytes` at `offset`.
+    async fn store_row_and_chunks(
+        &self,
+        store: &IdbStore,
+        index: u32,
+        row: &ChunkMap,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), JsValue> {
+        let end = offset.saturating_add(bytes.len() as u64);
+        for position in 0..row.len() {
+            let range = row.range_of(position);
+            // Wholly inside, or not at all: half a chunk has no address.
+            if range.start < offset || range.end > end {
+                continue;
+            }
+            let from = usize::try_from(range.start - offset).unwrap_or(usize::MAX);
+            let to = usize::try_from(range.end - offset).unwrap_or(usize::MAX);
+            let Some(slice) = bytes.get(from..to) else {
+                continue;
+            };
+            let Some(address) = row.leaf(position) else {
+                continue;
+            };
+            // Bytes that do not address what the row says are not this file.
+            // Skipped rather than stored, and not an error: the caller was
+            // reading a file that changed underneath it.
+            if chunk_hash(slice) != address {
+                continue;
+            }
+            store
+                .put(address, slice)
+                .await
+                .map_err(|error| err("storing a chunk", &error))?;
+        }
+        let _ = store.put_map(row).await;
+        self.remember_row(index, row);
+        Ok(())
+    }
+
+    /// One chunk, by address if the peer can do that, else by byte range.
+    ///
+    /// The fallback exists because a peer may serve `OP_READ` and nothing else
+    /// — an older producer, or one with no chunk table. Bytes taken that way
+    /// are still verified against the row before they are used.
+    async fn fetch_or_read_chunk(
+        &self,
+        row: &ChunkMap,
+        index: u32,
+        position: usize,
+        address: ChunkHash,
+    ) -> Result<Vec<u8>, JsValue> {
+        if let Some(bytes) = self.fetch_chunk(address).await?
+            && chunk_hash(&bytes) == address
+        {
+            return Ok(bytes);
+        }
+        let range = row.range_of(position);
+        let len = u32::try_from(range.end - range.start)
+            .map_err(|_| JsValue::from_str("chunk length over u32"))?;
+        let bytes = self.read_exact_range(index, range.start, len).await?;
+        if chunk_hash(&bytes) != address {
+            return Err(JsValue::from_str(
+                "a peer answered with bytes that do not match the file's own addresses",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Read exactly `len` bytes at `offset`, looping over the protocol cap.
+    async fn read_exact_range(
+        &self,
+        index: u32,
+        offset: u64,
+        len: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let mut out = Vec::with_capacity(len as usize);
+        while (out.len() as u32) < len {
+            let want = len - out.len() as u32;
+            let piece = self.read(index, offset + out.len() as u64, want).await?;
+            if piece.is_empty() {
+                return Err(JsValue::from_str(
+                    "the peer stopped short of the size the manifest describes",
+                ));
+            }
+            out.extend_from_slice(&piece);
+        }
+        Ok(out)
+    }
+
+    /// Adopt what this tab holds into the seeder, then advertise it.
+    async fn republish(
+        &self,
+        bytes: &[u8],
+        manifest: &MountManifest,
+        store: Rc<IdbStore>,
+    ) -> Result<(), JsValue> {
+        let mut held = BTreeSet::new();
+        let rows = self.rows.borrow().clone();
+        for (index, row) in &rows {
+            if let Ok(coverage) = store.coverage(row.root()).await
+                && coverage.is_complete()
+            {
+                held.insert(*index);
+            }
+        }
+        *self.held.borrow_mut() = held;
+        // Serving before advertising: the seeder must answer for a chunk by the
+        // time the card claims it, or a reader lands on `BadIndex`.
+        self.seeder
+            .update(Rc::new(bytes.to_vec()), rows, store);
+        self.publish_serving(bytes, manifest).await;
+        Ok(())
     }
 
     /// Manifest indices this tab holds in full, and can seed.
@@ -1340,25 +1579,23 @@ impl ShareClient {
         };
         // Deliberately does *not* create a database — only adopts one already
         // there. Browsing a share must not leave storage behind.
-        let Ok(store) = IdbStore::open(&self.store_name()).await else {
+        let Ok(Some(store)) = IdbStore::adopt(&self.store_name()).await else {
             return Ok(());
         };
-        let held = held_in_store(&store, &manifest).await;
-        *self.held.borrow_mut() = held;
         let store = Rc::new(store);
+        // Rows come from the store, never from an in-memory tally: a tally that
+        // lost an entry to the reload would make this tab claim less than it
+        // has, and would make a later sweep delete more than it should.
+        let rows = rows_in_store(store.as_ref(), &manifest).await;
+        *self.rows.borrow_mut() = rows;
         *self.store.borrow_mut() = Some(Rc::clone(&store));
         // A tab that seeded in an earlier session re-persists the (possibly
-        // newer) manifest on its next healthy visit, keeping the sidecar
-        // fresh for the next resurrection.
-        if !self.held.borrow().is_empty() {
-            persist_manifest(&self.token, &store, &bytes).await;
+        // newer) manifest on its next healthy visit, keeping the sidecar fresh
+        // for the next resurrection.
+        if !self.rows.borrow().is_empty() {
+            persist_manifest(&self.token, store.as_ref(), &bytes).await;
         }
-        // Same order as `sync`: serve first, then advertise.
-        let held = self.held.borrow().clone();
-        self.seeder
-            .update(Rc::new(bytes.clone()), &manifest, store, &held);
-        self.publish_serving(&bytes, &manifest).await;
-        Ok(())
+        self.republish(&bytes, &manifest, store).await
     }
 
     /// Where this share's blocks live. See [`store_name_for`].
@@ -1423,35 +1660,82 @@ impl ShareClient {
         Ok(out)
     }
 
-    /// The root the origin published for `index`, if it can vouch for one.
-    async fn fetch_hash(&self, index: u32) -> Result<Option<[u8; 32]>, JsValue> {
+    /// The chunk row a peer publishes for `index`, if it can address one.
+    ///
+    /// `None` is ordinary: a peer with no chunk table, an index out of range,
+    /// or a file that moved. All three mean "fall back to reading bytes", which
+    /// is what the caller does.
+    async fn fetch_chunk_map(&self, index: u32) -> Result<Option<ChunkMap>, JsValue> {
         let (mut send, mut recv) = self
             .connection
             .open_bi()
             .await
-            .map_err(|error| err("open hash stream", &error))?;
-        send.write_all(&framing::encode_hash_request(&self.token, index))
+            .map_err(|error| err("open chunk map stream", &error))?;
+        send.write_all(&framing::encode_chunk_map_request(&self.token, index))
             .await
-            .map_err(|error| err("send hash request", &error))?;
+            .map_err(|error| err("send chunk map request", &error))?;
         send.finish().map_err(|error| err("finish", &error))?;
 
         let mut status = [0u8; 1];
         if recv.read_exact(&mut status).await.is_err() {
-            // A stream closed unanswered: a seeder, or a producer from before
-            // the op. Both read as "cannot vouch" — which sync treats as
-            // ordinary — not as a failure that would abort the whole sync.
+            // A stream closed unanswered is a peer that predates the op. Reads
+            // as "cannot address", which every caller already handles, rather
+            // than as a failure that would abort the whole sync.
             return Ok(None);
         }
-        // Anything but Ok means "cannot vouch", which is ordinary — the origin
-        // hashes lazily. Only a protocol failure is an error.
         if status[0] != agent_share_proto::manifest::ReadStatus::Ok.to_byte() {
             return Ok(None);
         }
-        let mut root = [0u8; 32];
-        recv.read_exact(&mut root)
+        let len = read_len(&mut recv, framing::MAX_CHUNK_MAP_BYTES).await?;
+        let mut body = vec![0u8; len as usize];
+        recv.read_exact(&mut body)
             .await
-            .map_err(|error| err("read root", &error))?;
-        Ok(Some(root))
+            .map_err(|error| err("read chunk map", &error))?;
+        let (root, size, addresses) = framing::decode_chunk_map(&body)
+            .map_err(|error| JsValue::from_str(&format!("{error}")))?;
+        let leaves: Vec<ChunkHash> = addresses.into_iter().map(ChunkHash::from_bytes).collect();
+        // The root is recomputed from the row rather than taken on trust, so a
+        // peer whose row and root disagree is caught here instead of at every
+        // later verification.
+        let row = ChunkMap::from_leaves(leaves, size)
+            .map_err(|error| JsValue::from_str(&format!("{error}")))?;
+        if row.root().as_bytes() != &root {
+            return Err(JsValue::from_str(
+                "a peer sent a chunk row whose root does not match its own addresses",
+            ));
+        }
+        Ok(Some(row))
+    }
+
+    /// One chunk from the connected peer, by address alone.
+    ///
+    /// `None` means "I do not hold that", which is how a peer holding part of a
+    /// file declines the parts it lacks. The bytes are **not** trusted here —
+    /// the caller checks them against the address it asked for.
+    async fn fetch_chunk(&self, address: ChunkHash) -> Result<Option<Vec<u8>>, JsValue> {
+        let (mut send, mut recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|error| err("open chunk stream", &error))?;
+        send.write_all(&framing::encode_chunk_request(&self.token, address.as_bytes()))
+            .await
+            .map_err(|error| err("send chunk request", &error))?;
+        send.finish().map_err(|error| err("finish", &error))?;
+
+        let mut status = [0u8; 1];
+        if recv.read_exact(&mut status).await.is_err() {
+            return Ok(None);
+        }
+        if status[0] != agent_share_proto::manifest::ReadStatus::Ok.to_byte() {
+            return Ok(None);
+        }
+        let len = read_len(&mut recv, framing::MAX_CHUNK_LEN).await?;
+        let mut bytes = vec![0u8; len as usize];
+        recv.read_exact(&mut bytes)
+            .await
+            .map_err(|error| err("read chunk", &error))?;
+        Ok(Some(bytes))
     }
 
     /// Connect using the transport encoded in the ticket and measure for
@@ -2332,11 +2616,6 @@ fn store_name_for(token: &[u8; SECRET_LEN]) -> String {
     format!("agent-share/{}", &share_mesh_key(token)[..16])
 }
 
-/// The store's reserved slot for the origin's manifest bytes.
-///
-/// `"\0"` cannot occur in a real `rel_path` — both scanners refuse NUL — so
-/// this name can never collide with a file the share holds.
-const MANIFEST_STORE_KEY: &str = "\0manifest";
 
 /// Where the manifest *locator* lives: `localStorage`, beside the store.
 ///
@@ -2568,19 +2847,35 @@ fn roster_after_failed_lane(list: Vec<KnownSeeder>, refusals: &[Refusal]) -> Vec
 /// source — the web twin of the native mirror's sidecar. Best-effort: a full
 /// quota or private-mode refusal costs resurrection, never the session.
 async fn persist_manifest(token: &[u8; SECRET_LEN], store: &IdbStore, bytes: &[u8]) {
-    let file = FileId {
-        key: MANIFEST_STORE_KEY.to_owned(),
-        size: bytes.len() as u64,
-        mtime: 0,
-    };
-    if let Err(error) = store.insert_complete(&file, bytes).await {
+    // The manifest is stored as a file like any other: a row of addresses plus
+    // its chunks. No special case, no second storage shape, and the row's root
+    // is the locator — so a manifest that was written half-way simply fails to
+    // reassemble rather than resurrecting a tree nobody ever published.
+    let row = ChunkMap::build(bytes);
+    for position in 0..row.len() {
+        let range = row.range_of(position);
+        let (Some(address), Some(slice)) = (
+            row.leaf(position),
+            bytes.get(range.start as usize..range.end as usize),
+        ) else {
+            return;
+        };
+        if let Err(error) = store.put(address, slice).await {
+            web_sys::console::debug_1(&JsValue::from_str(&format!(
+                "[share] persisting the manifest failed: {error}"
+            )));
+            return;
+        }
+    }
+    if let Err(error) = store.put_map(&row).await {
         web_sys::console::debug_1(&JsValue::from_str(&format!(
-            "[share] persisting the manifest failed: {error}"
+            "[share] persisting the manifest row failed: {error}"
         )));
         return;
     }
     let locator = serde_json::json!({
         "size": bytes.len(),
+        "root": row.root().to_hex(),
         "tree": agent_share_proto::manifest::manifest_fingerprint(bytes),
     });
     if let Some(storage) = local_storage() {
@@ -2598,19 +2893,19 @@ async fn load_persisted_manifest(
     let storage = local_storage()?;
     let raw = storage.get_item(&manifest_locator_key(token)).ok()??;
     let locator: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let size = locator.get("size")?.as_u64()?;
     let tree = locator.get("tree")?.as_str()?;
-    // Adopt-only: `IdbStore::open` creates on demand, but a tab reaching this
-    // path has a locator, which only a sync in this origin could have written
-    // — so the database exists.
-    let store = Rc::new(IdbStore::open(&store_name_for(token)).await.ok()?);
-    let file = FileId {
-        key: MANIFEST_STORE_KEY.to_owned(),
-        size,
-        mtime: 0,
-    };
-    let len = u32::try_from(size).ok()?;
-    let bytes = seed::read_window(&store, &file, 0, len).await.ok()?;
+    let root = Root::from_hex(locator.get("root")?.as_str()?).ok()?;
+    // Adopt-only: a tab reaching this path has a locator, which only a sync in
+    // this origin could have written — so the database exists, and creating one
+    // here would leave storage behind for somebody who merely browsed.
+    let store = Rc::new(IdbStore::adopt(&store_name_for(token)).await.ok()??);
+    let row = store.map(root).await.ok()??;
+    let mut bytes = Vec::with_capacity(row.size() as usize);
+    for position in 0..row.len() {
+        let address = row.leaf(position)?;
+        let chunk = store.get(address).await.ok()??;
+        bytes.extend_from_slice(&chunk);
+    }
     if agent_share_proto::manifest::manifest_fingerprint(&bytes) != tree {
         return None;
     }
@@ -2618,20 +2913,34 @@ async fn load_persisted_manifest(
     Some((bytes, manifest, store))
 }
 
-/// Manifest indices the store holds **in full** — what this tab can seed.
-async fn held_in_store(store: &IdbStore, manifest: &MountManifest) -> BTreeSet<u32> {
-    let mut held = BTreeSet::new();
+/// Chunk rows this store already holds for `manifest`, by manifest index.
+///
+/// The live set, derived from **persisted rows** rather than from anything this
+/// session happened to fetch: a tally that lost an entry to a reload would make
+/// this tab claim less than it has, and would make a later sweep delete more
+/// than it should.
+///
+/// A row is found by re-deriving the file's root from its own bytes, which the
+/// store cannot do — so the mapping from slot to root is recovered by asking
+/// the store for a row bound to that file version.
+async fn rows_in_store(store: &IdbStore, manifest: &MountManifest) -> HashMap<u32, ChunkMap> {
+    let mut rows = HashMap::new();
     for (index, entry) in manifest.files.iter().enumerate() {
         if entry.is_tombstone() {
             continue;
         }
-        if is_held(store, &file_id(entry)).await
-            && let Ok(index) = u32::try_from(index)
+        let Ok(index) = u32::try_from(index) else {
+            continue;
+        };
+        // The bind table is what survives a reload: it maps this file version
+        // to the root whose row describes it.
+        if let Ok(Some(root)) = store.bind(&file_id(entry)).await
+            && let Ok(Some(row)) = store.map(root).await
         {
-            held.insert(index);
+            rows.insert(index, row);
         }
     }
-    held
+    rows
 }
 
 /// A share-mesh membership waiting for peers, alive across connect attempts.
@@ -3110,14 +3419,34 @@ async fn connect_via_seeder(
         if seeder.manifest_bytes().is_none()
             && let Some((bytes, manifest, store)) = load_persisted_manifest(&token).await
         {
-            let held = held_in_store(&store, &manifest).await;
-            if !held.is_empty() {
+            let rows = rows_in_store(&store, &manifest).await;
+            web_sys::console::debug_1(&JsValue::from_str(&format!(
+                "[share] re-arm: {} rows recovered from {} manifest slots",
+                rows.len(),
+                manifest.files.len()
+            )));
+            if !rows.is_empty() {
+                // Only complete slots go on the card, which is a *discovery*
+                // hint: partial holdings are real and servable, but a reader
+                // learns about them by asking, not from a CRDT that would keep
+                // every intermediate state forever.
+                let mut held = Vec::new();
+                for (index, row) in &rows {
+                    if let Ok(coverage) = store.coverage(row.root()).await
+                        && coverage.is_complete()
+                    {
+                        held.push(*index);
+                    }
+                }
                 let fingerprint = agent_share_proto::manifest::manifest_fingerprint(&bytes);
-                let serving = agent_share_proto::serving::encode_serving(
-                    &held.iter().copied().collect::<Vec<u32>>(),
-                    manifest.files.len(),
-                );
-                seeder.update(Rc::new(bytes), &manifest, store, &held);
+                let serving =
+                    agent_share_proto::serving::encode_serving(&held, manifest.files.len());
+                web_sys::console::debug_1(&JsValue::from_str(&format!(
+                    "[share] re-arm: advertising tree {fingerprint} serving {serving:?}                      ({} slots held)",
+                    held.len()
+                )));
+                // Serving before advertising, as everywhere else.
+                seeder.update(Rc::new(bytes), rows, store);
                 mesh_peer.set_tree(fingerprint).await;
                 mesh_peer.set_serving(serving).await;
             }
@@ -4197,21 +4526,6 @@ pub(crate) fn file_id(entry: &agent_share_proto::manifest::FileEntry) -> FileId 
     }
 }
 
-/// Whether the store holds every byte of this file version.
-///
-/// Anything short of complete reads as not held: a partially fetched file
-/// cannot be handed to a reader as a file, and advertising it whole would send
-/// them somewhere that cannot answer.
-async fn is_held(store: &IdbStore, file: &FileId) -> bool {
-    let Ok(Some(root)) = store.bind(file).await else {
-        return false;
-    };
-    let Ok(present) = store.present(root).await else {
-        return false;
-    };
-    extent_of(file.size).is_subset(&present)
-}
-
 async fn wait_ms(millis: i32) {
     // `setTimeout` off the global rather than the `Window`: identical in a
     // page, and it keeps this future resolvable in the node test runner,
@@ -4532,6 +4846,29 @@ fn js_stage(context: &str, error: JsValue) -> JsValue {
 }
 
 /// Read the `status(1) ‖ len(u32)` prefix every response carries.
+/// Read just the length that follows a status byte the caller already took.
+///
+/// Split from [`read_header`] because the chunk ops read their status first:
+/// a non-`Ok` status there is "I cannot answer for that", which is ordinary
+/// traffic rather than a protocol failure, and folding the two together would
+/// turn every polite refusal into an error.
+async fn read_len(
+    recv: &mut fofoca::iroh::endpoint::RecvStream,
+    cap: u32,
+) -> Result<u32, JsValue> {
+    let mut raw = [0u8; 4];
+    recv.read_exact(&mut raw)
+        .await
+        .map_err(|error| err("read response length", &error))?;
+    let len = u32::from_le_bytes(raw);
+    if len > cap {
+        return Err(JsValue::from_str(&format!(
+            "a peer answered with {len} bytes, over the {cap}-byte cap"
+        )));
+    }
+    Ok(len)
+}
+
 async fn read_header(
     recv: &mut fofoca::iroh::endpoint::RecvStream,
     cap: u32,

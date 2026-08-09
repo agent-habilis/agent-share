@@ -202,6 +202,7 @@ async fn bind_bench(
         // protecting — so it never carries a password.
         flags: 0,
         mesh_id: None,
+        author: None,
     };
     Ok((endpoint, ticket, secret, webrtc))
 }
@@ -766,6 +767,7 @@ mod tests {
             kind: TICKET_KIND_BENCH_RELAY,
             flags: 0,
             mesh_id: None,
+            author: None,
         };
 
         let transport = BenchTransport::from_ticket_kind(ticket.kind).unwrap();
