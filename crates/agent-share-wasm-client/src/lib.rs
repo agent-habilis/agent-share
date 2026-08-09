@@ -1568,20 +1568,19 @@ impl ShareClient {
     /// transfers, so a peer that arrived a moment ago is usable and one that
     /// left is not offered.
     ///
-    /// # Known limitation: browser peers currently refuse the dial
+    /// # Take the channel before offering one
     ///
-    /// Against another tab this reliably fails with *"a WebRTC session with you
-    /// already exists; dial the custom addr"*. Two tabs on one mesh already
-    /// hold a data channel, so the remote refuses a fresh JSEP round — but our
-    /// own `mount_hub.has_session` says no session exists, so the direct dial
-    /// the refusal recommends has nothing to route over either. The two lanes
-    /// disagree about what is attached, and reconciling them is work in the
-    /// transport, not here.
+    /// Against another tab, a fresh JSEP round is refused outright: two tabs on
+    /// one mesh already hold a data channel, and `produce::serve_signal` turns
+    /// a second offer away with *"a WebRTC session with you already exists;
+    /// dial the custom addr"*. So the custom addr is dialled first.
     ///
-    /// The consequence is bounded and safe: no extra peer joins, every chunk
-    /// falls through to the home connection, and transfers complete exactly as
-    /// they did before. The scheduling half above is finished and tested; this
-    /// is the half that does not yet pay off.
+    /// It has to be tried on **both** of this tab's lanes. The remote's mount
+    /// and mesh lanes share one hub, so whichever of ours reached it first owns
+    /// the session and the other has nothing to route over — and which one that
+    /// was is not knowable from here. Dialling only the mount lane looks
+    /// correct, always failed, and fell through to a negotiation that could
+    /// never be accepted.
     async fn dial_swarm(&self) {
         if self.swarm_dialled.replace(true) {
             return;
@@ -1644,25 +1643,34 @@ impl ShareClient {
             let Ok(id) = endpoint.parse::<fofoca::protocol::iroh_base::EndpointId>() else {
                 continue;
             };
-            // Try the channel first, before offering. Two tabs on one mesh
+            // Take the channel before offering one. Two tabs on one mesh
             // usually *already* have a data channel, and a peer in that state
-            // refuses a fresh JSEP round outright — "a WebRTC session with you
+            // refuses a fresh JSEP round outright: "a WebRTC session with you
             // already exists; dial the custom addr". Its own instruction, taken
-            // literally. A dial that finds no session simply fails and falls
-            // through to negotiating one.
-            let existing = self
+            // literally.
+            //
+            // **Which lane holds that session is not knowable from here.** The
+            // remote's mount lane and mesh lane share one hub — `serve_signal`
+            // says so where it writes that refusal — so whichever of ours
+            // reached the peer first owns the session, and the other has
+            // nothing to route over. Trying only the mount lane is what made
+            // this fall through to a JSEP round that could never be accepted.
+            let channel = EndpointAddr::from_parts(id, [TransportAddr::Custom(custom_addr(id))]);
+            let mut dialled = self
                 ._endpoint
-                .connect(
-                    EndpointAddr::from_parts(id, [TransportAddr::Custom(custom_addr(id))]),
-                    MOUNT_ALPN,
-                )
-                .await;
-            let dialled = match existing {
-                Ok(connection) => Ok(connection),
-                Err(_) => {
-                    seeder_webrtc_dial(lanes, id, &relays, f64::from(SEEDER_CHANNEL_WAIT_MS)).await
-                }
-            };
+                .connect(channel.clone(), MOUNT_ALPN)
+                .await
+                .map_err(|error| err("dial a swarm peer over the mount lane", &error));
+            if dialled.is_err() {
+                dialled = signal
+                    .connect(channel, MOUNT_ALPN)
+                    .await
+                    .map_err(|error| err("dial a swarm peer over the mesh lane", &error));
+            }
+            if dialled.is_err() {
+                dialled =
+                    seeder_webrtc_dial(lanes, id, &relays, f64::from(SEEDER_CHANNEL_WAIT_MS)).await;
+            }
             match dialled {
                 Ok(connection) => {
                     web_sys::console::log_1(&JsValue::from_str(&format!(
