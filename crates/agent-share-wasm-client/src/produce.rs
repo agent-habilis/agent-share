@@ -16,6 +16,7 @@ use agent_share_proto::framing::{
     OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_MANIFEST,
     WEBRTC_SIGNAL_ALPN, decode_bench_request_prefix, encode_chunk_map, encode_have,
 };
+use agent_share_proto::authorship::{SIGNATURE_LEN, SignedManifest};
 use agent_share_proto::lookup::LookupOpts;
 use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
@@ -105,12 +106,17 @@ type Shared = Rc<RefCell<ProducerShared>>;
 pub(crate) type WatchFeed = (Vec<u8>, mpsc::UnboundedReceiver<Rc<Vec<u8>>>);
 
 pub(crate) trait ServeSource: Clone + 'static {
-    /// The encoded manifest to answer `OP_MANIFEST` with, **verbatim** — for a
-    /// seeder these are the origin's bytes, never a re-encode, because the
-    /// fingerprint and every READ index are defined over them. `None` refuses
-    /// the request (a seeder that has not synced yet has nothing to vouch
-    /// for), which closes the stream rather than inventing an answer.
-    fn manifest_bytes(&self) -> Option<Vec<u8>>;
+    /// The body to answer `OP_MANIFEST` with: `version ‖ signature ‖ manifest`.
+    ///
+    /// **Verbatim** — for a seeder this is the origin's envelope, never a
+    /// re-wrap, because the fingerprint and every READ index are defined over
+    /// the manifest inside it and the signature over both. A browser holds no
+    /// authorship key, so a seeder that dropped the signature could never hand
+    /// the next reader anything it could check.
+    ///
+    /// `None` refuses the request (a seeder that has not synced yet has nothing
+    /// to vouch for), which closes the stream rather than inventing an answer.
+    fn manifest_envelope(&self) -> Option<Vec<u8>>;
     /// Register a watcher: the opening frame plus the update stream, or `None`
     /// to refuse. A seeder's stream only carries frames when its own snapshot
     /// moves (it follows the origin, and freezes when the origin dies) — it
@@ -141,8 +147,20 @@ pub(crate) trait ServeSource: Clone + 'static {
 }
 
 impl ServeSource for Shared {
-    fn manifest_bytes(&self) -> Option<Vec<u8>> {
-        Some(self.borrow().state.encoded().to_vec())
+    /// A browser-produced share is **unsigned**: there is no key here to sign
+    /// with and nowhere durable to keep one, so the envelope carries a zero
+    /// signature and the ticket this producer hands out names no author. A
+    /// reader therefore never checks, which is the honest outcome — the
+    /// alternative would be a signature nobody could attribute to anyone.
+    fn manifest_envelope(&self) -> Option<Vec<u8>> {
+        Some(
+            SignedManifest {
+                version: 0,
+                signature: [0u8; SIGNATURE_LEN],
+                manifest: self.borrow().state.encoded().to_vec(),
+            }
+            .encode(),
+        )
     }
 
     fn subscribe(&self) -> Option<WatchFeed> {
@@ -1034,7 +1052,7 @@ async fn serve_stream<S: ServeSource>(
             // A source with nothing to vouch for closes the stream unanswered
             // rather than inventing a reply — the caller's read fails and it
             // moves to its next candidate.
-            let Some(manifest_bytes) = source.manifest_bytes() else {
+            let Some(manifest_bytes) = source.manifest_envelope() else {
                 return Ok(());
             };
             write_ok_body(&mut send, &manifest_bytes).await?;

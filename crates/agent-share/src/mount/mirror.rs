@@ -104,6 +104,16 @@ pub(super) const ORIGIN_AUTH: &str = "origin.auth";
 /// password), but it is written beside the two that are.
 pub(super) const ORIGIN_MESH: &str = "origin.mesh";
 
+/// Filename holding the creator's **authorship public key**, so the ticket this
+/// copy hands out names the same creator the original ticket did.
+///
+/// The public half only, and the only file in the sidecar that is not a
+/// capability: it verifies manifests and signs nothing. That asymmetry is the
+/// point of the key split — a mirror is given everything it needs to serve the
+/// share and nothing that would let it publish a new version of it. See
+/// [`agent_share_proto::authorship`].
+pub(super) const ORIGIN_AUTHOR: &str = "origin.author";
+
 /// Whether `rel_path` was asked for.
 ///
 /// An empty filter means everything, so the ordinary whole-share mirror needs
@@ -143,6 +153,9 @@ pub(crate) async fn mirror(
     let auth = super::consume::redeem_auth(&ticket, password)?.auth;
     // Kept so the copy re-serves the origin's mesh rather than minting a rival.
     let mesh_id = ticket.mesh_id.clone();
+    // The creator's public key, so the copy names the same author. Public: this
+    // is what a copy is *given*, unlike the key that would let it publish.
+    let author = ticket.author;
     let endpoint = build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false).await?;
     add_peer_addr(&endpoint, ticket.addr.clone())?;
     let client = RemoteClient::new(endpoint.clone(), ticket, auth);
@@ -150,7 +163,19 @@ pub(crate) async fn mirror(
     // Whatever happens below, close the endpoint. Dropping it instead aborts
     // ungracefully and prints an iroh error over the top of ours, which buries
     // the reason a mirror actually failed.
-    let outcome = copy_all(&client, dest, only, secret, auth, mesh_id.as_deref(), json).await;
+    let outcome = copy_all(
+        &client,
+        dest,
+        only,
+        &OriginFacts {
+            secret,
+            auth,
+            mesh_id: mesh_id.as_deref(),
+            author,
+        },
+        json,
+    )
+    .await;
     // Read before the endpoint closes: the close reason lives on the connection
     // the client is holding, and closing the endpoint takes it with it.
     let refused = client.refused_for_password().await;
@@ -168,20 +193,39 @@ pub(crate) async fn mirror(
     Ok(())
 }
 
+/// What the copy has to remember about the share it came from, so that
+/// `agent-share serve` on it rejoins that share rather than starting a rival.
+///
+/// Grouped because they travel together and are written together: every one of
+/// them lands in the sidecar before a single byte of content is fetched.
+struct OriginFacts<'a> {
+    secret: [u8; agent_share_proto::framing::SECRET_LEN],
+    auth: ShareAuth,
+    mesh_id: Option<&'a str>,
+    /// The creator's public key. Not a capability — see [`ORIGIN_AUTHOR`].
+    author: Option<[u8; 32]>,
+}
+
 /// The body of a mirror, so its caller can close the endpoint either way.
 async fn copy_all(
     client: &RemoteClient,
     dest: &Path,
     only: &[String],
-    secret: [u8; agent_share_proto::framing::SECRET_LEN],
-    auth: ShareAuth,
-    mesh_id: Option<&str>,
+    origin: &OriginFacts<'_>,
     json: bool,
 ) -> Result<Tally> {
+    let OriginFacts {
+        secret,
+        auth,
+        mesh_id,
+        author,
+    } = *origin;
     // The *bytes*, not just the decoded struct. A mirror re-serves these
-    // verbatim so its indices stay the origin's — see `LiveTree::mirrored`.
-    let manifest_bytes = client.fetch_manifest_bytes().await?;
-    let manifest = agent_share_proto::manifest::MountManifest::decode(&manifest_bytes)?;
+    // verbatim so its indices stay the origin's — see `LiveTree::mirrored` — and
+    // the creator's signature with them, since a copy has no way to make one.
+    let signed = client.fetch_signed_manifest().await?;
+    let envelope = signed.encode();
+    let manifest = agent_share_proto::manifest::MountManifest::decode(&signed.manifest)?;
     std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
 
     // Directories first, and *all* of them: the manifest lists every directory
@@ -205,9 +249,16 @@ async fn copy_all(
     // one from this directory. Written before any byte is fetched, so even an
     // interrupted mirror is re-servable for what it did get.
     std::fs::create_dir_all(&sidecar).with_context(|| format!("creating {}", sidecar.display()))?;
-    std::fs::write(sidecar.join(ORIGIN_MANIFEST), &manifest_bytes)
+    std::fs::write(sidecar.join(ORIGIN_MANIFEST), &envelope)
         .context("recording the origin manifest")?;
     write_secret(&sidecar.join(ORIGIN_SECRET), &secret).context("recording the share secret")?;
+    // Public, so no 0600 and nothing here a copy could sign with. It is written
+    // so the ticket this copy hands out names the same creator the original did
+    // — otherwise a reader arriving through the copy would have nothing to check
+    // the re-served signature against.
+    if let Some(author) = author {
+        std::fs::write(sidecar.join(ORIGIN_AUTHOR), author).context("recording the author key")?;
+    }
     // Only for a protected share. Its absence is what tells `serve` the secret
     // alone is the credential, so an ordinary mirror is untouched by any of
     // this — no extra file, no extra read.
@@ -315,6 +366,15 @@ pub(super) fn origin_manifest_for(root: &Path) -> Option<Vec<u8>> {
     std::fs::read(sidecar_dir(root).join(ORIGIN_MANIFEST)).ok()
 }
 
+/// Whether `root` is a copy of somebody else's share.
+///
+/// The same question [`origin_manifest_for`] answers, without reading a
+/// manifest that can run to megabytes — the caller that only needs the ruling
+/// asks this one.
+pub(super) fn is_copy(root: &Path) -> bool {
+    sidecar_dir(root).join(ORIGIN_MANIFEST).exists()
+}
+
 /// The credential a mirror of a *protected* share left beside `root`.
 ///
 /// `None` for an ordinary mirror, whose secret is its own credential — so
@@ -327,6 +387,15 @@ pub(super) fn origin_mesh_id_for(root: &Path) -> Option<String> {
         return None;
     }
     Some(trimmed.to_owned())
+}
+
+/// The creator's authorship public key a mirror left beside `root`.
+///
+/// `None` for a copy of an unsigned share, and for a directory that is not a
+/// copy at all — both mean "this producer has no creator to name".
+pub(super) fn origin_author_for(root: &Path) -> Option<[u8; 32]> {
+    let bytes = std::fs::read(sidecar_dir(root).join(ORIGIN_AUTHOR)).ok()?;
+    bytes.try_into().ok()
 }
 
 /// The credential a mirror of a *protected* share left beside `root`.

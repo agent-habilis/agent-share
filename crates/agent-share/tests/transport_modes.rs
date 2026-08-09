@@ -141,12 +141,17 @@ async fn fetch_manifest(
     recv.read_exact(&mut prefix).await.expect("read prefix");
     let len = agent_share_proto::framing::decode_response_header(
         &prefix,
-        agent_share_proto::framing::MAX_MANIFEST_BYTES,
+        agent_share_proto::framing::MAX_SIGNED_MANIFEST_BYTES,
     )
     .expect("manifest header");
     let mut bytes = vec![0u8; usize::try_from(len).expect("fits")];
     recv.read_exact(&mut bytes).await.expect("read manifest");
-    MountManifest::decode(&bytes).expect("decode manifest")
+    // `OP_MANIFEST` answers with `version ‖ signature ‖ manifest`; these tests
+    // are about which transport carried it, so the envelope is unwrapped and
+    // the signature checked elsewhere.
+    let signed = agent_share_proto::authorship::SignedManifest::decode(&bytes)
+        .expect("decode the manifest envelope");
+    MountManifest::decode(&signed.manifest).expect("decode manifest")
 }
 
 async fn read_range(

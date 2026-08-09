@@ -48,32 +48,20 @@ pub(crate) async fn serve(
     if !root.is_dir() {
         bail!("mount serves a directory, not a single file");
     }
-    // A directory a mirror produced carries the origin's manifest beside it.
-    // Re-serving those bytes rather than scanning is what keeps every index
-    // meaning what the origin says it means — and what lets a *partial* mirror
-    // serve at all, since a scan of a half-copy would renumber every slot after
-    // the first missing file.
-    // Adopted below so the copy joins the share it came from instead of
-    // starting a rival one. See `bind`.
-    let inherited_secret = super::mirror::origin_secret_for(&root);
-    // A mirror of a *protected* share also carries the token the origin's
-    // password derived, so it can re-seed without being handed the password a
-    // second time. The password was spent once, at copy time; what survives is
-    // the credential it produced.
-    let inherited_auth = super::mirror::origin_auth_for(&root);
-    // The origin's mesh id, so a re-served copy lands on the same mesh and hands
-    // out the same ticket rather than starting a rival swarm.
-    let inherited_mesh_id = super::mirror::origin_mesh_id_for(&root);
-    if inherited_auth.is_some() && password.is_some() {
-        bail!(
-            "this directory re-serves an existing share, whose password is already \
-             baked into its ticket — drop --password"
-        );
-    }
-    let (tree, description) = open_tree(&root)?;
+    let Inherited {
+        secret: inherited_secret,
+        auth: inherited_auth,
+        mesh_id: inherited_mesh_id,
+    } = inherited_from_copy(&root, password)?;
+    let (authorship, named_author) = authorship_for(&root);
+    let (tree, description) = open_tree(&root, authorship)?;
 
     let lookups = resolve_transfer_lookups(swarm, flags)?;
     let (endpoint, mut ticket, secret, webrtc) = bind(lookups, inherited_secret).await?;
+    ticket.author = named_author;
+    if ticket.author.is_some() {
+        ticket.flags |= agent_share_proto::ticket::TICKET_FLAG_SIGNED;
+    }
 
     // The share's real credential. On an unprotected share this is the ticket
     // secret verbatim, so everything below is byte-for-byte what it was; on a
@@ -233,6 +221,64 @@ pub(crate) async fn serve(
     Ok(())
 }
 
+/// What a copy carries about the share it came from, all of it optional and
+/// all of it absent for an ordinary directory.
+struct Inherited {
+    secret: Option<[u8; SECRET_LEN]>,
+    auth: Option<ShareAuth>,
+    mesh_id: Option<String>,
+}
+
+/// Read the sidecar a mirror left beside `root`, if this directory is a copy.
+///
+/// Every field exists so the copy rejoins the share it came from instead of
+/// starting a rival one: the same secret so the original link still works, the
+/// same token so a protected share re-seeds without being handed the password
+/// again, the same mesh id so the swarm does not split in two.
+///
+/// # Errors
+/// A copy of a protected share was given `--password`. The password was spent
+/// once, at copy time; what survives is the credential it produced, so offering
+/// another almost always means this is the wrong directory.
+fn inherited_from_copy(root: &Path, password: Option<&str>) -> Result<Inherited> {
+    let auth = super::mirror::origin_auth_for(root);
+    if auth.is_some() && password.is_some() {
+        bail!(
+            "this directory re-serves an existing share, whose password is already \
+             baked into its ticket — drop --password"
+        );
+    }
+    Ok(Inherited {
+        secret: super::mirror::origin_secret_for(root),
+        auth,
+        mesh_id: super::mirror::origin_mesh_id_for(root),
+    })
+}
+
+/// The key this producer signs manifests with, and the creator its ticket
+/// names.
+///
+/// **A copy gets a key of `None` and still names an author.** That pairing is
+/// the requirement in one line: a mirror re-serves the signature it was handed
+/// and holds nothing that could make another, so it can serve every byte of the
+/// share and never publish a version of it. An original is the other way round
+/// — it mints a key and names itself.
+///
+/// The key is per-run, like the endpoint key beside it. A restarted origin is a
+/// new creator and hands out a new ticket, which is what `serve` already did
+/// before any of this; persisting it would make a share's identity outlive the
+/// process, and that is a separate feature with its own storage question.
+fn authorship_for(root: &Path) -> (Option<SecretKey>, Option<[u8; 32]>) {
+    if super::mirror::is_copy(root) {
+        return (None, super::mirror::origin_author_for(root));
+    }
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    let key = SecretKey::from_bytes(&bytes);
+    let public = *key.public().as_bytes();
+    (Some(key), Some(public))
+}
+
 /// The tree this directory serves, and the line describing it.
 ///
 /// Two shapes, and which one applies is read off the directory rather than
@@ -245,7 +291,7 @@ pub(crate) async fn serve(
 /// # Errors
 /// The origin manifest is unreadable, the directory cannot be scanned, or the
 /// resulting manifest is past [`super::MAX_MANIFEST_BYTES`].
-fn open_tree(root: &Path) -> Result<(Arc<LiveTree>, String)> {
+fn open_tree(root: &Path, author: Option<SecretKey>) -> Result<(Arc<LiveTree>, String)> {
     if let Some(origin_bytes) = super::mirror::origin_manifest_for(root) {
         let tree = Arc::new(LiveTree::mirrored(root.to_path_buf(), origin_bytes)?);
         let (held, total) = tree.coverage();
@@ -269,7 +315,12 @@ fn open_tree(root: &Path) -> Result<(Arc<LiveTree>, String)> {
             human_bytes(u64::from(super::MAX_MANIFEST_BYTES))
         );
     }
-    let tree = Arc::new(LiveTree::new(root.to_path_buf(), manifest, paths));
+    let tree = Arc::new(LiveTree::authored(
+        root.to_path_buf(),
+        manifest,
+        paths,
+        author,
+    ));
     // A watcher that cannot start is not fatal: the share still serves, it just
     // serves the startup snapshot. Losing the whole share over it would be a
     // worse trade than losing liveness.
@@ -481,11 +532,11 @@ async fn serve_stream(
     }
     match header[SECRET_LEN] {
         OP_MANIFEST => {
-            let manifest_bytes = tree.manifest_bytes();
+            let envelope = tree.manifest_envelope();
             send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
-            let len = u32::try_from(manifest_bytes.len()).context("manifest too large")?;
+            let len = u32::try_from(envelope.len()).context("manifest too large")?;
             send.write_all(&len.to_le_bytes()).await?;
-            send.write_all(&manifest_bytes).await?;
+            send.write_all(&envelope).await?;
         }
         OP_WATCH => {
             // Long-lived, unlike every other op: it returns when the consumer

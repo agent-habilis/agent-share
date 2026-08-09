@@ -39,6 +39,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use agent_share_proto::framing::{MAX_READ_LEN, WATCH_FRAME_MANIFEST};
+use agent_share_proto::authorship::SignedManifest;
 use agent_share_proto::manifest::ReadStatus;
 use fofoca_chunks::{ChunkHash, ChunkMap, ChunkSource as _, Coverage, IdbStore, Root};
 use futures::channel::mpsc;
@@ -47,8 +48,15 @@ use crate::produce::{ServeSource, WatchFeed};
 
 /// What this tab can serve, once it holds something.
 struct SeederState {
-    /// The origin's manifest bytes, verbatim. See the module docs.
-    manifest: Rc<Vec<u8>>,
+    /// The origin's `OP_MANIFEST` body, verbatim: `version ‖ signature ‖
+    /// manifest`. See the module docs.
+    ///
+    /// Kept whole rather than reduced to the manifest, because the signature is
+    /// the only authority a seeder has. This tab cannot sign — no browser holds
+    /// the creator's key — so a seeder that stored only the manifest could
+    /// serve the right bytes and still be unable to prove they were the
+    /// creator's.
+    envelope: Rc<Vec<u8>>,
     /// Chunk rows for slots this tab knows about, by manifest index.
     rows: HashMap<u32, ChunkMap>,
     /// Root → the slot it describes, for answering `OP_HAVE`.
@@ -98,7 +106,7 @@ impl SeederShared {
     /// holdings alter what we *serve*, not what the tree *is*.
     pub(crate) fn update(
         &self,
-        manifest_bytes: Rc<Vec<u8>>,
+        envelope: Rc<Vec<u8>>,
         rows: HashMap<u32, ChunkMap>,
         store: Rc<IdbStore>,
     ) {
@@ -113,18 +121,19 @@ impl SeederShared {
         let changed = inner
             .state
             .as_ref()
-            .is_none_or(|state| *state.manifest != *manifest_bytes);
+            .is_none_or(|state| *state.envelope != *envelope);
+        let frame_body = watch_body(&envelope);
         inner.state = Some(SeederState {
-            manifest: Rc::clone(&manifest_bytes),
+            envelope,
             rows,
             slot_of_root,
             in_scope,
             store,
         });
         if changed {
-            let mut frame = Vec::with_capacity(1 + manifest_bytes.len());
+            let mut frame = Vec::with_capacity(1 + frame_body.len());
             frame.push(WATCH_FRAME_MANIFEST);
-            frame.extend_from_slice(&manifest_bytes);
+            frame.extend_from_slice(&frame_body);
             let frame = Rc::new(frame);
             inner
                 .watchers
@@ -133,23 +142,34 @@ impl SeederShared {
     }
 }
 
+/// The manifest inside an `OP_MANIFEST` envelope, for a watch frame.
+///
+/// Watch frames carry the bare manifest on every producer — see
+/// `mount::live::LiveTree::opening_frame` for why — so a seeder unwraps rather
+/// than passing its envelope through. An envelope that does not decode yields
+/// nothing rather than a torn frame; the caller has already accepted it, so
+/// this is a shape guard and not a trust decision.
+fn watch_body(envelope: &[u8]) -> Vec<u8> {
+    SignedManifest::decode(envelope).map_or_else(|_| Vec::new(), |signed| signed.manifest)
+}
+
 impl ServeSource for SeederShared {
-    fn manifest_bytes(&self) -> Option<Vec<u8>> {
+    fn manifest_envelope(&self) -> Option<Vec<u8>> {
         self.0
             .borrow()
             .state
             .as_ref()
-            .map(|state| state.manifest.as_ref().clone())
+            .map(|state| state.envelope.as_ref().clone())
     }
 
     fn subscribe(&self) -> Option<WatchFeed> {
         let mut inner = self.0.borrow_mut();
-        let manifest = Rc::clone(&inner.state.as_ref()?.manifest);
+        let body = watch_body(&inner.state.as_ref()?.envelope);
         let (tx, rx) = mpsc::unbounded();
         inner.watchers.push(tx);
-        let mut frame = Vec::with_capacity(1 + manifest.len());
+        let mut frame = Vec::with_capacity(1 + body.len());
         frame.push(WATCH_FRAME_MANIFEST);
-        frame.extend_from_slice(&manifest);
+        frame.extend_from_slice(&body);
         Some((frame, rx))
     }
 
@@ -251,7 +271,7 @@ mod tests {
     #[test]
     fn an_empty_seeder_refuses_everything() {
         let seeder = SeederShared::new();
-        assert!(seeder.manifest_bytes().is_none());
+        assert!(seeder.manifest_envelope().is_none());
         assert!(seeder.subscribe().is_none());
         futures::executor::block_on(async {
             let (status, bytes) = seeder.answer_read(0, 0, 1024).await;

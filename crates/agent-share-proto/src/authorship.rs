@@ -11,21 +11,34 @@
 //!
 //! # Two keys, not one
 //!
-//! The obvious implementation signs with the endpoint key already in the
-//! ticket. That is wrong here, and the reason is a decision made elsewhere:
-//! `agent-share mirror` writes the origin's endpoint secret into its sidecar,
-//! deliberately, because "serving a copy under a *fresh* secret would make a
-//! second, unrelated share". Anyone permitted to mirror therefore holds that
-//! key — so signing with it would make impersonation *cryptographically
-//! convincing* rather than preventing it.
+//! The obvious implementation signs with the endpoint key the ticket already
+//! names. It is the wrong key, for a reason that is easy to miss: **the endpoint
+//! key is per-peer and per-run.** `mount::produce::bind` mints a fresh one on
+//! every `serve`, and says so — "the secret is the *share* capability, not this
+//! peer's identity, and two peers must never share the latter". So it answers
+//! *who is on the other end of this connection*, which is not the question a
+//! manifest signature asks.
 //!
-//! - The **authorship key** signs manifests. It never leaves the creator's
-//!   machine and is never written to a sidecar.
-//! - The **serving identity** is the endpoint key a mirror reuses so a copy is
-//!   the same share. Unchanged, and still safe to hand out.
+//! Two things follow, and both matter here:
 //!
-//! A mirror can therefore serve every byte and still not publish a new version.
-//! That is exactly the requirement: *mutable share, mutable only by its creator*.
+//! - A seeder has its own endpoint key, so "signed by the endpoint you dialled"
+//!   is a property no seeder can ever have. It could only re-serve the origin's
+//!   signature, at which point the endpoint key was never doing the work.
+//! - An origin that restarts comes up under a new endpoint key. Every manifest
+//!   it published before would stop verifying against the link people already
+//!   hold, and every one after would need a reissued ticket.
+//!
+//! So the two roles are split:
+//!
+//! - The **authorship key** names the share's creator across restarts and
+//!   across peers. It signs manifests, its public half rides the ticket, and it
+//!   is never written to a mirror's sidecar.
+//! - The **serving identity** is the per-peer endpoint key. Untouched.
+//!
+//! A mirror is handed the share's read capability on purpose — that is what
+//! makes a copy an extra source rather than a rival share — but never the
+//! authorship key. So it can serve every byte and still not publish a version.
+//! That is the requirement: *mutable share, mutable only by its creator*.
 //!
 //! # What a signature does not fix
 //!
@@ -36,7 +49,14 @@
 //! where the source may be offline.
 
 use anyhow::{Result, bail};
-use fofoca_protocol::iroh_base::{PublicKey, SecretKey, Signature};
+use fofoca_protocol::iroh_base::Signature;
+
+/// The keypair halves manifests are signed and checked with.
+///
+/// Re-exported so a caller names one type rather than reaching for whichever
+/// of iroh's re-exports is closest — two paths to the same ed25519 key is the
+/// kind of thing that compiles everywhere except where it matters.
+pub use fofoca_protocol::iroh_base::{PublicKey, SecretKey};
 
 /// Domain separator, so a manifest signature cannot be replayed as a signature
 /// over anything else this keypair is ever asked to sign.

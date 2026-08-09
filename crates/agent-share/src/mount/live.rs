@@ -28,6 +28,8 @@ use notify::{RecursiveMode, Watcher as _};
 use tokio::sync::broadcast;
 
 use super::{MAX_DELTA_BYTES, WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
+use agent_share_proto::authorship::SecretKey;
+use agent_share_proto::authorship::{SIGNATURE_LEN, SignedManifest, sign_manifest};
 use agent_share_proto::manifest::{DirEntry, FileEntry, ManifestDelta, MountManifest};
 
 /// How long the tree must sit still before a rescan.
@@ -53,6 +55,11 @@ const UPDATE_BACKLOG: usize = 64;
 /// except by that one deliberate door.
 pub struct LiveTree {
     root: PathBuf,
+    /// The creator's authorship key, held only by an origin that owns this
+    /// share. `None` for a mirror, which re-serves somebody else's signature
+    /// and must not be able to mint one of its own — see
+    /// [`agent_share_proto::authorship`].
+    author: Option<SecretKey>,
     state: RwLock<TreeState>,
     updates: broadcast::Sender<Arc<Vec<u8>>>,
 }
@@ -71,6 +78,34 @@ struct TreeState {
     /// The encoded manifest, kept ready so serving one is a clone of an `Arc`
     /// rather than a re-encode of the whole tree per request.
     encoded: Arc<Vec<u8>>,
+    /// Bumped on every published change, and signed *inside* the envelope, so
+    /// replaying an older manifest the creator really did sign loses to the
+    /// newer one a consumer has already seen.
+    version: u64,
+    /// `version ‖ signature ‖ encoded`, cached beside `encoded` for the same
+    /// reason: `OP_MANIFEST` is answered with an `Arc` clone, never a re-sign.
+    /// Signing per request would put an ed25519 operation over several MB on
+    /// the path of every consumer that connects.
+    envelope: Arc<Vec<u8>>,
+}
+
+/// Wrap manifest bytes in the envelope `OP_MANIFEST` serves.
+///
+/// An unsigned share sends a zero signature rather than a shorter body: one
+/// wire shape means a reader decides whether to verify from the *ticket*, which
+/// it trusts, instead of from the answer, which it does not.
+fn seal(author: Option<&SecretKey>, version: u64, encoded: &[u8]) -> Arc<Vec<u8>> {
+    let signature = author.map_or([0u8; SIGNATURE_LEN], |key| {
+        sign_manifest(key, version, encoded)
+    });
+    Arc::new(
+        SignedManifest {
+            version,
+            signature,
+            manifest: encoded.to_vec(),
+        }
+        .encode(),
+    )
 }
 
 impl std::fmt::Debug for LiveTree {
@@ -83,9 +118,26 @@ impl std::fmt::Debug for LiveTree {
 }
 
 impl LiveTree {
+    /// Seed the tree from the startup scan, unsigned.
+    ///
+    /// Kept for the tests and for any producer with no authorship key; a real
+    /// `serve` goes through [`Self::authored`].
+    pub(super) fn new(root: PathBuf, manifest: MountManifest, paths: Vec<PathBuf>) -> Self {
+        Self::authored(root, manifest, paths, None)
+    }
+
     /// Seed the tree from the startup scan. `paths` is index-aligned with
     /// `manifest.files`, as [`super::scan::scan`] returns them.
-    pub(super) fn new(root: PathBuf, manifest: MountManifest, paths: Vec<PathBuf>) -> Self {
+    ///
+    /// `author` is the creator's signing key. Version numbering starts at 1
+    /// rather than 0 so "never published" and "published once" are different
+    /// numbers on the consumer's side.
+    pub(super) fn authored(
+        root: PathBuf,
+        manifest: MountManifest,
+        paths: Vec<PathBuf>,
+        author: Option<SecretKey>,
+    ) -> Self {
         let index_of = manifest
             .files
             .iter()
@@ -99,15 +151,19 @@ impl LiveTree {
             .collect();
         let served = paths.into_iter().map(Some).collect();
         let encoded = Arc::new(manifest.encode());
+        let envelope = seal(author.as_ref(), 1, &encoded);
         let (updates, _) = broadcast::channel(UPDATE_BACKLOG);
         Self {
             root,
+            author,
             state: RwLock::new(TreeState {
                 dirs: manifest.dirs,
                 files: manifest.files,
                 served,
                 index_of,
                 encoded,
+                version: 1,
+                envelope,
             }),
             updates,
         }
@@ -129,12 +185,18 @@ impl LiveTree {
     /// have that" is the honest answer. Anything laxer would serve a truncated
     /// or stale file under the origin's name.
     ///
-    /// `root` is where the copy lives; `origin_bytes` is exactly what
-    /// `OP_MANIFEST` returned from the origin.
+    /// `root` is where the copy lives; `envelope` is exactly what `OP_MANIFEST`
+    /// returned from the origin, signature included.
+    ///
+    /// **The signature is re-served, never re-made.** A mirror holds no
+    /// authorship key by design, so the only proof it can offer is the one the
+    /// creator already published — which is enough, because a signature says
+    /// who wrote the bytes and not who handed them over.
     ///
     /// # Errors
-    /// `origin_bytes` does not decode as a manifest.
-    pub(super) fn mirrored(root: PathBuf, origin_bytes: Vec<u8>) -> Result<Self> {
+    /// `envelope` does not decode, or its manifest does not.
+    pub(super) fn mirrored(root: PathBuf, envelope: Vec<u8>) -> Result<Self> {
+        let origin_bytes = SignedManifest::decode(&envelope)?.manifest;
         let manifest = MountManifest::decode(&origin_bytes)?;
         let index_of = manifest
             .files
@@ -169,8 +231,10 @@ impl LiveTree {
             .collect();
 
         let (updates, _) = broadcast::channel(UPDATE_BACKLOG);
+        let version = SignedManifest::decode(&envelope)?.version;
         Ok(Self {
             root,
+            author: None,
             state: RwLock::new(TreeState {
                 dirs: manifest.dirs,
                 files: manifest.files,
@@ -180,6 +244,8 @@ impl LiveTree {
                 // different fingerprint for the same tree, and guard #1 reads
                 // that as two peers on different trees.
                 encoded: Arc::new(origin_bytes),
+                version,
+                envelope: Arc::new(envelope),
             }),
             updates,
         })
@@ -224,9 +290,19 @@ impl LiveTree {
         agent_share_proto::serving::encode_serving(&held, total)
     }
 
-    /// The encoded manifest as it stands.
+    /// The encoded manifest as it stands, without the envelope around it.
+    ///
+    /// This is the fingerprint domain — `manifest_fingerprint` is defined over
+    /// exactly these bytes — so it deliberately excludes the version and
+    /// signature. Two peers on the same tree agree here whether or not either
+    /// of them can prove who wrote it.
     pub(super) fn manifest_bytes(&self) -> Arc<Vec<u8>> {
         Arc::clone(&self.read().encoded)
+    }
+
+    /// What `OP_MANIFEST` answers with: `version ‖ signature ‖ manifest`.
+    pub(super) fn manifest_envelope(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.read().envelope)
     }
 
     /// The absolute path behind a READ index, or `None` for an index that is
@@ -248,6 +324,14 @@ impl LiveTree {
 
     /// The full-manifest frame a watcher opens with, and the one it is resent
     /// after falling behind.
+    ///
+    /// **Watch frames carry the bare manifest, not the signed envelope**, and
+    /// that is not an oversight. A watch stream is followed against the origin
+    /// and nowhere else — `consume::watch_tree` opens it on the origin client,
+    /// and the browser client says the same at its own call site — so the
+    /// endpoint the ticket names has already authenticated it. Wrapping it
+    /// would put a signature on the one path where nobody can be lied to, and
+    /// leave the deltas beside it unsigned anyway.
     pub(super) fn opening_frame(&self) -> Vec<u8> {
         Self::manifest_frame(&self.manifest_bytes())
     }
@@ -352,13 +436,15 @@ impl LiveTree {
             return None;
         }
 
-        // Re-encode once per change batch, not per request.
+        // Re-encode and re-sign once per change batch, not per request.
         let refreshed = MountManifest {
             dirs: state.dirs.clone(),
             files: state.files.clone(),
         }
         .encode();
         state.encoded = Arc::new(refreshed);
+        state.version += 1;
+        state.envelope = seal(self.author.as_ref(), state.version, &state.encoded);
 
         let body = delta.encode();
         if u32::try_from(body.len()).is_ok_and(|len| len <= MAX_DELTA_BYTES) {
@@ -436,7 +522,7 @@ pub(super) fn spawn_watcher(tree: Arc<LiveTree>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::LiveTree;
+    use super::{LiveTree, SIGNATURE_LEN, SecretKey, SignedManifest, seal};
     use agent_share_proto::manifest::{FileEntry, ManifestDelta, MountManifest};
     use std::path::PathBuf;
 
@@ -485,7 +571,7 @@ mod tests {
         let bytes = origin.encode();
         let copy = TempTree::new(&[("docs/big.bin", 64)]);
 
-        let tree = LiveTree::mirrored(copy.0.clone(), bytes.clone()).expect("mirrored");
+        let tree = LiveTree::mirrored(copy.0.clone(), sealed(&bytes)).expect("mirrored");
 
         assert_eq!(
             *tree.manifest_bytes(),
@@ -512,7 +598,7 @@ mod tests {
         };
         // On disk at the wrong length: an interrupted fetch.
         let copy = TempTree::new(&[("a.bin", 400)]);
-        let tree = LiveTree::mirrored(copy.0.clone(), origin.encode()).expect("mirrored");
+        let tree = LiveTree::mirrored(copy.0.clone(), sealed(&origin.encode())).expect("mirrored");
 
         assert_eq!(
             tree.path_of(0),
@@ -529,8 +615,83 @@ mod tests {
             files: vec![entry("a.txt", 5), entry("b.txt", 9)],
         };
         let copy = TempTree::new(&[("a.txt", 5), ("b.txt", 9)]);
-        let tree = LiveTree::mirrored(copy.0.clone(), origin.encode()).expect("mirrored");
+        let tree = LiveTree::mirrored(copy.0.clone(), sealed(&origin.encode())).expect("mirrored");
         assert_eq!(tree.coverage(), (2, 2));
+    }
+
+    /// The creator, for tests that care who signed.
+    fn creator() -> SecretKey {
+        SecretKey::from_bytes(&[4u8; 32])
+    }
+
+    /// An `OP_MANIFEST` envelope around `bytes`, as an origin would serve it.
+    fn sealed(bytes: &[u8]) -> Vec<u8> {
+        seal(Some(&creator()), 1, bytes).as_ref().clone()
+    }
+
+    /// **The requirement, as a test.** A mirror is handed the creator's
+    /// signature and re-serves it byte for byte; it never makes one, and could
+    /// not, because it holds no authorship key.
+    #[test]
+    fn a_mirror_re_serves_the_creators_signature_rather_than_making_one() {
+        let origin = MountManifest {
+            dirs: Vec::new(),
+            files: vec![entry("a.txt", 5)],
+        };
+        let envelope = sealed(&origin.encode());
+        let copy = TempTree::new(&[("a.txt", 5)]);
+        let tree = LiveTree::mirrored(copy.0.clone(), envelope.clone()).expect("mirrored");
+
+        assert_eq!(
+            *tree.manifest_envelope(),
+            envelope,
+            "a copy must hand on the envelope it was given, signature included"
+        );
+        assert!(
+            tree.author.is_none(),
+            "a mirror holding a signing key would be able to publish"
+        );
+    }
+
+    /// The version rides inside the signature and moves with the tree, which is
+    /// what makes replaying an older manifest useless.
+    #[test]
+    fn publishing_a_change_signs_a_new_version() {
+        let manifest = MountManifest {
+            dirs: Vec::new(),
+            files: vec![entry("a", 1)],
+        };
+        let tree = LiveTree::authored(
+            PathBuf::from("/root"),
+            manifest,
+            vec![PathBuf::from("/root/a")],
+            Some(creator()),
+        );
+        let before = SignedManifest::decode(&tree.manifest_envelope()).expect("decode");
+        assert_eq!(before.version, 1);
+        assert!(before.accept(&creator().public(), 0).is_ok_and(|()| true));
+
+        rescan(&tree, &[("a", 4096)]);
+        let after = SignedManifest::decode(&tree.manifest_envelope()).expect("decode");
+        assert_eq!(after.version, 2);
+        assert!(after.accept(&creator().public(), before.version).is_ok());
+        // And the old one loses to the new: replaying it is refused.
+        assert!(before.accept(&creator().public(), after.version).is_err());
+    }
+
+    /// An unsigned share still has one wire shape. The zero signature must not
+    /// pass for anybody's.
+    #[test]
+    fn an_unsigned_tree_serves_a_zero_signature() {
+        let tree = tree(&[("a", 1)]);
+        let signed = SignedManifest::decode(&tree.manifest_envelope()).expect("decode");
+        assert_eq!(signed.signature, [0u8; SIGNATURE_LEN]);
+        assert!(signed.accept(&creator().public(), 0).is_err());
+        assert_eq!(
+            *tree.manifest_bytes(),
+            signed.manifest,
+            "the fingerprint domain is the manifest, not the envelope around it"
+        );
     }
 
     fn entry(path: &str, size: u64) -> FileEntry {

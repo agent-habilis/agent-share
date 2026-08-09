@@ -23,6 +23,8 @@ use super::{
     MAX_CHUNK_MAP_BYTES, MAX_MANIFEST_BYTES, MOUNT_ALPN, OP_CHUNK, OP_CHUNK_MAP, OP_MANIFEST,
     OP_READ, OP_WATCH,
 };
+use agent_share_proto::authorship::SignedManifest;
+use agent_share_proto::framing::MAX_SIGNED_MANIFEST_BYTES;
 // The root type comes from the store, not from this crate: `agent-share` names
 // what `fofoca-blobs` verifies against rather than defining a second one.
 use super::{MountManifest, ReadStatus};
@@ -445,14 +447,43 @@ async fn join_share_mesh(join: MeshJoin) -> Option<ShareMesh> {
     }
 }
 
+/// Check a manifest against the share's creator, if the ticket names one.
+///
+/// A ticket with no `author` predates signing, or was minted by a producer that
+/// keeps no authorship key; it is accepted exactly as it always was. The
+/// decision is read off the **ticket**, which the user pasted, and never off
+/// the answer, which a seeder controls — otherwise "unsigned" would be
+/// something a reader could claim.
+///
+/// `seen` is the highest version already accepted, so an old but genuinely
+/// signed manifest cannot be replayed over a newer one.
+fn accept_manifest(ticket: &MountTicket, signed: &SignedManifest, seen: u64) -> Result<()> {
+    let Some(author) = ticket.author else {
+        return Ok(());
+    };
+    let author = agent_share_proto::authorship::PublicKey::from_bytes(&author)
+        .context("the ticket's authorship key is not a public key")?;
+    signed.accept(&author, seen)
+}
+
 /// The origin is unreachable — recover the manifest from a peer that vouches.
 ///
-/// Waits (bounded) for cards to arrive over gossip, takes the **majority
-/// tree** among vouching cards as the manifest authority — with the origin
-/// gone, agreement is the only authority left — and dials candidates until
-/// one serves bytes whose fingerprint matches. What it returns is a frozen
-/// snapshot: seeders follow the origin while it lives and never mutate on
-/// their own.
+/// Waits (bounded) for cards to arrive over gossip, then dials candidates until
+/// one serves a manifest this consumer will take. What it returns is a frozen
+/// snapshot: seeders follow the origin while it lives and never mutate on their
+/// own.
+///
+/// # What decides the winner
+///
+/// **A signature, when the ticket carries an authorship key.** Every candidate
+/// is dialled and the first one whose manifest verifies wins, regardless of how
+/// many peers agree with it. Agreement is not evidence: cards are gossiped, a
+/// departed peer's card lingers in the roster, and manufacturing peers is
+/// cheap — so counting them is a vote a Sybil wins.
+///
+/// **Agreement, when it does not.** An unsigned share has no offline authority
+/// at all, so the majority tree among vouching cards is the best available and
+/// is kept for exactly that case, weakness and all.
 async fn bootstrap_from_seeders(
     mesh: Option<&ShareMesh>,
     endpoint: &Endpoint,
@@ -498,24 +529,32 @@ async fn bootstrap_from_seeders(
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
 
-    // Majority tree. Ghost cards from departed peers vote too (known roster
-    // defect); a ghost that formed a majority alone still cannot answer a
-    // dial, which falls through to the next candidate and then the error.
-    let mut votes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for card in &vouching {
-        if let Some(tree) = card.tree.as_deref() {
-            *votes.entry(tree).or_default() += 1;
+    // Only for an unsigned share. Ghost cards from departed peers vote too
+    // (known roster defect); a ghost that formed a majority alone still cannot
+    // answer a dial, which falls through to the next candidate and then the
+    // error. A signed share skips this entirely — see the doc above.
+    let majority = origin_ticket.author.is_none().then(|| {
+        let mut votes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for card in &vouching {
+            if let Some(tree) = card.tree.as_deref() {
+                *votes.entry(tree).or_default() += 1;
+            }
         }
-    }
-    let majority = votes
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(tree, _)| tree.to_owned())
-        .expect("vouching is non-empty");
+        votes
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(tree, _)| tree.to_owned())
+            .expect("vouching is non-empty")
+    });
 
     let mut candidates: Vec<&PeerCard> = vouching
         .iter()
-        .filter(|card| card.tree.as_deref() == Some(majority.as_str()))
+        .filter(|card| match majority.as_deref() {
+            Some(tree) => card.tree.as_deref() == Some(tree),
+            // Signed: every peer that vouches is worth asking, because the
+            // answer proves itself and a lie costs one round trip.
+            None => true,
+        })
         .collect();
     candidates.sort_by_key(|card| (card.transport != "unicast", card.endpoint.clone()));
 
@@ -531,42 +570,49 @@ async fn bootstrap_from_seeders(
             kind: origin_ticket.kind,
             flags: origin_ticket.flags,
             mesh_id: origin_ticket.mesh_id.clone(),
-            author: None,
+            // Carried across, or the seeder client would have nothing to check
+            // its answer against — which is the whole point of dialling it.
+            author: origin_ticket.author,
         };
         // The same `auth` the origin dial used. A seeder authenticated with the
         // password once and now checks the token exactly as the origin did, so
         // no password reaches this path — which is what lets a mirror re-seed a
         // protected share without ever holding one.
         let client = RemoteClient::new(endpoint.clone(), ticket, auth);
-        match client.fetch_manifest_bytes().await {
-            // The candidate must serve the tree its card claimed: fetched
-            // bytes, hashed here, against the majority. A mismatch is
-            // disqualifying, not retryable — it lied once.
-            Ok(bytes) if agent_share_proto::manifest::manifest_fingerprint(&bytes) == majority => {
-                match MountManifest::decode(&bytes) {
-                    Ok(manifest) => {
-                        crate::util::output::status(
-                            "Source",
-                            &format!(
-                                "origin unreachable; serving from seeder {}",
-                                &candidate.endpoint[..8.min(candidate.endpoint.len())]
-                            ),
-                        );
-                        return Ok(manifest);
-                    }
-                    Err(error) => {
-                        refusals.push(format!("{}: {error}", &candidate.endpoint[..8]));
-                    }
-                }
-            }
-            Ok(_) => {
-                refusals.push(format!(
-                    "{}: served a different tree than its card claimed",
-                    &candidate.endpoint[..8]
-                ));
-            }
+        // Signature-checked inside `fetch_signed_manifest` when the ticket names
+        // an author, so a forged answer never reaches the match below.
+        let signed = match client.fetch_signed_manifest().await {
+            Ok(signed) => signed,
             Err(error) => {
                 refusals.push(format!("{}: {error:#}", &candidate.endpoint[..8]));
+                continue;
+            }
+        };
+        // On an unsigned share the card is the only claim there is, so hold the
+        // candidate to it: fetched bytes, hashed here, against the majority. A
+        // mismatch is disqualifying, not retryable — it lied once.
+        if let Some(majority) = majority.as_deref()
+            && agent_share_proto::manifest::manifest_fingerprint(&signed.manifest) != majority
+        {
+            refusals.push(format!(
+                "{}: served a different tree than its card claimed",
+                &candidate.endpoint[..8]
+            ));
+            continue;
+        }
+        match MountManifest::decode(&signed.manifest) {
+            Ok(manifest) => {
+                crate::util::output::status(
+                    "Source",
+                    &format!(
+                        "origin unreachable; serving from seeder {}",
+                        &candidate.endpoint[..8.min(candidate.endpoint.len())]
+                    ),
+                );
+                return Ok(manifest);
+            }
+            Err(error) => {
+                refusals.push(format!("{}: {error}", &candidate.endpoint[..8]));
             }
         }
     }
@@ -908,14 +954,19 @@ impl RemoteClient {
         Ok(Some(bytes))
     }
 
-    /// The manifest as the origin sent it, before decoding.
+    /// The manifest as the origin published it: its bytes, its version, and the
+    /// creator's signature over both.
     ///
-    /// A mirror needs these exact bytes rather than a re-encode: it re-serves
-    /// them verbatim so its indices stay the origin's, and it fingerprints them
-    /// so peers on one tree agree. Decoding and re-encoding would be correct
-    /// only for as long as the encoding stays canonical, and there is no reason
-    /// to depend on that when the real bytes are right here.
-    pub(super) async fn fetch_manifest_bytes(&self) -> Result<Vec<u8>> {
+    /// The inner bytes come back untouched rather than re-encoded. A mirror
+    /// re-serves them verbatim so its indices stay the origin's, and everyone
+    /// fingerprints them so peers on one tree agree; decoding and re-encoding
+    /// would be correct only for as long as the encoding stays canonical, and
+    /// there is no reason to depend on that when the real bytes are right here.
+    ///
+    /// **Verified before it is returned**, against the authorship key in the
+    /// ticket the user pasted. Whether to verify is read off the ticket and
+    /// never off the answer — a peer must not get to declare itself unsigned.
+    pub(super) async fn fetch_signed_manifest(&self) -> Result<SignedManifest> {
         let (mut send, mut recv) = self.request(OP_MANIFEST).await?;
         let _ = send.finish();
         let mut status = [0u8; 1];
@@ -926,35 +977,27 @@ impl RemoteClient {
             bail!("the producer refused the manifest request");
         }
         let len = read_u32(&mut recv).await?;
-        if len > MAX_MANIFEST_BYTES {
+        if len > MAX_SIGNED_MANIFEST_BYTES {
             bail!("manifest too large: {len} bytes");
         }
         let mut bytes = vec![0u8; usize::try_from(len).expect("u32 fits usize")];
         recv.read_exact(&mut bytes)
             .await
             .context("reading the manifest failed")?;
-        Ok(bytes)
+        let signed = SignedManifest::decode(&bytes)?;
+        if u32::try_from(signed.manifest.len()).is_ok_and(|inner| inner > MAX_MANIFEST_BYTES) {
+            bail!("manifest too large: {} bytes", signed.manifest.len());
+        }
+        // A native mount keeps nothing between runs, so it has no earlier
+        // version to compare against and the floor is 0. The rollback rule bites
+        // where state survives — the browser client, which persists the manifest
+        // it accepted.
+        accept_manifest(&self.ticket, &signed, 0)?;
+        Ok(signed)
     }
 
     pub(super) async fn fetch_manifest(&self) -> Result<MountManifest> {
-        let (mut send, mut recv) = self.request(OP_MANIFEST).await?;
-        let _ = send.finish();
-        let mut status = [0u8; 1];
-        recv.read_exact(&mut status)
-            .await
-            .context("reading the manifest status failed")?;
-        if ReadStatus::from_byte(status[0])? != ReadStatus::Ok {
-            bail!("the producer refused the manifest request");
-        }
-        let len = read_u32(&mut recv).await?;
-        if len > MAX_MANIFEST_BYTES {
-            bail!("manifest too large: {len} bytes");
-        }
-        let mut bytes = vec![0u8; usize::try_from(len).expect("u32 fits usize")];
-        recv.read_exact(&mut bytes)
-            .await
-            .context("reading the manifest failed")?;
-        MountManifest::decode(&bytes)
+        MountManifest::decode(&self.fetch_signed_manifest().await?.manifest)
     }
 
     pub(super) async fn read_range(&self, index: u32, offset: u64, len: u32) -> Result<Vec<u8>> {
@@ -1196,5 +1239,86 @@ mod tests {
         assert!(mount.is_dir());
         assert!(target.join("keep.txt").is_file());
         let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// The three things a signature has to do here, and one it must not.
+    mod authorship {
+        use super::super::accept_manifest;
+        use agent_share_proto::authorship::{SecretKey, SignedManifest, sign_manifest};
+        use agent_share_proto::ticket::MountTicket;
+
+        fn creator() -> SecretKey {
+            SecretKey::from_bytes(&[11u8; 32])
+        }
+
+        /// A ticket naming `author`, with everything else at a default that no
+        /// test below looks at.
+        fn ticket_for(author: Option<[u8; 32]>) -> MountTicket {
+            MountTicket {
+                addr: fofoca::iroh::EndpointAddr::from_parts(
+                    SecretKey::from_bytes(&[1u8; 32]).public(),
+                    [],
+                ),
+                secret: [2u8; 32],
+                lookups: agent_share_proto::lookup::LookupOpts::public_preset(),
+                kind: agent_share_proto::ticket::TICKET_KIND_SHARE,
+                flags: 0,
+                mesh_id: None,
+                author,
+            }
+        }
+
+        fn signed_by(key: &SecretKey, version: u64, manifest: &[u8]) -> SignedManifest {
+            SignedManifest {
+                version,
+                signature: sign_manifest(key, version, manifest),
+                manifest: manifest.to_vec(),
+            }
+        }
+
+        #[test]
+        fn the_creators_manifest_is_taken() {
+            let ticket = ticket_for(Some(*creator().public().as_bytes()));
+            assert!(accept_manifest(&ticket, &signed_by(&creator(), 3, b"tree"), 0).is_ok());
+        }
+
+        /// **The requirement.** A seeder that fabricated a manifest is refused
+        /// with no live origin anywhere — which is the case the whole design
+        /// exists for, since a share is meant to outlive its producer.
+        #[test]
+        fn a_forged_manifest_is_refused() {
+            let ticket = ticket_for(Some(*creator().public().as_bytes()));
+            let impostor = SecretKey::from_bytes(&[99u8; 32]);
+            assert!(accept_manifest(&ticket, &signed_by(&impostor, 3, b"mine now"), 0).is_err());
+        }
+
+        /// A signature stops forgery, not replay: an old manifest the creator
+        /// really did sign stays valid forever, so the version is what refuses
+        /// it.
+        #[test]
+        fn a_replayed_older_version_loses_to_the_newer_one() {
+            let ticket = ticket_for(Some(*creator().public().as_bytes()));
+            let old = signed_by(&creator(), 2, b"old tree");
+            assert!(accept_manifest(&ticket, &old, 7).is_err());
+            assert!(accept_manifest(&ticket, &old, 2).is_ok());
+        }
+
+        /// An unsigned share has no author to check against and keeps working
+        /// exactly as it did. The zero signature a producer sends must not be
+        /// mistaken for a real one.
+        #[test]
+        fn an_unsigned_ticket_checks_nothing() {
+            let unsigned = SignedManifest {
+                version: 0,
+                signature: [0u8; 64],
+                manifest: b"tree".to_vec(),
+            };
+            assert!(accept_manifest(&ticket_for(None), &unsigned, 0).is_ok());
+            // But the same bytes against a ticket that *does* name a creator
+            // are refused — whether to verify comes from the ticket, never
+            // from the answer.
+            let signed_ticket = ticket_for(Some(*creator().public().as_bytes()));
+            assert!(accept_manifest(&signed_ticket, &unsigned, 0).is_err());
+        }
     }
 }

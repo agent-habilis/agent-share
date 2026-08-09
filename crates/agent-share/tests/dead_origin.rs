@@ -23,6 +23,7 @@ use std::thread;
 use std::time::Instant;
 
 mod common;
+use agent_share_proto::ticket::MountTicket;
 use common::{CONNECT_TIMEOUT, LOOPBACK_SWARM_ID, POLL, test_cmd};
 
 /// A spawned `agent-share` child killed when the test ends (or panics).
@@ -169,6 +170,15 @@ fn a_share_survives_its_producer_when_a_mirror_serves() {
     // The seeder prints its own mount command once it serves; its card (tree +
     // serving) reaches the mesh from there.
     recv_line_containing(&seeder_rx, "agent-share").expect("mirror serve never came up");
+
+    // What makes the rest of this test mean something. Without an author in the
+    // ticket the consumer below would fall back to counting peer cards, and the
+    // run would still pass while proving nothing about who wrote the manifest.
+    let decoded = MountTicket::decode(&ticket).expect("the printed ticket decodes");
+    assert!(
+        decoded.author.is_some(),
+        "serve must name a creator, or the seeder path has no offline authority"
+    );
 
     // The whole point.
     origin.kill_now();

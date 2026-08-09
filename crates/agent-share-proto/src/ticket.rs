@@ -109,10 +109,10 @@ pub struct MountTicket {
     /// The creator's **authorship** public key, carried when
     /// [`TICKET_FLAG_SIGNED`] is set.
     ///
-    /// Deliberately not the endpoint key already in `addr`. `agent-share mirror`
-    /// hands the endpoint secret to every copy on purpose, so signing with it
-    /// would make impersonation convincing rather than impossible. This key
-    /// never leaves the creator's machine; see [`crate::authorship`].
+    /// Deliberately not the endpoint key already in `addr`. That one is minted
+    /// fresh per peer and per run, so it cannot name a creator across a restart
+    /// and no seeder could ever hold it. This key can and does; see
+    /// [`crate::authorship`].
     pub author: Option<[u8; 32]>,
 }
 

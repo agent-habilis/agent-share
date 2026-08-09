@@ -192,6 +192,20 @@ pub const BENCH_ECHO_INTERVAL_SECS: u64 = 1;
 /// unbounded allocation before the first decode error.
 pub const MAX_MANIFEST_BYTES: u32 = 64 * 1024 * 1024;
 
+/// Ceiling on an [`OP_MANIFEST`] body, which wraps the manifest in the version
+/// and signature of [`crate::authorship::SignedManifest`].
+///
+/// A separate constant rather than a bigger [`MAX_MANIFEST_BYTES`], because the
+/// two guard different things: this bounds the allocation, that bounds the tree
+/// a producer may serve. A reader checks the envelope against this before
+/// allocating and the manifest inside it against that after decoding, so
+/// neither cap moves because the other did.
+pub const MAX_SIGNED_MANIFEST_BYTES: u32 = MAX_MANIFEST_BYTES + SIGNED_MANIFEST_PREFIX_LEN;
+
+/// Bytes an envelope adds in front of the manifest: `version(u64) ‖
+/// signature(64)`.
+pub const SIGNED_MANIFEST_PREFIX_LEN: u32 = 8 + 64;
+
 /// Ceiling on a single READ. Sized to fit the NFS client's `rsize=131072`
 /// with headroom; the producer rejects anything larger without killing the
 /// connection.

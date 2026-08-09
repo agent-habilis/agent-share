@@ -54,6 +54,7 @@ use std::sync::Arc;
 
 use agent_share_proto::PeerCard;
 use agent_share_proto::auth::ShareAuth;
+use agent_share_proto::authorship::{PublicKey, SignedManifest};
 use agent_share_proto::framing::{
     self, BENCH_ECHO_INTERVAL_SECS, DEFAULT_BENCH_DURATION_SECS, MAX_BENCH_ECHO_BYTES,
     MAX_BENCH_FILL_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, SECRET_LEN,
@@ -114,6 +115,13 @@ const TOTAL_LANE: &str = "total";
 pub struct ShareClient {
     connection: Connection,
     token: [u8; SECRET_LEN],
+    /// The creator's authorship public key, from the ticket this tab opened.
+    ///
+    /// `None` for an unsigned share, which is accepted as it always was. It is
+    /// held on the client rather than read per fetch because the answer must
+    /// come from the link the user followed and not from whoever answered —
+    /// see [`accept_manifest`].
+    author: Option<[u8; 32]>,
     /// `"webrtc"` or `"relay"` — the path that actually carries mount bytes.
     ///
     /// A shared cell because on a dynamic WebRTC connect the label is
@@ -250,9 +258,13 @@ pub struct ShareClient {
     pinned_tree: Option<String>,
 }
 
+/// `author` is the ticket's authorship key, and is a parameter rather than a
+/// field set afterwards on purpose: a connect path that forgot it would verify
+/// nothing and look completely healthy while doing so.
 fn new_share_client(
     connection: Connection,
     token: [u8; SECRET_LEN],
+    author: Option<[u8; 32]>,
     data_path: String,
     hub: Option<Arc<BrowserHubTransport>>,
     session: Option<BrowserSession>,
@@ -273,6 +285,7 @@ fn new_share_client(
     ShareClient {
         connection,
         token,
+        author,
         data_path: Rc::new(RefCell::new(data_path)),
         mount_mode: "dynamic".to_owned(),
         fallback_reason: Rc::new(RefCell::new(None)),
@@ -393,7 +406,25 @@ fn watch_channel_health(hub: Arc<BrowserHubTransport>, connection: Connection) {
 
 /// A manifest fetched ahead of the first request — see the field on
 /// [`ShareClient`].
-type PrefetchedManifest = Rc<RefCell<Option<(Vec<u8>, MountManifest)>>>;
+type PrefetchedManifest = Rc<RefCell<Option<FetchedManifest>>>;
+
+/// What one `OP_MANIFEST` round produced, already checked against the ticket.
+///
+/// Two byte strings rather than one, because they answer different questions
+/// and using either for the other's job is a silent bug. Naming them apart is
+/// the cheapest way to stop that.
+#[derive(Clone)]
+struct FetchedManifest {
+    /// The wire body: `version ‖ signature ‖ manifest`. What a seeder re-serves
+    /// and what a tab persists — a copy that kept only the manifest could never
+    /// prove anything to the next reader, since a browser holds no authorship
+    /// key and cannot re-sign.
+    envelope: Vec<u8>,
+    /// The manifest alone, which is the fingerprint domain: `card.tree` and
+    /// every `pinned_tree` comparison are defined over exactly these bytes.
+    body: Vec<u8>,
+    manifest: MountManifest,
+}
 
 /// This tab's relationship to the share's mesh — see the `mesh` field.
 enum MeshSlot {
@@ -490,6 +521,10 @@ impl ShareClient {
         // verifier the ticket's mesh id carries, which is what names a wrong
         // password without a producer.
         let mesh_id = ticket.mesh_id.clone();
+        // Copied out before the ticket moves into the connect race below; the
+        // background prefetch has to verify against the same key the client
+        // will.
+        let author = ticket.author;
         let mesh_password = password.clone();
         // Resolved *before* the dial. On a protected share whose ticket carries
         // a mesh id, this is the check: fofoca decodes the id, stretches the
@@ -765,7 +800,7 @@ impl ShareClient {
         let prefetch_cell = Rc::clone(&client.prefetched_manifest);
         let manifest_fetched = Rc::clone(&client.manifest_fetched);
         wasm_bindgen_futures::spawn_local(async move {
-            if let Ok(pair) = fetch_manifest_on(&prefetch_connection, &token).await
+            if let Ok(pair) = fetch_manifest_on(&prefetch_connection, &token, author).await
                 && !manifest_fetched.get()
             {
                 *prefetch_cell.borrow_mut() = Some(pair);
@@ -1104,8 +1139,7 @@ impl ShareClient {
     /// # Errors
     /// The producer refuses the request or the manifest does not decode.
     pub async fn manifest(&self) -> Result<JsValue, JsValue> {
-        let (_, manifest) = self.fetch_manifest().await?;
-        serde_wasm(&manifest)
+        serde_wasm(&self.fetch_manifest().await?.manifest)
     }
 
     /// The manifest, and the exact bytes it was decoded from.
@@ -1113,13 +1147,13 @@ impl ShareClient {
     /// The bytes matter separately from the struct: the tree fingerprint is
     /// taken over what the producer actually served, so both sides hash the
     /// same thing rather than trusting a re-encode to be canonical.
-    async fn fetch_manifest(&self) -> Result<(Vec<u8>, MountManifest), JsValue> {
+    async fn fetch_manifest(&self) -> Result<FetchedManifest, JsValue> {
         let prefetched = self.prefetched_manifest.borrow_mut().take();
-        let (bytes, manifest) = match prefetched {
+        let fetched = match prefetched {
             // Already in hand — the seeder fallback's vetted pair, or the
             // origin prefetch. Skips a round trip, not any check below.
             Some(pair) => pair,
-            None => match fetch_manifest_on(&self.connection, &self.token).await {
+            None => match fetch_manifest_on(&self.connection, &self.token, self.author).await {
                 Ok(pair) => pair,
                 // The first request is where a refused credential surfaces: the
                 // dial succeeds, and the producer only reads the token when the
@@ -1136,7 +1170,7 @@ impl ShareClient {
         // against one tree and answers for that tree only. Only the origin —
         // TLS-proven by dialing the ticket's endpoint id — may change it.
         if let Some(pinned) = self.pinned_tree.as_deref() {
-            let fingerprint = agent_share_proto::manifest::manifest_fingerprint(&bytes);
+            let fingerprint = agent_share_proto::manifest::manifest_fingerprint(&fetched.body);
             if fingerprint != pinned {
                 return Err(JsValue::from_str(
                     "the seeder changed trees after being vetted; refusing its manifest",
@@ -1149,12 +1183,12 @@ impl ShareClient {
         //
         // Cloned out of the cell, not borrowed across the await below: see the
         // note on the `mesh` field.
-        let fingerprint = agent_share_proto::manifest::manifest_fingerprint(&bytes);
+        let fingerprint = agent_share_proto::manifest::manifest_fingerprint(&fetched.body);
         *self.last_tree.borrow_mut() = Some(fingerprint.clone());
         if let Some(mesh) = self.mesh_peer() {
             mesh.set_tree(fingerprint).await;
         }
-        Ok((bytes, manifest))
+        Ok(fetched)
     }
 
     /// Follow the share as it changes, calling `on_manifest` with the whole
@@ -1254,7 +1288,9 @@ impl ShareClient {
     /// The manifest cannot be fetched, storage is unavailable, or a file's
     /// bytes do not match the root the origin published.
     pub async fn sync(&self, only: Option<Vec<String>>) -> Result<JsValue, JsValue> {
-        let (bytes, manifest) = self.fetch_manifest().await?;
+        let FetchedManifest {
+            envelope, manifest, ..
+        } = self.fetch_manifest().await?;
         let store = self.open_store().await?;
         let only = only.unwrap_or_default();
 
@@ -1330,8 +1366,9 @@ impl ShareClient {
 
         // The sidecar: what lets a refreshed tab stand this share back up
         // with no live source at all.
-        persist_manifest(&self.token, store.as_ref(), &bytes).await;
-        self.republish(&bytes, &manifest, Rc::clone(&store)).await?;
+        persist_manifest(&self.token, store.as_ref(), &envelope).await;
+        self.republish(&envelope, &manifest, Rc::clone(&store))
+            .await?;
 
         let out = serde_json::json!({
             "files": files,
@@ -1373,7 +1410,7 @@ impl ShareClient {
             .await?;
         // Bind the row to this file version, or a reload would find a store
         // full of chunks and no way to tell which file they belong to.
-        if let Ok((_, manifest)) = self.fetch_manifest().await
+        if let Ok(FetchedManifest { manifest, .. }) = self.fetch_manifest().await
             && let Some(entry) = manifest.files.get(index as usize)
         {
             let _ = store.set_bind(&file_id(entry), row.root()).await;
@@ -1386,9 +1423,11 @@ impl ShareClient {
     /// Serving before advertising: the seeder must be able to answer for a
     /// chunk by the time the card claims it, or a reader lands on `BadIndex`.
     pub async fn republish_holdings(&self) -> Result<(), JsValue> {
-        let (bytes, manifest) = self.fetch_manifest().await?;
+        let FetchedManifest {
+            envelope, manifest, ..
+        } = self.fetch_manifest().await?;
         let store = self.open_store().await?;
-        self.republish(&bytes, &manifest, store).await
+        self.republish(&envelope, &manifest, store).await
     }
 
     /// What share of each known slot this tab holds, as `{ index: fraction }`.
@@ -1574,7 +1613,10 @@ impl ShareClient {
     /// Called on mount so a reload shows what survived rather than an empty
     /// grid. Never fails: a tab with no store simply holds nothing.
     pub async fn refresh_held(&self) -> Result<(), JsValue> {
-        let Ok((bytes, manifest)) = self.fetch_manifest().await else {
+        let Ok(FetchedManifest {
+            envelope, manifest, ..
+        }) = self.fetch_manifest().await
+        else {
             return Ok(());
         };
         // Deliberately does *not* create a database — only adopts one already
@@ -1593,9 +1635,9 @@ impl ShareClient {
         // newer) manifest on its next healthy visit, keeping the sidecar fresh
         // for the next resurrection.
         if !self.rows.borrow().is_empty() {
-            persist_manifest(&self.token, store.as_ref(), &bytes).await;
+            persist_manifest(&self.token, store.as_ref(), &envelope).await;
         }
-        self.republish(&bytes, &manifest, store).await
+        self.republish(&envelope, &manifest, store).await
     }
 
     /// Where this share's blocks live. See [`store_name_for`].
@@ -2367,7 +2409,8 @@ fn percentile(sorted: &[f64], fraction: f64) -> f64 {
 async fn fetch_manifest_on(
     conn: &Connection,
     token: &[u8; SECRET_LEN],
-) -> Result<(Vec<u8>, MountManifest), JsValue> {
+    author: Option<[u8; 32]>,
+) -> Result<FetchedManifest, JsValue> {
     let (mut send, mut recv) = conn
         .open_bi()
         .await
@@ -2377,13 +2420,65 @@ async fn fetch_manifest_on(
         .map_err(|error| err("send manifest request", &error))?;
     send.finish().map_err(|error| err("finish", &error))?;
 
-    let len = read_header(&mut recv, MAX_MANIFEST_BYTES).await?;
-    let mut bytes = vec![0u8; len as usize];
-    recv.read_exact(&mut bytes)
+    let len = read_header(&mut recv, framing::MAX_SIGNED_MANIFEST_BYTES).await?;
+    let mut envelope = vec![0u8; len as usize];
+    recv.read_exact(&mut envelope)
         .await
         .map_err(|error| err("read manifest", &error))?;
-    let manifest = MountManifest::decode(&bytes).map_err(|error| err("decode manifest", &error))?;
-    Ok((bytes, manifest))
+    let signed =
+        SignedManifest::decode(&envelope).map_err(|error| err("decode manifest", &error))?;
+    if u32::try_from(signed.manifest.len()).is_ok_and(|len| len > MAX_MANIFEST_BYTES) {
+        return Err(JsValue::from_str("the manifest is too large to accept"));
+    }
+    accept_manifest(author, &signed, accepted_version(token))?;
+    let manifest =
+        MountManifest::decode(&signed.manifest).map_err(|error| err("decode manifest", &error))?;
+    Ok(FetchedManifest {
+        envelope,
+        body: signed.manifest,
+        manifest,
+    })
+}
+
+/// Check a manifest against the share's creator, when the ticket names one.
+///
+/// The browser's half of the rule the native consumer keeps: **whether to
+/// verify is read off the ticket**, which the user pasted, never off the
+/// answer, which any seeder could have written. A ticket with no author is an
+/// unsigned share and is accepted as it always was.
+fn accept_manifest(
+    author: Option<[u8; 32]>,
+    signed: &SignedManifest,
+    seen: u64,
+) -> Result<(), JsValue> {
+    let Some(author) = author else {
+        return Ok(());
+    };
+    let author = PublicKey::from_bytes(&author)
+        .map_err(|_| JsValue::from_str("the ticket's authorship key is not a public key"))?;
+    signed
+        .accept(&author, seen)
+        .map_err(|error| JsValue::from_str(&format!("{error:#}")))
+}
+
+/// The highest manifest version this tab has already accepted for `token`.
+///
+/// Recorded beside the persisted manifest, which is what makes the rollback
+/// rule mean something here and not on the native side: a browser keeps state
+/// across reloads, so an old-but-genuinely-signed manifest replayed by a seeder
+/// has something to lose to. `0` for a tab that has never stored one, which
+/// accepts anything the signature allows.
+fn accepted_version(token: &[u8; SECRET_LEN]) -> u64 {
+    let Some(storage) = local_storage() else {
+        return 0;
+    };
+    let Ok(Some(raw)) = storage.get_item(&manifest_locator_key(token)) else {
+        return 0;
+    };
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|locator| locator.get("version")?.as_u64())
+        .unwrap_or(0)
 }
 
 /// How long the probe tolerates **zero forward progress** before declaring
@@ -2846,7 +2941,15 @@ fn roster_after_failed_lane(list: Vec<KnownSeeder>, refusals: &[Refusal]) -> Vec
 /// Persist the origin's manifest so a refreshed tab can re-arm with no live
 /// source — the web twin of the native mirror's sidecar. Best-effort: a full
 /// quota or private-mode refusal costs resurrection, never the session.
-async fn persist_manifest(token: &[u8; SECRET_LEN], store: &IdbStore, bytes: &[u8]) {
+/// `envelope` is the whole `OP_MANIFEST` body, signature included, because that
+/// is what this tab will re-serve after a reload. The locator beside it records
+/// the *manifest's* fingerprint and version — over the bytes inside, since that
+/// is the domain `card.tree` and the rollback rule are defined on.
+async fn persist_manifest(token: &[u8; SECRET_LEN], store: &IdbStore, envelope: &[u8]) {
+    let Ok(signed) = SignedManifest::decode(envelope) else {
+        return;
+    };
+    let bytes = envelope;
     // The manifest is stored as a file like any other: a row of addresses plus
     // its chunks. No special case, no second storage shape, and the row's root
     // is the locator — so a manifest that was written half-way simply fails to
@@ -2876,7 +2979,8 @@ async fn persist_manifest(token: &[u8; SECRET_LEN], store: &IdbStore, bytes: &[u
     let locator = serde_json::json!({
         "size": bytes.len(),
         "root": row.root().to_hex(),
-        "tree": agent_share_proto::manifest::manifest_fingerprint(bytes),
+        "tree": agent_share_proto::manifest::manifest_fingerprint(&signed.manifest),
+        "version": signed.version,
     });
     if let Some(storage) = local_storage() {
         let _ = storage.set_item(&manifest_locator_key(token), &locator.to_string());
@@ -2900,17 +3004,21 @@ async fn load_persisted_manifest(
     // here would leave storage behind for somebody who merely browsed.
     let store = Rc::new(IdbStore::adopt(&store_name_for(token)).await.ok()??);
     let row = store.map(root).await.ok()??;
-    let mut bytes = Vec::with_capacity(row.size() as usize);
+    let mut envelope = Vec::with_capacity(row.size() as usize);
     for position in 0..row.len() {
         let address = row.leaf(position)?;
         let chunk = store.get(address).await.ok()??;
-        bytes.extend_from_slice(&chunk);
+        envelope.extend_from_slice(&chunk);
     }
-    if agent_share_proto::manifest::manifest_fingerprint(&bytes) != tree {
+    let signed = SignedManifest::decode(&envelope).ok()?;
+    // The recorded fingerprint, over the manifest and not the envelope: it has
+    // to be the same string a peer card carries, or a resurrected tab would
+    // vouch for a tree nobody else recognises.
+    if agent_share_proto::manifest::manifest_fingerprint(&signed.manifest) != tree {
         return None;
     }
-    let manifest = MountManifest::decode(&bytes).ok()?;
-    Some((bytes, manifest, store))
+    let manifest = MountManifest::decode(&signed.manifest).ok()?;
+    Some((envelope, manifest, store))
 }
 
 /// Chunk rows this store already holds for `manifest`, by manifest index.
@@ -3416,7 +3524,7 @@ async fn connect_via_seeder(
     // attempt, or fed by a previous session's sync).
     {
         use produce::ServeSource as _;
-        if seeder.manifest_bytes().is_none()
+        if seeder.manifest_envelope().is_none()
             && let Some((bytes, manifest, store)) = load_persisted_manifest(&token).await
         {
             let rows = rows_in_store(&store, &manifest).await;
@@ -3553,6 +3661,7 @@ async fn connect_via_seeder(
     let relays_ref = &relays;
     let terms = VetTerms {
         token: &token,
+        author: ticket.author,
         tree: majority.as_str(),
         channel_wait: f64::from(SEEDER_CHANNEL_WAIT_MS),
         can_serve: can_serve.as_ref(),
@@ -3621,6 +3730,7 @@ async fn connect_via_seeder(
         vetted,
         &waiting,
         token,
+        ticket.author,
         lookups,
         majority.as_str(),
         origin_error,
@@ -3670,6 +3780,7 @@ async fn redial_known_seeders(
     if entries.is_empty() {
         return None;
     }
+    let author = ticket.author;
     let relays: Vec<TransportAddr> = seeder_relays(ticket)
         .into_iter()
         .map(TransportAddr::Relay)
@@ -3701,6 +3812,7 @@ async fn redial_known_seeders(
             }
             let terms = VetTerms {
                 token,
+                author,
                 tree: &tree,
                 channel_wait: f64::from(KNOWN_SEEDER_CHANNEL_WAIT_MS),
                 can_serve,
@@ -3724,7 +3836,7 @@ async fn redial_known_seeders(
                 "[share] known seeder {} answered ahead of the card wait",
                 &vetted.endpoint[..8.min(vetted.endpoint.len())],
             )));
-            let tree = agent_share_proto::manifest::manifest_fingerprint(&vetted.bytes);
+            let tree = agent_share_proto::manifest::manifest_fingerprint(&vetted.fetched.body);
             // A win is the strongest proof of life there is, so any misses
             // this endpoint had banked from earlier attempts are void. The
             // strike count has to reset on evidence or it only ever climbs,
@@ -3752,6 +3864,7 @@ async fn redial_known_seeders(
                 vetted,
                 waiting,
                 *token,
+                author,
                 ticket.lookups.clone(),
                 &tree,
                 origin_error,
@@ -3835,6 +3948,7 @@ async fn adopt_vetted(
     vetted: VettedSeeder,
     waiting: &WaitingMesh,
     token: [u8; SECRET_LEN],
+    author: Option<[u8; 32]>,
     lookups: LookupOpts,
     majority: &str,
     origin_error: &JsValue,
@@ -3861,6 +3975,7 @@ async fn adopt_vetted(
     let mut client = new_share_client(
         vetted.connection,
         token,
+        author,
         data_path,
         Some(Arc::clone(&waiting.mount_hub)),
         None,
@@ -3895,7 +4010,7 @@ async fn adopt_vetted(
     *client.mesh.borrow_mut() = MeshSlot::Joined(Rc::clone(&waiting.peer));
     // The vetting fetch already paid for these bytes; the first manifest
     // call reuses them instead of re-paying the RTT.
-    *client.prefetched_manifest.borrow_mut() = Some((vetted.bytes, vetted.manifest));
+    *client.prefetched_manifest.borrow_mut() = Some(vetted.fetched);
     client
 }
 
@@ -4041,8 +4156,9 @@ struct VettedSeeder {
     connection: Connection,
     /// The candidate's endpoint string, for user-facing messages.
     endpoint: String,
-    bytes: Vec<u8>,
-    manifest: MountManifest,
+    /// Already signature-checked: vetting is a real manifest fetch, so a
+    /// candidate that could not prove authorship never became a `VettedSeeder`.
+    fetched: FetchedManifest,
     /// The data channel failed the bulk probe and `connection` is the relay
     /// replacement: label it "relay" and home the client on the
     /// relay-bearing endpoint.
@@ -4071,8 +4187,14 @@ struct Refusal {
 #[derive(Clone, Copy)]
 struct VetTerms<'a> {
     token: &'a [u8; SECRET_LEN],
+    /// The ticket's authorship key. When it is set, a candidate is judged on
+    /// the creator's signature and the card majority below is not consulted —
+    /// counting gossiped cards is a vote a Sybil wins, and a signature settles
+    /// the same question without one.
+    author: Option<[u8; 32]>,
     /// The tree the candidate must serve: the card majority, or the tree
-    /// this tab recorded for a known seeder.
+    /// this tab recorded for a known seeder. Only consulted for an unsigned
+    /// share, which has no offline authority at all.
     tree: &'a str,
     /// How long to wait for a data channel before conceding the relay.
     channel_wait: f64,
@@ -4096,6 +4218,7 @@ async fn vet_seeder_candidate(
 ) -> Result<VettedSeeder, Refusal> {
     let VetTerms {
         token,
+        author,
         tree,
         channel_wait,
         can_serve,
@@ -4134,11 +4257,14 @@ async fn vet_seeder_candidate(
     // The candidate must serve the tree its card claimed — fetched bytes,
     // hashed here, against the card. A mismatch is disqualifying, not
     // retryable: it lied once.
-    let (bytes, manifest) = match fetch_manifest_on(&connection, token).await {
-        Ok((bytes, manifest))
-            if agent_share_proto::manifest::manifest_fingerprint(&bytes) == tree =>
+    let fetched = match fetch_manifest_on(&connection, token, author).await {
+        // Signed: the fetch already checked the creator's signature, so the
+        // card's claim adds nothing and is deliberately not consulted.
+        Ok(fetched) if author.is_some() => fetched,
+        Ok(fetched)
+            if agent_share_proto::manifest::manifest_fingerprint(&fetched.body) == tree =>
         {
-            (bytes, manifest)
+            fetched
         }
         Ok(_) => {
             return Err(Refusal {
@@ -4162,7 +4288,7 @@ async fn vet_seeder_candidate(
     // is closed and redialled over the relay — bytes beat purity — and that
     // replacement is trusted the same way any relay connection is.
     let target = if via_data_channel {
-        let target = probe_target(&manifest.files);
+        let target = probe_target(&fetched.manifest.files);
         if target.is_none() {
             // Rare enough to say out loud: an unprobed channel carrying a
             // manifest with no readable bytes is fine today, but silence
@@ -4188,8 +4314,7 @@ async fn vet_seeder_candidate(
             Ok(relay_conn) => Ok(VettedSeeder {
                 connection: relay_conn,
                 endpoint,
-                bytes,
-                manifest,
+                fetched,
                 demoted: true,
             }),
             Err(error) => Err(Refusal {
@@ -4202,8 +4327,7 @@ async fn vet_seeder_candidate(
     Ok(VettedSeeder {
         connection,
         endpoint,
-        bytes,
-        manifest,
+        fetched,
         demoted: false,
     })
 }
@@ -4284,6 +4408,7 @@ async fn connect_relay(
     Ok(new_share_client(
         connection,
         token,
+        ticket.author,
         "relay".to_owned(),
         None,
         None,
@@ -4325,6 +4450,7 @@ async fn connect_relay_only(
     Ok(new_share_client(
         connection,
         token,
+        ticket.author,
         "relay".to_owned(),
         None,
         None,
@@ -4549,6 +4675,8 @@ async fn connect_webrtc(
     allow_relay_fallback: bool,
 ) -> Result<ShareClient, JsValue> {
     let producer = ticket.addr.id;
+    // Copied out before the ticket moves into the relay fallback below.
+    let author = ticket.author;
     ensure_reachable_addr(&ticket.addr)?;
 
     // **Two** endpoints on one key — and the split is what puts mount bytes on
@@ -4676,6 +4804,7 @@ async fn connect_webrtc(
             let mut client = new_share_client(
                 connection,
                 token,
+                author,
                 data_path,
                 Some(hub),
                 Some(session),
@@ -4720,6 +4849,7 @@ async fn finish_relay_fallback(
     let client = new_share_client(
         connection,
         token,
+        ticket.author,
         "relay".to_owned(),
         None,
         None,

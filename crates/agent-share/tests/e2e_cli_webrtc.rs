@@ -19,7 +19,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use agent_share_proto::framing::{self, MAX_MANIFEST_BYTES, MOUNT_ALPN, WEBRTC_SIGNAL_ALPN};
+use agent_share_proto::framing::{self, MAX_SIGNED_MANIFEST_BYTES, MOUNT_ALPN, WEBRTC_SIGNAL_ALPN};
 use agent_share_proto::manifest::MountManifest;
 use agent_share_proto::ticket::MountTicket;
 use fofoca::iroh::endpoint::{Connection, presets};
@@ -191,10 +191,14 @@ async fn manifest(conn: &Connection, secret: &[u8; 32]) -> MountManifest {
     send.finish().expect("finish");
     let mut prefix = [0u8; 5];
     recv.read_exact(&mut prefix).await.expect("prefix");
-    let len = framing::decode_response_header(&prefix, MAX_MANIFEST_BYTES).expect("header");
+    let len = framing::decode_response_header(&prefix, MAX_SIGNED_MANIFEST_BYTES).expect("header");
     let mut bytes = vec![0u8; len as usize];
     recv.read_exact(&mut bytes).await.expect("body");
-    MountManifest::decode(&bytes).expect("decode")
+    // `version ‖ signature ‖ manifest`. This test drives the real CLI, so the
+    // signature here is a genuine one; it is checked in `dead_origin`, where a
+    // forged manifest is the thing under test.
+    let signed = agent_share_proto::authorship::SignedManifest::decode(&bytes).expect("envelope");
+    MountManifest::decode(&signed.manifest).expect("decode")
 }
 
 async fn read(conn: &Connection, secret: &[u8; 32], index: u32, offset: u64, len: u32) -> Vec<u8> {
