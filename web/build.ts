@@ -33,6 +33,26 @@ if (!result.success) {
   process.exit(1)
 }
 
+// The service worker is its own bundle, at `dist/sw.js`, and deliberately **not**
+// content-addressed like the wasm beside it. A worker is identified by its URL:
+// the browser refetches that exact path to decide whether an update exists, so a
+// hashed name would register a second worker per build instead of updating the
+// one already installed. It also has to sit at the root — a worker's default
+// scope is its own directory, and only a root-served script controls
+// `/__stream/…`.
+const sw = await Bun.build({
+  entrypoints: ['./src/sw/index.ts'],
+  outdir: './dist',
+  naming: 'sw.js',
+  minify: true,
+  target: 'browser',
+})
+
+if (!sw.success) {
+  for (const log of sw.logs) console.error(log)
+  process.exit(1)
+}
+
 // `asset.path` rather than `asset.name`: the URL carries a `/wasm/` directory,
 // and `dist/` has to mirror it or a static host answers the app's fetch with
 // whatever its own not-found rule says — for an SPA, `index.html`.

@@ -114,6 +114,37 @@ const server = Bun.serve({
       'this build serves the wasm under a content-addressed name; rebuild the app bundle',
       { status: 404 },
     ),
+    // Rebundled per request, and never cached. A worker's default scope is its
+    // own directory, so it has to be served from the root to control
+    // `/__stream/…` — and a stale one is the worst thing in this system to
+    // debug, since it fails as a decode error somewhere else entirely.
+    '/sw.js': async () => {
+      const built = await Bun.build({ entrypoints: ['./src/sw/index.ts'], target: 'browser' })
+      const [output] = built.outputs
+      if (!output) {
+        return new Response('// service worker failed to build', {
+          status: 500,
+          headers: { 'content-type': 'text/javascript;charset=utf-8' },
+        })
+      }
+      return new Response(await output.text(), {
+        headers: {
+          'content-type': 'text/javascript;charset=utf-8',
+          'cache-control': 'no-cache',
+          // Root scope from a root-served script is the default, but stating it
+          // keeps the answer true if the script ever moves.
+          'service-worker-allowed': '/',
+        },
+      })
+    },
+    // Answered explicitly, for the same reason as the pre-hash wasm path above:
+    // these URLs exist only while a worker is controlling the page, and the SPA
+    // catch-all would otherwise hand `index.html` to a media element — which
+    // surfaces as a codec error naming the wrong problem.
+    '/__stream/*': new Response(
+      'no service worker is controlling this page, so nothing can answer a stream URL',
+      { status: 404, headers: { 'content-type': 'text/plain;charset=utf-8' } },
+    ),
     '/wasm/:name': async (req) => {
       const current = await currentAsset()
       if (current && req.params.name === current.name) {

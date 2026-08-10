@@ -46,6 +46,36 @@ Found by driving the full scenario in Chrome via agent-browse: seed two tabs,
 kill the producer, reconnect + newcomer. `AGENT_SHARE_DISCOVERY_DEADLINE_SECS`
 and the web's `origin_cap_ms` connect param exist for exactly this loop.
 
+**The same failure, measured outside agent-share, and it does not heal at all.**
+On 2026-08-10 an `agent-gossip` daemon in `#elder-stale` was found split from
+the other three members of its own gossip — all four on one host. The numbers
+are worth keeping, because they are the ones the mitigation above assumes:
+
+- `quota-note`, `pool-relic` and `datum-plain` saw each other `direct`, last
+  seen 6 s. `hail-trend` saw exactly one member: itself.
+- Both sides agreed on when they lost each other. Every cross-partition
+  `last_seen` was ~271,330 s — **75.4 hours**, after ~21 h meshed normally.
+- **It never healed.** The entry above puts failover at 1–10 minutes; this
+  stood for three days. That is the *lingering registrant* half rather than the
+  300 s cadence: a vacancy probe that permanently reads "held" never fires the
+  merge at all, so the cadence is irrelevant. Pruning dead registrants is the
+  half that matters, and it is the half still open.
+- Nothing local was wrong: the daemon reported `ready: true`, and
+  `agent-gossip doctor` passed every network check — public address, relay at
+  12 ms, endpoint-independent NAT with hole punching.
+- The wedged daemon **ignored `SIGTERM`** (`leave` reported
+  `confirmed: false`) while still answering local IPC, and needed `SIGKILL`.
+  A shutdown path that fails on the one daemon most in need of a restart is
+  its own bug.
+- `leave` + a fresh `join` healed it in seconds: both sides to 4 members, all
+  `direct`.
+
+**`ready: true` does not mean connected** — it says the local daemon is
+serving. Only `agent-gossip peers` (`peer_count`, and `quiet` per peer) and
+`doctor`'s per-daemon member counts reveal a split. Nothing in the normal
+status path does, which is why this ran for three days unnoticed, with an
+agent talking into a roster frozen at the moment of the split.
+
 ## Producer-less recovery works but is slow: ~60 s to re-arm, ~80 s to join
 
 Measured in the 2026-08-07 drill (pinned rev `52a72f76`, raced candidate

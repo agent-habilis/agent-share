@@ -5,19 +5,24 @@
  * gets, and for the same reason: a preview is a place you navigate to, so it
  * has a URL and a back button rather than a dismiss.
  *
- * # It buffers the whole file
+ * # Media streams; everything else buffers
  *
- * There is no service worker and no range-serving origin, so a `<video src>`
- * has nothing to seek against; the bytes have to become a Blob first. That is
- * an honest ceiling — a multi-gigabyte file will take the memory it takes —
- * and the answer here is to say what is happening rather than to refuse: the
- * loading state carries a spinner, a bar and both byte counts, and leaving the
- * view aborts the read mid-flight.
+ * Video and audio go through the service worker, which answers `Range` with
+ * 206 — so the element seeks on its own, and playback starts long before the
+ * last byte lands. That is the only way a `<video src>` can seek at all: a Blob
+ * URL needs every byte to exist before the URL does.
  *
- * Reads go through `singleFileStream` rather than a loop of their own. It
- * already chunks at the protocol's 256 KiB ceiling, already carries the
- * short-read guard that tells a seeder's truncation apart from EOF, and
- * already reports progress — three things worth not writing twice.
+ * When no worker is available — unsupported, an insecure context, private
+ * browsing — media falls back to the same whole-file Blob that text and images
+ * still use. That is an honest ceiling, and the answer is to say what is
+ * happening rather than refuse: the loading state carries a spinner, a bar and
+ * both byte counts, and leaving the view aborts the read mid-flight.
+ *
+ * Buffered reads go through `singleFileStream` rather than a loop of their own.
+ * It already chunks at the protocol's 256 KiB ceiling, already carries the
+ * short-read guard that tells a seeder's truncation apart from EOF, and already
+ * reports progress — three things worth not writing twice. The worker path
+ * carries that same guard, through `sourceIsOrigin` on the registration.
  */
 
 import { MiddleTruncate, ProgressBar, Spinner, Stack, Text, t } from 'moonspace-dom'
@@ -25,6 +30,7 @@ import { component, listen, signal } from 'visage-dom'
 import type { Child } from 'visage-dom'
 
 import { singleFileStream, type Progress } from '../../lib/download/index.ts'
+import { openStream, type Stream } from '../../lib/stream/index.ts'
 import { mimeFor, previewKind } from './previewKind/index.ts'
 import { humanBytes, type FileNode } from '../../lib/tree.ts'
 
@@ -144,7 +150,12 @@ export const Preview = component<PreviewProps>(function* (props) {
 
   /** Decoded text, for the `text` kind. */
   const body = signal<string | null>(null)
-  /** Object URL, for the three media kinds. Revoked on the way out. */
+  /**
+   * What the element's `src` points at: a stream URL when the worker took the
+   * file, an object URL when it was buffered. Revoking is unconditional on the
+   * way out — it is a no-op on anything that is not an object URL, and the
+   * alternative is remembering which kind this is in a second place.
+   */
   const url = signal<string | null>(null)
   const progress = signal<Progress>({ done: 0, total: node?.size ?? 0 })
   const error = signal<string | null>(null)
@@ -155,11 +166,16 @@ export const Preview = component<PreviewProps>(function* (props) {
    */
   const unplayable = signal(false)
 
+  /** The registered stream, while one is up. Taken down on the way out. */
+  let streaming: Stream | null = null
+
   const abort = new AbortController()
   ctx.aborted.addEventListener('abort', () => {
     abort.abort()
     const current = url.peek()
     if (current) URL.revokeObjectURL(current)
+    streaming?.release()
+    streaming = null
   })
 
   async function load(file: FileNode): Promise<void> {
@@ -167,6 +183,30 @@ export const Preview = component<PreviewProps>(function* (props) {
       progress.value = next
     }
     try {
+      // Media first tries the service worker, which is the only way a
+      // `<video src>` can seek: the element issues `Range` requests and the
+      // worker answers 206, so playback starts before the file is complete and
+      // scrubbing does not restart the download. `null` means no worker is
+      // available — no support, an insecure context, private browsing — and the
+      // whole-file Blob below is the honest fallback, exactly as before.
+      if (kind === 'video' || kind === 'audio') {
+        streaming = await openStream(
+          props.client,
+          { index: file.index, size: file.size, mime: mimeFor(file.name) },
+          file.name,
+        )
+        if (abort.signal.aborted) {
+          streaming?.release()
+          streaming = null
+          return
+        }
+        if (streaming) {
+          // No progress to report: the element decides what to fetch and when,
+          // so there is no total to count against.
+          url.value = streaming.url
+          return
+        }
+      }
       const stream = singleFileStream(props.client, file, onProgress, abort.signal)
       if (kind === 'text') {
         const text = await new Response(stream).text()
