@@ -698,6 +698,39 @@ mod tests {
         assert!(print.chars().all(|ch| ch.is_ascii_hexdigit()));
     }
 
+    /// The signed envelope is **not** the fingerprint domain.
+    ///
+    /// `OP_MANIFEST` answers `version ‖ signature ‖ manifest`, and a peer holds
+    /// that envelope at exactly the moment it wants to publish `card.tree`.
+    /// Fingerprinting what is in hand is the easy mistake, and it is silent: the
+    /// tab advertises a well-formed tree string that no other peer computes, so
+    /// it vouches for a tree nobody recognises and a consumer that pinned it
+    /// rejects the manifest as "changed trees after being vetted". The browser
+    /// client did exactly this from the commit that introduced signing until the
+    /// one that added this test.
+    #[test]
+    fn the_envelope_is_not_the_fingerprint_domain() {
+        let manifest = sample().encode();
+        let envelope = crate::authorship::SignedManifest {
+            version: 7,
+            signature: [0xab; crate::authorship::SIGNATURE_LEN],
+            manifest: manifest.clone(),
+        }
+        .encode();
+        assert_ne!(
+            manifest_fingerprint(&envelope),
+            manifest_fingerprint(&manifest),
+            "fingerprinting the envelope must not silently pass for the tree"
+        );
+        // And the safe path lands on the manifest's, whichever bytes were held.
+        assert_eq!(
+            MountManifest::decode(&manifest)
+                .expect("decode")
+                .fingerprint(),
+            manifest_fingerprint(&manifest)
+        );
+    }
+
     /// The producer fingerprints wire bytes, the consumer fingerprints a
     /// re-encode. They have to land on the same string or the guard is useless.
     #[test]

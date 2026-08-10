@@ -1891,9 +1891,13 @@ impl ShareClient {
     }
 
     /// Adopt what this tab holds into the seeder, then advertise it.
+    ///
+    /// `envelope` is the whole `OP_MANIFEST` body, which is what the seeder
+    /// re-serves. It is deliberately *not* what the card's tree is fingerprinted
+    /// over — see [`Self::publish_serving`].
     async fn republish(
         &self,
-        bytes: &[u8],
+        envelope: &[u8],
         manifest: &MountManifest,
         store: Arc<IdbStore>,
     ) -> Result<(), JsValue> {
@@ -1910,8 +1914,8 @@ impl ShareClient {
         // Serving before advertising: the seeder must answer for a chunk by the
         // time the card claims it, or a reader lands on `BadIndex`.
         self.seeder
-            .update(Arc::new(bytes.to_vec()), rows, store);
-        self.publish_serving(bytes, manifest).await;
+            .update(Arc::new(envelope.to_vec()), rows, store);
+        self.publish_serving(manifest).await;
         Ok(())
     }
 
@@ -1986,8 +1990,18 @@ impl ShareClient {
     /// Both fields together: an index means nothing without agreeing which
     /// manifest it indexes into, so a `serving` set published against the wrong
     /// tree would send readers to the wrong files.
-    async fn publish_serving(&self, manifest_bytes: &[u8], manifest: &MountManifest) {
-        let fingerprint = agent_share_proto::manifest::manifest_fingerprint(manifest_bytes);
+    ///
+    /// **Takes the manifest, never bytes.** `card.tree` is defined over the bare
+    /// manifest, while every caller here holds the *envelope* — the signed
+    /// `version ‖ signature ‖ manifest` the seeder re-serves. When signing
+    /// landed, those two stopped being the same bytes and this function kept
+    /// being handed the envelope, so a tab that synced advertised a tree
+    /// fingerprint no other peer computes. Fingerprinting the struct removes the
+    /// choice: `decode` → `encode` round-trips byte-for-byte
+    /// (`encoding_is_canonical`), so this is the body's fingerprint by
+    /// construction.
+    async fn publish_serving(&self, manifest: &MountManifest) {
+        let fingerprint = manifest.fingerprint();
         *self.last_tree.borrow_mut() = Some(fingerprint.clone());
         // Cloned out of the cell, not borrowed across the two awaits below:
         // see the note on the `mesh` field.
@@ -3922,7 +3936,11 @@ async fn connect_via_seeder(
                         held.push(*index);
                     }
                 }
-                let fingerprint = agent_share_proto::manifest::manifest_fingerprint(&bytes);
+                // Over the manifest, not the `bytes` envelope beside it: the
+                // locator this was loaded from records the same string, and a
+                // card carrying anything else vouches for a tree nobody
+                // recognises.
+                let fingerprint = manifest.fingerprint();
                 let serving =
                     agent_share_proto::serving::encode_serving(&held, manifest.files.len());
                 web_sys::console::debug_1(&JsValue::from_str(&format!(
