@@ -153,6 +153,34 @@ pub const OP_CHUNK: u8 = 7;
 /// significant bit first, and the bitmap is `chunks.div_ceil(8)` bytes.
 pub const OP_HAVE: u8 = 8;
 
+/// Ask what changed since a version this consumer already holds.
+///
+/// A consumer coming back to a share it has seen before does not need the tree
+/// again — on a large share that is several MB of manifest to learn that almost
+/// nothing moved. It names the version it holds and gets the difference.
+///
+/// Request body: `since_version(u64)`. Response: the status byte, then
+/// `target_version(u64) ‖ signature(64) ‖ count(u32) ‖ [len(u32) ‖ delta]…`,
+/// each delta a [`crate::manifest::ManifestDelta`] to apply in order.
+///
+/// **Refused rather than answered when the producer cannot reach that far
+/// back**, which a consumer answers by asking for the whole tree over
+/// [`OP_MANIFEST`]. That is also what a seeder always does: it re-serves a
+/// frozen snapshot and holds no history of its own.
+///
+/// # What makes an unsigned delta safe here
+///
+/// The deltas carry no signature — nothing in this protocol signs one. They do
+/// not need to. The consumer applies the chain to the manifest it already holds,
+/// re-encodes, and checks the **creator's** signature over
+/// `(target_version, its own reconstruction)`. Encoding is canonical
+/// (`encoding_is_canonical`), so a chain that is wrong in any way — truncated,
+/// reordered, or forged by a peer in the middle — reconstructs bytes the
+/// signature does not cover, and the consumer falls back to a full fetch instead
+/// of adopting it. The proof is the same one [`OP_MANIFEST`] carries; only the
+/// transport is cheaper.
+pub const OP_MANIFEST_SINCE: u8 = 9;
+
 /// Bytes in one chunk address.
 pub const CHUNK_ADDRESS_LEN: usize = 32;
 
@@ -244,6 +272,111 @@ pub fn encode_manifest_request(token: &[u8; SECRET_LEN]) -> Vec<u8> {
     out.extend_from_slice(token);
     out.push(OP_MANIFEST);
     out
+}
+
+/// Ceiling on an [`OP_MANIFEST_SINCE`] answer.
+///
+/// A chain that grows past this is a producer describing more change than the
+/// tree is worth: at that point the whole manifest is both smaller and simpler,
+/// so it refuses and the consumer asks for one. Sized as a few of the largest
+/// single deltas rather than as a share of the manifest cap, because what bounds
+/// it is how much churn is worth catching up on.
+pub const MAX_MANIFEST_SINCE_BYTES: u32 = 4 * MAX_DELTA_BYTES;
+
+/// Build a complete [`OP_MANIFEST_SINCE`] request: header followed by
+/// `since_version(u64)`.
+#[must_use]
+pub fn encode_manifest_since_request(token: &[u8; SECRET_LEN], since: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(REQUEST_HEADER_LEN + 8);
+    out.extend_from_slice(token);
+    out.push(OP_MANIFEST_SINCE);
+    out.extend_from_slice(&since.to_le_bytes());
+    out
+}
+
+/// One producer's answer to [`OP_MANIFEST_SINCE`], before it is applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestSince {
+    /// The version the chain arrives at.
+    pub target_version: u64,
+    /// The creator's signature over that version's manifest — the thing the
+    /// consumer checks its own reconstruction against.
+    pub signature: [u8; 64],
+    /// Deltas to apply in order, each an encoded
+    /// [`crate::manifest::ManifestDelta`].
+    pub deltas: Vec<Vec<u8>>,
+}
+
+impl ManifestSince {
+    /// Wire layout: `target_version(u64) ‖ signature(64) ‖ count(u32) ‖
+    /// [len(u32) ‖ delta]…`.
+    ///
+    /// # Panics
+    /// More than `u32::MAX` deltas, or one longer than `u32::MAX` bytes — the
+    /// same bounds every other length on this wire assumes, and both far past
+    /// what [`MAX_MANIFEST_SINCE_BYTES`] admits.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&self.target_version.to_le_bytes());
+        out.extend_from_slice(&self.signature);
+        out.extend_from_slice(
+            &u32::try_from(self.deltas.len())
+                .expect("delta count fits u32")
+                .to_le_bytes(),
+        );
+        for delta in &self.deltas {
+            out.extend_from_slice(
+                &u32::try_from(delta.len())
+                    .expect("delta length fits u32")
+                    .to_le_bytes(),
+            );
+            out.extend_from_slice(delta);
+        }
+        out
+    }
+
+    /// # Errors
+    /// The body is truncated, carries trailing bytes, or claims a delta longer
+    /// than [`MAX_DELTA_BYTES`] — each of which is a producer this consumer
+    /// should stop believing rather than allocate for.
+    ///
+    /// # Panics
+    /// Never: every fixed-width slice below is taken after a length check that
+    /// covers it.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        use anyhow::{bail, ensure};
+
+        ensure!(bytes.len() >= 8 + 64 + 4, "a manifest-since answer is short");
+        let target_version = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&bytes[8..72]);
+        let count = u32::from_le_bytes(bytes[72..76].try_into().expect("4 bytes")) as usize;
+        let mut cursor = 76;
+        // Capacity from the bytes actually present, never from `count`: the
+        // claim is the hostile input here.
+        let mut deltas = Vec::new();
+        for _ in 0..count {
+            ensure!(bytes.len() >= cursor + 4, "a delta length is truncated");
+            let len = u32::from_le_bytes(
+                bytes[cursor..cursor + 4].try_into().expect("4 bytes"),
+            );
+            if len > MAX_DELTA_BYTES {
+                bail!("a delta claims {len} bytes, past the cap");
+            }
+            let len = len as usize;
+            cursor += 4;
+            ensure!(bytes.len() >= cursor + len, "a delta is truncated");
+            deltas.push(bytes[cursor..cursor + len].to_vec());
+            cursor += len;
+        }
+        ensure!(cursor == bytes.len(), "trailing bytes after the deltas");
+        Ok(Self {
+            target_version,
+            signature,
+            deltas,
+        })
+    }
 }
 
 /// Build a complete [`OP_HASH`] request: header followed by `index(u32)`.

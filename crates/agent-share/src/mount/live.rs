@@ -18,7 +18,7 @@
 //! Directories carry no such constraint — nothing addresses them by position
 //! — so they are simply replaced wholesale on each scan and diffed by path.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -48,6 +48,16 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 /// is both cheaper and the only correct answer.
 const UPDATE_BACKLOG: usize = 64;
 
+/// How many bytes of published deltas an origin keeps so a returning consumer
+/// can be told the difference rather than the tree.
+///
+/// A budget in bytes rather than a count of versions, because bytes are what the
+/// process actually spends: a hundred one-file touches cost almost nothing, and
+/// four large rescans cost the cap on their own. Past it the oldest are dropped
+/// and a consumer asking from that far back is told to take the whole manifest —
+/// which by then is the smaller answer anyway.
+const DELTA_HISTORY_BYTES: usize = 4 * 1024 * 1024;
+
 /// The shared tree, and the channel every watcher listens on.
 ///
 /// `pub` only to be re-exported through `crate::test_support`: the enclosing
@@ -62,6 +72,15 @@ pub struct LiveTree {
     author: Option<SecretKey>,
     state: RwLock<TreeState>,
     updates: broadcast::Sender<Arc<Vec<u8>>>,
+}
+
+/// One published change, kept so it can be replayed to a consumer that missed it.
+struct Published {
+    /// The version this delta *arrives at*, so a consumer holding `version - 1`
+    /// is the one it applies to.
+    version: u64,
+    /// The encoded [`ManifestDelta`], exactly as the watch stream carried it.
+    delta: Arc<Vec<u8>>,
 }
 
 struct TreeState {
@@ -87,6 +106,16 @@ struct TreeState {
     /// Signing per request would put an ed25519 operation over several MB on
     /// the path of every consumer that connects.
     envelope: Arc<Vec<u8>>,
+    /// Recent published deltas, oldest first, bounded by
+    /// [`DELTA_HISTORY_BYTES`]. What `OP_MANIFEST_SINCE` replays.
+    ///
+    /// Only deltas land here. A change too large to express as one is published
+    /// as a whole manifest instead, and there is nothing to replay for it — the
+    /// history is cleared, so a consumer asking across that point is correctly
+    /// told to take the tree.
+    history: VecDeque<Published>,
+    /// Bytes held in `history`, tracked rather than recomputed per push.
+    history_bytes: usize,
 }
 
 /// Wrap manifest bytes in the envelope `OP_MANIFEST` serves.
@@ -164,6 +193,8 @@ impl LiveTree {
                 encoded,
                 version: 1,
                 envelope,
+                history: VecDeque::new(),
+                history_bytes: 0,
             }),
             updates,
         }
@@ -246,6 +277,10 @@ impl LiveTree {
                 encoded: Arc::new(origin_bytes),
                 version,
                 envelope: Arc::new(envelope),
+                // A mirror publishes no changes of its own, so it never has a
+                // difference to replay — see `LiveTree::mirrored`.
+                history: VecDeque::new(),
+                history_bytes: 0,
             }),
             updates,
         })
@@ -451,12 +486,81 @@ impl LiveTree {
             let mut frame = Vec::with_capacity(body.len() + 1);
             frame.push(WATCH_FRAME_DELTA);
             frame.extend_from_slice(&body);
+            state.remember(body);
             Some(frame)
         } else {
             // Too much changed to describe as a difference. Saying so with the
             // whole manifest is both smaller and simpler than splitting it.
+            //
+            // And the history goes with it: a consumer cannot cross this point
+            // by applying deltas, because there is no delta describing it. Kept
+            // entries would let a later request span the gap and reconstruct a
+            // tree that never existed — the signature check on the far side
+            // would catch it, but answering with a chain we know is broken is
+            // not something to leave for the reader to catch.
+            state.forget_history();
             Some(Self::manifest_frame(&state.encoded))
         }
+    }
+
+    /// Deltas carrying a consumer at `since` up to the current version.
+    ///
+    /// `None` when that cannot be done — the version is unknown, older than the
+    /// history reaches, or newer than this tree — and the caller answers with
+    /// the whole manifest instead. `Some` with an empty chain means "you are
+    /// already current", which is the common answer and the cheap one.
+    ///
+    /// The signature returned is the **current** version's, over the manifest a
+    /// correct consumer will have reconstructed. That is what makes an unsigned
+    /// delta safe to send; see `OP_MANIFEST_SINCE`.
+    pub(super) fn deltas_since(&self, since: u64) -> Option<(u64, [u8; SIGNATURE_LEN], Vec<Vec<u8>>)> {
+        let state = self.read();
+        if since > state.version {
+            // Ahead of us: a consumer holding a version this tree never
+            // published, which a restarted origin produces. Nothing to replay.
+            return None;
+        }
+        let signature = SignedManifest::decode(&state.envelope).ok()?.signature;
+        if since == state.version {
+            return Some((state.version, signature, Vec::new()));
+        }
+        // Every step from `since + 1` to now has to be present. A gap cannot be
+        // skipped: deltas apply in order, against exactly the state before them.
+        let mut chain = Vec::new();
+        let mut want = since + 1;
+        for entry in &state.history {
+            if entry.version < want {
+                continue;
+            }
+            if entry.version != want {
+                return None;
+            }
+            chain.push(entry.delta.as_ref().clone());
+            want += 1;
+        }
+        (want > state.version).then_some((state.version, signature, chain))
+    }
+}
+
+impl TreeState {
+    /// Keep `delta` as the step that reached the current version.
+    fn remember(&mut self, delta: Vec<u8>) {
+        self.history_bytes += delta.len();
+        self.history.push_back(Published {
+            version: self.version,
+            delta: Arc::new(delta),
+        });
+        while self.history_bytes > DELTA_HISTORY_BYTES {
+            let Some(oldest) = self.history.pop_front() else {
+                break;
+            };
+            self.history_bytes -= oldest.delta.len();
+        }
+    }
+
+    fn forget_history(&mut self) {
+        self.history.clear();
+        self.history_bytes = 0;
     }
 }
 
@@ -716,6 +820,80 @@ mod tests {
             .map(|(path, _)| PathBuf::from(format!("/root/{path}")))
             .collect();
         LiveTree::new(PathBuf::from("/root"), manifest, paths)
+    }
+
+    /// **The end-to-end claim of `OP_MANIFEST_SINCE`**, asserted against the
+    /// real producer rather than a hand-built chain: a consumer holding an
+    /// earlier version is carried forward by the deltas alone, and what it
+    /// rebuilds is byte-for-byte what the creator signed.
+    ///
+    /// If those two ever diverge the signature check is what catches it, so
+    /// this is also the test that keeps the fallback from becoming the only
+    /// path — a silently-broken chain would still be *safe*, and permanently
+    /// useless.
+    #[test]
+    fn a_consumer_is_carried_forward_by_the_deltas_alone() {
+        let tree = LiveTree::authored(
+            PathBuf::from("/root"),
+            MountManifest {
+                dirs: Vec::new(),
+                files: vec![entry("a", 1)],
+            },
+            vec![PathBuf::from("/root/a")],
+            Some(creator()),
+        );
+        let held = SignedManifest::decode(&tree.manifest_envelope()).expect("decode");
+
+        // Already current: an empty chain, which is the common answer.
+        let (version, _, chain) = tree.deltas_since(held.version).expect("current");
+        assert_eq!(version, held.version);
+        assert!(chain.is_empty());
+
+        rescan(&tree, &[("a", 4096)]);
+        rescan(&tree, &[("a", 4096), ("b", 7)]);
+
+        let (target, signature, deltas) = tree.deltas_since(held.version).expect("a difference");
+        assert_eq!(deltas.len(), 2, "one per published version");
+        let caught_up = agent_share_proto::manifest::apply_since(
+            &held,
+            &agent_share_proto::framing::ManifestSince {
+                target_version: target,
+                signature,
+                deltas,
+            },
+            Some(&creator().public()),
+        )
+        .expect("the chain must rebuild what was signed");
+        let current = SignedManifest::decode(&tree.manifest_envelope()).expect("decode");
+        assert_eq!(caught_up.version, current.version);
+        assert_eq!(caught_up.manifest, current.manifest);
+    }
+
+    /// A version the history no longer reaches is refused rather than answered
+    /// with a chain that skips a step. Deltas apply against exactly the state
+    /// before them, so a gap is not something a consumer could survive.
+    #[test]
+    fn a_version_past_the_history_is_refused() {
+        let tree = LiveTree::authored(
+            PathBuf::from("/root"),
+            MountManifest {
+                dirs: Vec::new(),
+                files: vec![entry("a", 1)],
+            },
+            vec![PathBuf::from("/root/a")],
+            Some(creator()),
+        );
+        rescan(&tree, &[("a", 2)]);
+
+        assert!(
+            tree.deltas_since(0).is_none(),
+            "version 0 predates the first published delta"
+        );
+        assert!(
+            tree.deltas_since(99).is_none(),
+            "a version this tree never published — a restarted origin — is refused"
+        );
+        assert!(tree.deltas_since(1).is_some(), "the step we do hold");
     }
 
     fn rescan(tree: &LiveTree, files: &[(&str, u64)]) -> ManifestDelta {

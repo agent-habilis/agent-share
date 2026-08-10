@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_share_mount::{ServeSource, Watcher};
+use agent_share_proto::framing::ManifestSince;
 use agent_share_proto::manifest::ReadStatus;
 use fofoca_chunks::{ChunkHash, ChunkMap, Coverage, Root};
 use tokio::sync::broadcast;
@@ -71,6 +72,17 @@ impl ServeSource for ProducerSource {
 
     fn manifest_envelope(&self) -> Option<Vec<u8>> {
         Some(self.tree.manifest_envelope().as_ref().clone())
+    }
+
+    /// The one source that can answer this: it publishes the changes, so it is
+    /// the only one with a difference to describe.
+    fn answer_manifest_since(&self, since: u64) -> Option<ManifestSince> {
+        let (target_version, signature, deltas) = self.tree.deltas_since(since)?;
+        Some(ManifestSince {
+            target_version,
+            signature,
+            deltas,
+        })
     }
 
     fn subscribe(&self) -> Option<(Vec<u8>, Self::Watcher)> {
@@ -160,6 +172,16 @@ impl ServeSource for NativeSource {
         match self {
             Self::Producer(source) => source.manifest_envelope(),
             Self::Seeding(seeder) => seeder.manifest_envelope(),
+        }
+    }
+
+    /// Forwarded rather than left to the trait's default, which would refuse on
+    /// the one source that can answer. The seeder keeps the default on purpose:
+    /// it re-serves a snapshot and publishes no changes of its own.
+    fn answer_manifest_since(&self, since: u64) -> Option<ManifestSince> {
+        match self {
+            Self::Producer(source) => source.answer_manifest_since(since),
+            Self::Seeding(seeder) => seeder.answer_manifest_since(since),
         }
     }
 

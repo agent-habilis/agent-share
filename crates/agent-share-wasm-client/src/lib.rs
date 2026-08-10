@@ -1190,6 +1190,55 @@ impl ShareClient {
 
     /// The manifest, and the exact bytes it was decoded from.
     ///
+    /// The manifest this tab already holds, carried forward by asking the
+    /// producer only what changed.
+    ///
+    /// `None` for every case that should simply fetch the tree: a tab that has
+    /// never seeded this share, a producer that cannot reach back that far (or
+    /// is a seeder, which publishes no changes of its own), or a difference that
+    /// does not rebuild what the creator signed. All of those are ordinary, and
+    /// the caller's next line handles them — so this returns an `Option` rather
+    /// than a `Result` a caller would have to decide about.
+    ///
+    /// The persisted manifest is read adopt-only, so a tab that has merely
+    /// browsed creates no storage looking for one.
+    async fn fetch_manifest_difference(&self) -> Option<FetchedManifest> {
+        let (envelope, ..) = load_persisted_manifest(&self.token).await?;
+        let held = SignedManifest::decode(&envelope).ok()?;
+        let answer = fetch_manifest_since_on(&self.connection, &self.token, held.version)
+            .await
+            .ok()??;
+        let author = self.author.and_then(|bytes| {
+            agent_share_proto::authorship::PublicKey::from_bytes(&bytes).ok()
+        });
+        let caught_up =
+            match agent_share_proto::manifest::apply_since(&held, &answer, author.as_ref()) {
+                Ok(caught_up) => caught_up,
+                Err(error) => {
+                    // Said out loud rather than swallowed: falling back is
+                    // correct, but a producer answering with something that does
+                    // not verify is not the same as one that cannot answer.
+                    web_sys::console::warn_1(&JsValue::from_str(&format!(
+                        "[share] the manifest difference did not verify ({error}); \
+                         fetching the whole tree"
+                    )));
+                    return None;
+                }
+            };
+        let manifest = MountManifest::decode(&caught_up.manifest).ok()?;
+        web_sys::console::debug_1(&JsValue::from_str(&format!(
+            "[share] caught the manifest up from version {} to {} over {} delta(s)",
+            held.version,
+            caught_up.version,
+            answer.deltas.len()
+        )));
+        Some(FetchedManifest {
+            body: caught_up.manifest.clone(),
+            envelope: caught_up.encode(),
+            manifest,
+        })
+    }
+
     /// The bytes matter separately from the struct: the tree fingerprint is
     /// taken over what the producer actually served, so both sides hash the
     /// same thing rather than trusting a re-encode to be canonical.
@@ -1199,6 +1248,11 @@ impl ShareClient {
             // Already in hand — the seeder fallback's vetted pair, or the
             // origin prefetch. Skips a round trip, not any check below.
             Some(pair) => pair,
+            // A tab that has seeded this share before holds a manifest already,
+            // so it asks for the difference rather than the tree. Everything
+            // below still runs on the result — the fingerprint, the pin check,
+            // the card — because a caught-up manifest is a manifest.
+            None if let Some(caught_up) = self.fetch_manifest_difference().await => caught_up,
             None => match fetch_manifest_on(&self.connection, &self.token, self.author).await {
                 Ok(pair) => pair,
                 // The first request is where a refused credential surfaces: the
@@ -2855,6 +2909,42 @@ async fn fetch_have_on(
         return None;
     }
     Coverage::from_bits(&bitmap, chunks).ok()
+}
+
+/// One `OP_MANIFEST_SINCE` round on `conn`.
+///
+/// `Ok(None)` is the producer declining — refusing the request, or dropping the
+/// stream because it is old enough not to know the op — which is a fallback, not
+/// a failure. `Err` is a producer that answered with something malformed.
+async fn fetch_manifest_since_on(
+    conn: &Connection,
+    token: &[u8; SECRET_LEN],
+    since: u64,
+) -> Result<Option<framing::ManifestSince>, JsValue> {
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|error| stream_open_failed("could not ask what changed", &error))?;
+    send.write_all(&framing::encode_manifest_since_request(token, since))
+        .await
+        .map_err(|error| err("send manifest-since request", &error))?;
+    send.finish().map_err(|error| err("finish", &error))?;
+
+    let mut status = [0u8; 1];
+    if recv.read_exact(&mut status).await.is_err() {
+        return Ok(None);
+    }
+    if status[0] != agent_share_proto::manifest::ReadStatus::Ok.to_byte() {
+        return Ok(None);
+    }
+    let len = read_len(&mut recv, framing::MAX_MANIFEST_SINCE_BYTES).await?;
+    let mut body = vec![0u8; len as usize];
+    recv.read_exact(&mut body)
+        .await
+        .map_err(|error| err("read the manifest difference", &error))?;
+    framing::ManifestSince::decode(&body)
+        .map(Some)
+        .map_err(|error| JsValue::from_str(&format!("decoding the manifest difference: {error}")))
 }
 
 /// One manifest round on `conn`: the exact bytes served, and their decoding.

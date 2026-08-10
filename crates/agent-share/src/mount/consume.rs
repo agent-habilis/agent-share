@@ -24,7 +24,9 @@ use super::{
     OP_READ, OP_WATCH,
 };
 use agent_share_proto::authorship::SignedManifest;
-use agent_share_proto::framing::MAX_SIGNED_MANIFEST_BYTES;
+use agent_share_proto::framing::{
+    MAX_MANIFEST_SINCE_BYTES, MAX_SIGNED_MANIFEST_BYTES, ManifestSince, OP_MANIFEST_SINCE,
+};
 // The root type comes from the store, not from this crate: `agent-share` names
 // what `fofoca-blobs` verifies against rather than defining a second one.
 use super::{MountManifest, ReadStatus};
@@ -1037,6 +1039,61 @@ impl RemoteClient {
         // it accepted.
         accept_manifest(&self.ticket, &signed, 0)?;
         Ok(signed)
+    }
+
+    /// Catch `held` up to the producer's current version, or `None` to say the
+    /// whole manifest is needed after all.
+    ///
+    /// `None` is ordinary and covers every case worth falling back on: a
+    /// producer too old to know the op, a seeder (which publishes no changes of
+    /// its own), a version reaching further back than the history kept, or a
+    /// restarted origin whose versions have nothing to do with the ones this
+    /// copy holds. The caller asks for the tree, which is what it did before
+    /// this existed.
+    ///
+    /// A chain that arrives but does not rebuild what the creator signed is
+    /// **not** `None` — it is an error, because a producer answering with
+    /// something unverifiable is a different situation from one that cannot
+    /// answer, and silently re-fetching would hide it.
+    pub(super) async fn fetch_manifest_since(
+        &self,
+        held: &SignedManifest,
+    ) -> Result<Option<SignedManifest>> {
+        let (mut send, mut recv) = self.request(OP_MANIFEST_SINCE).await?;
+        send.write_all(&held.version.to_le_bytes()).await?;
+        let _ = send.finish();
+        let mut status = [0u8; 1];
+        if recv.read_exact(&mut status).await.is_err() {
+            // An older producer drops the stream on an op it does not know,
+            // exactly as `OP_WATCH` documents. Not an error: it simply cannot
+            // answer this question.
+            return Ok(None);
+        }
+        if ReadStatus::from_byte(status[0])? != ReadStatus::Ok {
+            return Ok(None);
+        }
+        let len = read_u32(&mut recv).await?;
+        if len > MAX_MANIFEST_SINCE_BYTES {
+            bail!("a manifest-since answer of {len} bytes is past the cap");
+        }
+        let mut bytes = vec![0u8; usize::try_from(len).expect("u32 fits usize")];
+        recv.read_exact(&mut bytes)
+            .await
+            .context("reading the manifest difference failed")?;
+        let answer = ManifestSince::decode(&bytes)?;
+        let author = self
+            .ticket
+            .author
+            .map(|key| {
+                agent_share_proto::authorship::PublicKey::from_bytes(&key)
+                    .context("the ticket's authorship key is not a public key")
+            })
+            .transpose()?;
+        let caught_up = agent_share_proto::manifest::apply_since(held, &answer, author.as_ref())?;
+        if u32::try_from(caught_up.manifest.len()).is_ok_and(|inner| inner > MAX_MANIFEST_BYTES) {
+            bail!("manifest too large: {} bytes", caught_up.manifest.len());
+        }
+        Ok(Some(caught_up))
     }
 
     /// The decoded manifest, with the envelope discarded.

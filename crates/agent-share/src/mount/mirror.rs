@@ -32,6 +32,7 @@
 use std::path::{Path, PathBuf};
 
 use agent_share_proto::auth::ShareAuth;
+use agent_share_proto::authorship::SignedManifest;
 use anyhow::{Context, Result, bail};
 use fofoca_chunks::ChunkMap;
 
@@ -193,6 +194,44 @@ pub(crate) async fn mirror(
     Ok(())
 }
 
+/// The origin's manifest — as a difference when this destination already holds
+/// one, and whole when it does not.
+///
+/// **A re-run into a folder mirrored before is the common case**, and it used to
+/// pay for the tree again to learn that almost nothing moved: on a large share
+/// that is several MB fetched to discover a handful of changed files. The
+/// sidecar already keeps the envelope this copy was built from, so the version
+/// is right there to ask from.
+///
+/// Every failure falls back to the whole manifest, including a sidecar that does
+/// not decode — a copy left half-written by an interrupted run must not be able
+/// to stop a later one from working.
+async fn fetch_manifest_for(client: &RemoteClient, dest: &Path) -> Result<SignedManifest> {
+    let held = origin_manifest_for(dest).and_then(|bytes| SignedManifest::decode(&bytes).ok());
+    if let Some(held) = held {
+        match client.fetch_manifest_since(&held).await {
+            Ok(Some(caught_up)) => {
+                tracing::debug!(
+                    from = held.version,
+                    to = caught_up.version,
+                    "caught the mirror's manifest up by difference"
+                );
+                return Ok(caught_up);
+            }
+            // The producer cannot answer from that far back — or is a seeder, or
+            // predates the op. Ordinary; ask for the tree.
+            Ok(None) => {}
+            // It answered with something that does not rebuild what the creator
+            // signed. Worth a line: the fallback hides it otherwise, and a
+            // producer doing this is not the same as one that cannot answer.
+            Err(error) => {
+                tracing::warn!(%error, "the difference did not verify; fetching the whole manifest");
+            }
+        }
+    }
+    client.fetch_signed_manifest().await
+}
+
 /// What the copy has to remember about the share it came from, so that
 /// `agent-share serve` on it rejoins that share rather than starting a rival.
 ///
@@ -223,7 +262,7 @@ async fn copy_all(
     // The *bytes*, not just the decoded struct. A mirror re-serves these
     // verbatim so its indices stay the origin's — see `LiveTree::mirrored` — and
     // the creator's signature with them, since a copy has no way to make one.
-    let signed = client.fetch_signed_manifest().await?;
+    let signed = fetch_manifest_for(client, dest).await?;
     let envelope = signed.encode();
     let manifest = agent_share_proto::manifest::MountManifest::decode(&signed.manifest)?;
     std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;

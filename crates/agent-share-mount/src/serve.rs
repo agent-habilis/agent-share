@@ -6,8 +6,8 @@
 
 use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::framing::{
-    MAX_READ_LEN, OP_CHUNK, OP_CHUNK_MAP, OP_HAVE, OP_MANIFEST, OP_READ, OP_WATCH,
-    REQUEST_HEADER_LEN, SECRET_LEN, encode_chunk_map, encode_have,
+    MAX_READ_LEN, ManifestSince, OP_CHUNK, OP_CHUNK_MAP, OP_HAVE, OP_MANIFEST, OP_MANIFEST_SINCE,
+    OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, encode_chunk_map, encode_have,
 };
 use agent_share_proto::manifest::ReadStatus;
 use anyhow::{Context as _, Result};
@@ -55,6 +55,20 @@ pub trait ServeSource: Clone + 'static {
     /// nothing to vouch for — which closes the stream rather than inventing an
     /// answer.
     fn manifest_envelope(&self) -> Option<Vec<u8>>;
+
+    /// Answer one `OP_MANIFEST_SINCE`: the deltas carrying a consumer from
+    /// `since` to this source's current version, with the signature over that
+    /// version's manifest.
+    ///
+    /// `None` means "ask for the whole tree", and it is the honest answer far
+    /// more often than not: **the default is `None`**, because only a source
+    /// that publishes its own changes has a difference to describe. A seeder
+    /// re-serves a frozen snapshot and the browser producer keeps no history, so
+    /// neither can replay one, and neither should pretend to.
+    fn answer_manifest_since(&self, since: u64) -> Option<ManifestSince> {
+        let _ = since;
+        None
+    }
 
     /// Register a watcher: the opening frame, then the update stream.
     ///
@@ -146,6 +160,20 @@ pub async fn serve_stream<S: ServeSource>(
                 return Ok(());
             };
             write_ok_body(&mut send, &envelope).await?;
+        }
+        OP_MANIFEST_SINCE => {
+            let Some(request) = read_body::<8>(&mut recv).await else {
+                return Ok(());
+            };
+            let since = u64::from_le_bytes(request);
+            let Some(answer) = source.answer_manifest_since(since) else {
+                // "Take the whole tree instead", which the consumer already
+                // knows how to do. Cheaper than a status byte of its own: this
+                // is the cold path, and one extra round trip against a manifest
+                // measured in megabytes is not the cost worth optimising.
+                return refuse(&mut send).await;
+            };
+            write_ok_body(&mut send, &answer.encode()).await?;
         }
         OP_WATCH => {
             // Long-lived, unlike every other op: it returns when the consumer

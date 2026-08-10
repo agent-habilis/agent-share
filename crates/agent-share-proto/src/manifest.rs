@@ -112,6 +112,59 @@ pub fn manifest_fingerprint(manifest_bytes: &[u8]) -> String {
     out
 }
 
+/// Catch a manifest up to `answer`, and prove the result.
+///
+/// The consumer's half of `OP_MANIFEST_SINCE`. `held` is the signed manifest
+/// this peer already has; `answer` is the chain a producer sent to carry it
+/// forward.
+///
+/// # Why an unsigned delta is safe to apply
+///
+/// Nothing signs a delta. Nothing needs to. The chain is applied to bytes this
+/// peer already trusts, the result is re-encoded, and the **creator's**
+/// signature is checked over that reconstruction — so the proof covers the
+/// outcome rather than the transport. Encoding is canonical
+/// (`encoding_is_canonical`), so any chain that is wrong in any way — truncated,
+/// reordered, replayed, or forged by a peer relaying it — reconstructs bytes the
+/// signature does not cover, and this fails rather than adopting them. The
+/// caller then asks for the whole manifest, which is what it would have done
+/// anyway.
+///
+/// `author` of `None` is an unsigned share, where there is nothing to check and
+/// nothing to forge: such a share is only ever as trustworthy as the endpoint it
+/// came from, exactly as `OP_MANIFEST` on one is.
+///
+/// # Errors
+/// A delta does not decode, the target version goes backwards, or the
+/// reconstruction does not carry the creator's signature.
+pub fn apply_since(
+    held: &crate::authorship::SignedManifest,
+    answer: &crate::framing::ManifestSince,
+    author: Option<&crate::authorship::PublicKey>,
+) -> Result<crate::authorship::SignedManifest> {
+    if answer.target_version < held.version {
+        bail!(
+            "a producer offered version {} after version {}; refusing to roll back",
+            answer.target_version,
+            held.version
+        );
+    }
+    let mut manifest = MountManifest::decode(&held.manifest)?;
+    for delta in &answer.deltas {
+        manifest.apply(&ManifestDelta::decode(delta)?);
+    }
+    let rebuilt = manifest.encode();
+    let signed = crate::authorship::SignedManifest {
+        version: answer.target_version,
+        signature: answer.signature,
+        manifest: rebuilt,
+    };
+    if let Some(author) = author {
+        signed.accept(author, held.version)?;
+    }
+    Ok(signed)
+}
+
 impl MountManifest {
     /// This tree's fingerprint, as published on [`crate::PeerCard`]'s `tree`.
     ///
@@ -501,7 +554,8 @@ impl Cursor<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DirEntry, FileEntry, ManifestDelta, MountManifest, ReadStatus, manifest_fingerprint,
+        DirEntry, FileEntry, ManifestDelta, MountManifest, ReadStatus, apply_since,
+        manifest_fingerprint,
     };
 
     fn sample_delta() -> ManifestDelta {
@@ -696,6 +750,88 @@ mod tests {
             "16 hex chars keeps the card inside a frame"
         );
         assert!(print.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    /// A caught-up manifest carries the creator's signature, and a tampered
+    /// chain does not.
+    ///
+    /// The whole argument for sending unsigned deltas: the proof covers the
+    /// *result*, so a peer relaying the chain cannot change what the consumer
+    /// ends up believing. Both halves are asserted here, because only the pair
+    /// is the claim — that it works is unremarkable, that it cannot be subverted
+    /// is the point.
+    #[test]
+    fn a_delta_chain_is_only_taken_when_it_rebuilds_what_the_creator_signed() {
+        use crate::authorship::{PublicKey, SecretKey, SignedManifest, sign_manifest};
+        use crate::framing::ManifestSince;
+
+        let creator = SecretKey::from_bytes(&[9u8; 32]);
+        let author: PublicKey = creator.public();
+
+        let held_manifest = sample();
+        let held_bytes = held_manifest.encode();
+        let held = SignedManifest {
+            version: 4,
+            signature: sign_manifest(&creator, 4, &held_bytes),
+            manifest: held_bytes,
+        };
+
+        // What the producer would publish next: one file's size changes.
+        let delta = ManifestDelta {
+            files_upserted: vec![(
+                0,
+                FileEntry {
+                    rel_path: sample().files[0].rel_path.clone(),
+                    size: 4242,
+                    mode: 0o644,
+                    mtime: 1_700_000_009,
+                },
+            )],
+            ..ManifestDelta::default()
+        };
+        let mut ahead = sample();
+        ahead.apply(&delta);
+        let ahead_bytes = ahead.encode();
+
+        let answer = ManifestSince {
+            target_version: 5,
+            signature: sign_manifest(&creator, 5, &ahead_bytes),
+            deltas: vec![delta.encode()],
+        };
+        let caught_up = apply_since(&held, &answer, Some(&author)).expect("catch up");
+        assert_eq!(caught_up.version, 5);
+        assert_eq!(
+            caught_up.manifest, ahead_bytes,
+            "the reconstruction must be byte-exact, or the signature is meaningless"
+        );
+
+        // Now the hostile case: a relay swaps in a delta of its own, keeping the
+        // creator's signature. The reconstruction stops matching what was
+        // signed, so it is refused rather than adopted.
+        let tampered = ManifestSince {
+            deltas: vec![
+                ManifestDelta {
+                    files_removed: vec![0],
+                    ..ManifestDelta::default()
+                }
+                .encode(),
+            ],
+            ..answer.clone()
+        };
+        assert!(
+            apply_since(&held, &tampered, Some(&author)).is_err(),
+            "a chain that rebuilds something else must not be believed"
+        );
+
+        // And a producer replaying an older version loses to what we hold.
+        let backwards = ManifestSince {
+            target_version: 3,
+            ..answer
+        };
+        assert!(
+            apply_since(&held, &backwards, Some(&author)).is_err(),
+            "rolling a consumer backwards must be refused"
+        );
     }
 
     /// The signed envelope is **not** the fingerprint domain.
