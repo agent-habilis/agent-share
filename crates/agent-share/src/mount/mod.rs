@@ -8,6 +8,7 @@ mod mirror;
 mod nfs;
 mod produce;
 mod scan;
+mod source;
 mod sources;
 mod webrtc;
 
@@ -21,11 +22,36 @@ pub mod test_support {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use agent_share_proto::auth::ShareAuth;
     use agent_share_proto::manifest::MountManifest;
     use anyhow::Result;
+    use fofoca::iroh::endpoint::Connection;
+
+    use super::hash::ChunkCache;
+    use super::live::LiveTree as Tree;
 
     pub use super::live::LiveTree;
-    pub use super::produce::serve_established as serve_mount;
+    /// Serve a mount over an established connection, from a scanned tree.
+    ///
+    /// Wraps the tree in a [`super::source::NativeSource`] so the integration
+    /// tests keep naming what they mean — a producer over these files — rather
+    /// than the enum the CLI needs internally to satisfy `tokio::spawn`.
+    ///
+    /// # Errors
+    /// The connection drops, or a stream write fails.
+    pub async fn serve_mount(
+        conn: Connection,
+        auth: ShareAuth,
+        tree: Arc<Tree>,
+        hashes: Option<Arc<ChunkCache>>,
+    ) -> Result<()> {
+        super::produce::serve_established(
+            conn,
+            auth,
+            super::source::NativeSource::Producer(super::source::ProducerSource::new(tree, hashes)),
+        )
+        .await
+    }
     pub use super::scan::scan;
     /// The two halves of the share's `WebRTC` lane, so a test can drive the real
     /// ones rather than a hand-rolled copy. The hand-rolled copy in
@@ -65,8 +91,8 @@ pub(crate) use produce::serve;
 // them (`agent_share_proto::framing` — `wire_constants_are_pinned`).
 pub(crate) use agent_share_proto::framing::{
     MAX_CHUNK_MAP_BYTES, MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH,
-    OP_CHUNK, OP_CHUNK_MAP, OP_HAVE, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN,
-    SECRET_LEN, WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST,
+    OP_CHUNK, OP_CHUNK_MAP, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN,
+    WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST,
 };
 pub(crate) use agent_share_proto::manifest::{MountManifest, ReadStatus};
 pub(crate) use agent_share_proto::ticket::MountTicket;
@@ -164,7 +190,14 @@ mod tests {
                 let tree = Arc::clone(&tree);
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
-                    let _ = produce::serve_established(conn, auth, tree, None).await;
+                    let _ = produce::serve_established(
+                        conn,
+                        auth,
+                        crate::mount::source::NativeSource::Producer(
+                            crate::mount::source::ProducerSource::new(tree, None),
+                        ),
+                    )
+                    .await;
                 });
             }
         });
@@ -205,7 +238,14 @@ mod tests {
                 let hashes = hashes.clone();
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
-                    let _ = produce::serve_established(conn, auth, tree, hashes).await;
+                    let _ = produce::serve_established(
+                        conn,
+                        auth,
+                        crate::mount::source::NativeSource::Producer(
+                            crate::mount::source::ProducerSource::new(tree, hashes),
+                        ),
+                    )
+                    .await;
                 });
             }
         });
@@ -256,7 +296,14 @@ mod tests {
                 let tree = Arc::clone(&tree);
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
-                    let _ = produce::serve_established(conn, auth, tree, None).await;
+                    let _ = produce::serve_established(
+                        conn,
+                        auth,
+                        crate::mount::source::NativeSource::Producer(
+                            crate::mount::source::ProducerSource::new(tree, None),
+                        ),
+                    )
+                    .await;
                 });
             }
         });

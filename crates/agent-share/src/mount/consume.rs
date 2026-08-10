@@ -168,15 +168,21 @@ pub(crate) async fn attach(
     // precondition), while on the dead-origin path the mesh is the only way
     // to find who else serves the share — so it runs concurrently with the
     // manifest fetch and is awaited only where it is needed.
+    // Created before the join because the join needs something to register, and
+    // armed after the first read. **Reading is seeding**: from here on a mount
+    // is a peer, not a client.
+    let seeder = agent_share_mount::Seeder::<fofoca_chunks::FsStore>::new();
     let mut mesh_task = Some(tokio::spawn(join_share_mesh(MeshJoin {
         target: mesh_target,
         endpoint: endpoint.clone(),
         webrtc: webrtc.clone(),
         webrtc_only,
+        seeder: seeder.clone(),
+        auth,
     })));
     let mut share_mesh: Option<Option<ShareMesh>> = None;
-    let manifest = match client.fetch_manifest().await {
-        Ok(manifest) => manifest,
+    let (manifest, envelope) = match client.fetch_signed_manifest().await {
+        Ok(signed) => (MountManifest::decode(&signed.manifest)?, signed.encode()),
         // The producer refused the credential outright. Nothing else can go
         // right after that — the mesh is derived from the same token, so the
         // seeder fallback is looking at an empty mesh — so say the one useful
@@ -194,7 +200,7 @@ pub(crate) async fn attach(
                 Some(task) => task.await.unwrap_or(None),
                 None => None,
             };
-            let manifest = bootstrap_from_seeders(
+            let (manifest, envelope) = bootstrap_from_seeders(
                 mesh.as_ref(),
                 &endpoint,
                 &origin_ticket,
@@ -221,7 +227,7 @@ pub(crate) async fn attach(
                 }
             })?;
             share_mesh = Some(mesh);
-            manifest
+            (manifest, envelope)
         }
         Err(error) => return Err(error),
     };
@@ -239,13 +245,21 @@ pub(crate) async fn attach(
     // when it fails. The roster handle is wired in below, once the mesh join
     // resolves — until then the set is origin-only, exactly the old behaviour.
     let source_set = Arc::new(super::sources::SourceSet::new(
-        Arc::clone(&client),
-        endpoint.clone(),
-        origin_ticket,
-        auth,
-        tree_fingerprint.clone(),
-        file_count,
-        None,
+        super::sources::SourceSetOpts {
+            origin: Arc::clone(&client),
+            endpoint: endpoint.clone(),
+            ticket: origin_ticket,
+            auth,
+            tree: tree_fingerprint.clone(),
+            total_slots: file_count,
+            cards: None,
+            // Reading is seeding: bytes this mount pulls land here and are
+            // served from here. A store that will not open costs the seeding
+            // and never the mount.
+            store: open_chunk_store(auth.token()),
+            envelope: Arc::new(envelope),
+            seeder,
+        },
     ));
     let remote_fs = RemoteFs::new(nodes, Arc::clone(&source_set), uid, gid);
     // Taken before the server consumes the filesystem: this is the watch
@@ -275,11 +289,18 @@ pub(crate) async fn attach(
             None => None,
         },
     };
+    let share_mesh = share_mesh.map(Arc::new);
     if let Some(mesh) = &share_mesh {
         mesh.set_tree(tree_fingerprint).await;
         mesh.spawn_report(json);
         // From here the filesystem can fail over to vouching peers.
         source_set.set_cards(mesh.card_book());
+        // And from here other peers can fail over to *this* one. Reading is
+        // seeding, so what this mount can serve grows as it reads; the card is
+        // republished on a timer rather than per chunk because it rides a CRDT
+        // that keeps history, and a large file must not produce one revision
+        // per 64 KiB.
+        spawn_serving_updates(Arc::clone(&source_set), Arc::clone(mesh));
     }
 
     tokio::signal::ctrl_c()
@@ -290,7 +311,10 @@ pub(crate) async fn attach(
     }
     // Before the endpoint closes: `Left` has to go out over it, and peers that
     // never hear it wait out a silence timeout counting us as present.
-    if let Some(mesh) = share_mesh {
+    // `try_unwrap` because the serving updater holds the other reference: it
+    // runs until the process ends, so the goodbye is skipped only if that task
+    // is mid-publish, which is a race worth losing rather than blocking on.
+    if let Some(mesh) = share_mesh.and_then(|mesh| Arc::try_unwrap(mesh).ok()) {
         mesh.leave().await;
     }
     // Best-effort: leave nothing behind when the folder is empty / unused.
@@ -393,6 +417,15 @@ struct MeshJoin {
     endpoint: Endpoint,
     webrtc: WebRtcHandle,
     webrtc_only: bool,
+    /// What this mount serves to other peers.
+    ///
+    /// Handed over empty and filled in later, once the manifest is in and the
+    /// first chunks land. The mesh join runs concurrently with the mount coming
+    /// up — deliberately, so a slow relay never delays a share — so there is
+    /// nothing to serve *yet* at this point, and a handle that arms itself
+    /// later is how both facts stay true.
+    seeder: agent_share_mount::Seeder<fofoca_chunks::FsStore>,
+    auth: ShareAuth,
 }
 
 /// Put this consumer on the share's mesh, so it is a peer of everyone else
@@ -416,14 +449,22 @@ async fn join_share_mesh(join: MeshJoin) -> Option<ShareMesh> {
             endpoint: join.endpoint.clone(),
             webrtc: join.webrtc.clone(),
         },
-        // A consumer answers no ALPN of its own — it dials the mount protocol,
-        // it does not serve it — so the mesh's Router is the only accept loop
-        // on this endpoint and everything it accepts belongs to the mesh.
-        protocols: Vec::new(),
+        // A consumer answers the mount protocol now. It used to answer no ALPN
+        // of its own — "it dials the mount protocol, it does not serve it" —
+        // but a mount keeps the chunks it reads, so it has bytes other peers
+        // want and refusing to hand them over would waste the swarm.
+        protocols: vec![(
+            MOUNT_ALPN.to_vec(),
+            Box::new(super::handlers::MountHandler::new(
+                join.auth,
+                super::source::NativeSource::Seeding(join.seeder),
+            )) as Box<dyn fofoca::iroh::protocol::DynProtocolHandler>,
+        )],
         role: super::mesh::Role::Consumer,
+        // Both filled in by the mount once it has a manifest and has read
+        // something — see `SourceSet::refresh_seeder`. Empty here is honest: at
+        // join time this peer genuinely holds nothing.
         tree: None,
-        // A lazy mount holds no bytes, so it advertises nothing. Becoming a
-        // seeder is the explicit `mirror` step, never a side effect of reading.
         serving: None,
         // Match the endpoint: `--transport webrtc` built it with IP cleared,
         // and a mesh advertising paths its endpoint does not have is a mesh
@@ -490,7 +531,7 @@ async fn bootstrap_from_seeders(
     origin_ticket: &MountTicket,
     auth: ShareAuth,
     origin_error: &anyhow::Error,
-) -> Result<MountManifest> {
+) -> Result<(MountManifest, Vec<u8>)> {
     let Some(mesh) = mesh else {
         bail!(
             "the origin is unreachable ({origin_error:#}) and the share's mesh could not be \
@@ -609,7 +650,9 @@ async fn bootstrap_from_seeders(
                         &candidate.endpoint[..8.min(candidate.endpoint.len())]
                     ),
                 );
-                return Ok(manifest);
+                // The envelope, not just the manifest: this mount re-serves it
+                // verbatim, signature included, since no peer can make another.
+                return Ok((manifest, signed.encode()));
             }
             Err(error) => {
                 refusals.push(format!("{}: {error}", &candidate.endpoint[..8]));
@@ -996,6 +1039,19 @@ impl RemoteClient {
         Ok(signed)
     }
 
+    /// The decoded manifest, with the envelope discarded.
+    ///
+    /// Only the tests want this shape now — `attach` keeps the envelope, since
+    /// a mount re-serves it. Kept rather than inlined at each call site because
+    /// "fetch and decode" is the obvious thing to want and writing it four
+    /// times invites four subtly different versions.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "only the tests want the manifest without its envelope"
+        )
+    )]
     pub(super) async fn fetch_manifest(&self) -> Result<MountManifest> {
         MountManifest::decode(&self.fetch_signed_manifest().await?.manifest)
     }
@@ -1202,6 +1258,70 @@ async fn run_quiet(program: &str, args: &[&std::ffi::OsStr]) -> bool {
         .output()
         .await
         .is_ok_and(|output| output.status.success())
+}
+
+/// Keep this mount's card honest about what it now holds.
+///
+/// A timer rather than a hook on every read, for the reason the browser's
+/// republish already gives: the card is broadcast over a CRDT that keeps
+/// history, so one revision per chunk would cost every late joiner the whole
+/// transfer's worth of edits. Nothing is lost by lagging — an under-stated card
+/// costs a peer one round trip, while an over-stated one sends readers to bytes
+/// that are not there.
+fn spawn_serving_updates(sources: Arc<super::sources::SourceSet>, mesh: Arc<ShareMesh>) {
+    tokio::spawn(async move {
+        let mut last = None;
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let serving = sources.serving().await;
+            if serving != last {
+                mesh.set_serving(serving.clone()).await;
+                last = serving;
+            }
+        }
+    });
+}
+
+/// Where a mount keeps the chunks it reads.
+///
+/// Keyed by the share token, so two shares never mix and the same share picks
+/// its store back up on the next mount — the CLI's answer to the browser's
+/// `agent-share/<hex>` database. Deliberately *not* under the mount folder,
+/// which Ctrl-C removes: seeding that reset on every unmount would make a
+/// restart look like a peer that never held anything.
+///
+/// `None` on any failure. A peer that cannot store still reads.
+fn open_chunk_store(
+    token: &[u8; agent_share_proto::framing::SECRET_LEN],
+) -> Option<Arc<fofoca_chunks::FsStore>> {
+    let mut name = String::with_capacity(16);
+    for byte in &token[..8] {
+        use std::fmt::Write as _;
+        let _ = write!(name, "{byte:02x}");
+    }
+    let root = chunk_cache_dir()?.join(name);
+    match fofoca_chunks::FsStore::open(&root) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(error) => {
+            tracing::warn!(%error, path = %root.display(), "no chunk store; this mount will not seed");
+            None
+        }
+    }
+}
+
+/// The per-user cache directory, by hand rather than by dependency.
+///
+/// One `HOME` lookup and a platform-conventional suffix is the whole of what a
+/// `dirs` crate would give us here, and this keeps `agent-share`'s dependency
+/// list honest about how little it needs.
+fn chunk_cache_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let base = std::path::PathBuf::from(home);
+    Some(if cfg!(target_os = "macos") {
+        base.join("Library/Caches/agent-share/chunks")
+    } else {
+        base.join(".cache/agent-share/chunks")
+    })
 }
 
 #[cfg(test)]

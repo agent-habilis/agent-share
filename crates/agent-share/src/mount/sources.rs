@@ -26,8 +26,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use fofoca::iroh::{Endpoint, EndpointAddr, TransportAddr};
 
+use agent_share_mount::Seeder;
 use agent_share_proto::PeerCard;
 use agent_share_proto::auth::ShareAuth;
+use fofoca_chunks::{ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, FsStore, chunk_hash};
 
 use super::MountTicket;
 use super::consume::RemoteClient;
@@ -72,18 +74,54 @@ pub(super) struct SourceSet {
     local_endpoint: String,
     active: tokio::sync::Mutex<Active>,
     strikes: Mutex<HashMap<String, u8>>,
+    /// Where bytes this mount reads are kept, so reading is what makes this
+    /// peer a seeder. `None` when the store could not be opened, which costs
+    /// seeding and never a read.
+    store: Option<Arc<FsStore>>,
+    /// What this mount serves to others. Fed from `store` and `rows` after
+    /// every read that landed something new.
+    seeder: Seeder<FsStore>,
+    /// Chunk rows for slots this mount has addressed. Both halves of the job:
+    /// finding the chunk that covers an offset, and telling the seeder which
+    /// addresses belong to *this* share.
+    rows: Mutex<HashMap<u32, ChunkMap>>,
+    /// The origin's `OP_MANIFEST` body, re-served verbatim — signature
+    /// included, since no peer can make another.
+    envelope: Arc<Vec<u8>>,
+}
+
+/// Everything a [`SourceSet`] is built from.
+///
+/// A struct because the list crossed what is readable as positional arguments,
+/// and because half of them are `Option`s and `Arc`s that would otherwise be
+/// distinguishable only by reading the signature.
+pub(super) struct SourceSetOpts {
+    pub(super) origin: Arc<RemoteClient>,
+    pub(super) endpoint: Endpoint,
+    pub(super) ticket: MountTicket,
+    pub(super) auth: ShareAuth,
+    pub(super) tree: String,
+    pub(super) total_slots: usize,
+    pub(super) cards: Option<super::mesh::CardBook>,
+    pub(super) store: Option<Arc<FsStore>>,
+    pub(super) envelope: Arc<Vec<u8>>,
+    pub(super) seeder: Seeder<FsStore>,
 }
 
 impl SourceSet {
-    pub(super) fn new(
-        origin: Arc<RemoteClient>,
-        endpoint: Endpoint,
-        ticket: MountTicket,
-        auth: ShareAuth,
-        tree: String,
-        total_slots: usize,
-        cards: Option<super::mesh::CardBook>,
-    ) -> Self {
+    pub(super) fn new(opts: SourceSetOpts) -> Self {
+        let SourceSetOpts {
+            origin,
+            endpoint,
+            ticket,
+            auth,
+            tree,
+            total_slots,
+            cards,
+            store,
+            envelope,
+            seeder,
+        } = opts;
         let local_endpoint = endpoint.id().to_string();
         Self {
             origin,
@@ -96,7 +134,149 @@ impl SourceSet {
             local_endpoint,
             active: tokio::sync::Mutex::new(Active::Origin),
             strikes: Mutex::new(HashMap::new()),
+            store,
+            seeder,
+            rows: Mutex::new(HashMap::new()),
+            envelope,
         }
+    }
+
+    /// Which slots this mount can serve, for its peer card.
+    ///
+    /// Derived from the rows it has addressed rather than from a tally, so a
+    /// number here is one the store can actually stand behind.
+    pub(super) async fn serving(&self) -> Option<String> {
+        let store = self.store.as_ref()?;
+        let rows = self.rows.lock().ok()?.clone();
+        let mut held = Vec::new();
+        for (index, row) in &rows {
+            if store
+                .coverage(row.root())
+                .await
+                .is_ok_and(|coverage| coverage.count() > 0)
+            {
+                held.push(*index);
+            }
+        }
+        held.sort_unstable();
+        agent_share_proto::serving::encode_serving(&held, self.total_slots)
+    }
+
+    /// Hand the seeder what this mount now holds.
+    ///
+    /// Store first, advertise second — the ordering the crash-consistency rule
+    /// already follows, and the reason a peer never claims bytes it cannot
+    /// serve.
+    fn refresh_seeder(&self) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let rows = self
+            .rows
+            .lock()
+            .map(|rows| rows.clone())
+            .unwrap_or_default();
+        self.seeder.update(Arc::clone(&self.envelope), rows, store);
+    }
+
+    /// The chunk row for `index`, from memory, the store, or the wire.
+    async fn row_for(&self, index: u32) -> Option<ChunkMap> {
+        if let Ok(rows) = self.rows.lock()
+            && let Some(row) = rows.get(&index)
+        {
+            return Some(row.clone());
+        }
+        let row = self.origin.fetch_chunk_map(index).await.ok().flatten()?;
+        if let Some(store) = self.store.as_ref() {
+            let _ = store.put_map(&row).await;
+        }
+        if let Ok(mut rows) = self.rows.lock() {
+            rows.insert(index, row.clone());
+        }
+        Some(row)
+    }
+
+    /// One chunk by address: the store, then the origin, then any peer holding
+    /// it. Verified against the address before it is believed.
+    /// The bool says whether these bytes were *newly* stored, so a read that
+    /// found everything locally does not pay to rebuild the seeder's scope.
+    async fn chunk(&self, index: u32, address: ChunkHash) -> Option<(Vec<u8>, bool)> {
+        if let Some(store) = self.store.as_ref()
+            && let Ok(Some(bytes)) = store.get(address).await
+        {
+            return Some((bytes, false));
+        }
+        let fetched = match self.origin.fetch_chunk(address).await {
+            Ok(Some(bytes)) => Some(bytes),
+            _ => self.chunk_from_peers(index, address).await,
+        }?;
+        if chunk_hash(&fetched) != address {
+            tracing::warn!(
+                "a peer answered a chunk address with bytes that address something else"
+            );
+            return None;
+        }
+        // **The read is what makes this peer a seeder.** Failing to store is
+        // logged and nothing more: a full disk costs the seeding, never the
+        // read, exactly as the browser's `keep()` is fire-and-forget.
+        if let Some(store) = self.store.as_ref()
+            && let Err(error) = store.put(address, &fetched).await
+        {
+            tracing::debug!(%error, "keeping a chunk failed; not seeding these bytes");
+        }
+        Some((fetched, true))
+    }
+
+    /// Any peer that vouches for this slot, asked by address.
+    ///
+    /// Guard #3 retires here: a peer holding *part* of the file can answer,
+    /// because a chunk request names bytes rather than a whole slot.
+    async fn chunk_from_peers(&self, index: u32, address: ChunkHash) -> Option<Vec<u8>> {
+        for card in self.candidates(index) {
+            let Ok(client) = self.peer_client(&card) else {
+                continue;
+            };
+            if let Ok(Some(bytes)) = client.fetch_chunk(address).await {
+                return Some(bytes);
+            }
+        }
+        None
+    }
+
+    /// Serve `[offset, offset+len)` out of content-addressed chunks.
+    ///
+    /// `None` means the chunk path could not answer — no row, or a chunk
+    /// nobody would serve — and the caller falls back to ranged reads. That
+    /// fallback is why this can be tried first without risking a mount.
+    async fn read_chunks(&self, index: u32, offset: u64, len: u32) -> Option<Vec<u8>> {
+        let row = self.row_for(index).await?;
+        if offset >= row.size() || len == 0 {
+            return Some(Vec::new());
+        }
+        let end = offset.saturating_add(u64::from(len)).min(row.size());
+        let mut out = Vec::with_capacity(usize::try_from(end - offset).unwrap_or(0));
+        let mut cursor = offset;
+        let mut fetched_any = false;
+        while cursor < end {
+            let position = row.index_at(cursor);
+            let address = row.leaf(position)?;
+            let (chunk, stored) = self.chunk(index, address).await?;
+            fetched_any |= stored;
+            let range = row.range_of(position);
+            let within = usize::try_from(cursor - range.start).unwrap_or(0);
+            let take = usize::try_from(end - cursor)
+                .unwrap_or(usize::MAX)
+                .min(chunk.len().saturating_sub(within));
+            if take == 0 {
+                return None;
+            }
+            out.extend_from_slice(&chunk[within..within + take]);
+            cursor += take as u64;
+        }
+        if fetched_any {
+            self.refresh_seeder();
+        }
+        Some(out)
     }
 
     /// Wire the roster in once the mesh join resolves. Idempotent.
@@ -211,6 +391,15 @@ impl ByteSource for SourceSet {
                 } => Some((endpoint_id.clone(), Arc::clone(client))),
             }
         };
+
+        // The chunk path first: content-addressed, verified per chunk, and it
+        // *keeps* what it fetched, which is what makes this mount a seeder.
+        // `None` means it could not answer — no row, or a chunk nobody would
+        // serve — and the ranged path below still can, so trying it costs
+        // nothing but is never load-bearing.
+        if let Some(bytes) = self.read_chunks(index, offset, len).await {
+            return Ok(bytes);
+        }
 
         match first {
             None => match self.origin.read_range(index, offset, len).await {

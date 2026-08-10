@@ -18,36 +18,31 @@
 //! appeared on the network as two unrelated identities, so a viewer counted the
 //! same machine twice — once for the mount session, once for the mesh session.
 
-use std::sync::Arc;
-
 use agent_share_proto::auth::ShareAuth;
 use fofoca::iroh::EndpointId;
 use fofoca::iroh::endpoint::Connection;
 use fofoca::iroh::protocol::{AcceptError, ProtocolHandler};
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
 
-use super::live::LiveTree;
-
 /// Serves `MOUNT_ALPN`: one long-lived connection, one request per bi-stream.
+///
+/// Generic over what answers, so the same handler serves a producer reading
+/// through to files and a mount seeding from its chunk store. The browser has
+/// its own copy of this and only this — its sources are `!Send` and need a
+/// `SendWrapper`, which would panic under a multi-threaded runtime, so the
+/// handler is the one piece of the serving path that cannot be shared. The
+/// protocol it drives is [`agent_share_mount::serve_stream`], and that is.
 #[derive(Debug, Clone)]
 pub(crate) struct MountHandler {
     /// What an inbound request has to present, and how to refuse one that
     /// does not. Redacts itself in `Debug`, which this struct derives.
     auth: ShareAuth,
-    tree: Arc<LiveTree>,
-    /// Outboards for files somebody has asked to verify. `None` when the cache
-    /// directory could not be opened — the share still serves every byte, it
-    /// just cannot vouch for them to a third party.
-    hashes: Option<Arc<super::hash::ChunkCache>>,
+    source: super::source::NativeSource,
 }
 
 impl MountHandler {
-    pub(crate) fn new(
-        auth: ShareAuth,
-        tree: Arc<LiveTree>,
-        hashes: Option<Arc<super::hash::ChunkCache>>,
-    ) -> Self {
-        Self { auth, tree, hashes }
+    pub(crate) fn new(auth: ShareAuth, source: super::source::NativeSource) -> Self {
+        Self { auth, source }
     }
 }
 
@@ -55,13 +50,8 @@ impl ProtocolHandler for MountHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         // Held for the connection's life, exactly as the old accept loop's
         // spawned task was. Errors are the peer going away, which is routine.
-        if let Err(error) = super::produce::serve_established(
-            conn,
-            self.auth,
-            Arc::clone(&self.tree),
-            self.hashes.clone(),
-        )
-        .await
+        if let Err(error) =
+            super::produce::serve_established(conn, self.auth, self.source.clone()).await
         {
             tracing::debug!(%error, "mount connection ended");
         }

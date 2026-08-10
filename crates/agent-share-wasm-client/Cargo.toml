@@ -24,6 +24,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 agent-share-proto = { path = "../agent-share-proto" }
+agent-share-mount = { path = "../agent-share-mount" }
 # The gossip engine, portable half only: `host` pulls in signals, the control
 # socket, the filesystem and multihop, none of which exist in a tab. What
 # remains is the whole node runtime — `setup_mesh` → `Node::spawn` → the event

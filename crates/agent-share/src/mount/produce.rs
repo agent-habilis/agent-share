@@ -1,14 +1,12 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use agent_share_proto::auth::ShareAuth;
 use anyhow::{Context, Result, bail};
-use fofoca::iroh::endpoint::{Connection, RecvStream, SendStream};
+use fofoca::iroh::endpoint::Connection;
 use fofoca::iroh::{Endpoint, SecretKey};
 use rand::RngCore;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::broadcast;
 
 use crate::file::human_bytes;
 use crate::lookup::build_endpoint;
@@ -18,10 +16,7 @@ use super::MountTicket;
 use super::ReadStatus;
 use super::WEBRTC_SIGNAL_ALPN;
 use super::live::LiveTree;
-use super::{
-    MAX_READ_LEN, MOUNT_ALPN, OP_CHUNK, OP_CHUNK_MAP, OP_HAVE, OP_MANIFEST, OP_READ, OP_WATCH,
-    REQUEST_HEADER_LEN, SECRET_LEN, wait_online,
-};
+use super::{MAX_READ_LEN, MOUNT_ALPN, SECRET_LEN, wait_online};
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 
 /// Producer: share `dir` read-only. Scans at startup, then rescans whenever
@@ -378,8 +373,10 @@ fn share_protocols(
             MOUNT_ALPN.to_vec(),
             Box::new(super::handlers::MountHandler::new(
                 auth,
-                Arc::clone(tree),
-                hashes,
+                super::source::NativeSource::Producer(super::source::ProducerSource::new(
+                    Arc::clone(tree),
+                    hashes,
+                )),
             )),
         ),
         (
@@ -483,21 +480,21 @@ pub(super) async fn bind(
 ///
 /// # Errors
 /// The connection drops, or a stream write fails.
-pub async fn serve_established(
+pub(super) async fn serve_established(
     conn: Connection,
     auth: ShareAuth,
-    tree: Arc<LiveTree>,
-    hashes: Option<Arc<super::hash::ChunkCache>>,
+    source: super::source::NativeSource,
 ) -> Result<()> {
     // `accept_bi` errors once the connection is gone (peer closed, or a bad
     // token closed it from within a stream task) — that ends the loop.
     while let Ok((send, recv)) = conn.accept_bi().await {
         let conn = conn.clone();
-        let tree = Arc::clone(&tree);
-        let hashes = hashes.clone();
+        // The dispatch itself is `agent_share_mount`'s, shared with the
+        // browser. All that is left here is which source answers it.
+        let source = source.clone();
         tokio::spawn(async move {
             if let Err(error) =
-                serve_stream(&conn, send, recv, &auth, &tree, hashes.as_deref()).await
+                agent_share_mount::serve_stream(&conn, send, recv, &auth, source).await
             {
                 tracing::debug!(%error, "mount stream ended");
             }
@@ -506,186 +503,15 @@ pub async fn serve_established(
     Ok(())
 }
 
-/// Authenticate one bi-stream by its 33-byte header and answer the request.
-/// A bad token closes the whole connection (the bearer is poisoned); an
-/// unknown op or a malformed request drops only this stream.
-///
-/// The close code says *which* kind of refusal it was, so a consumer that got
-/// the password wrong can be told to try again instead of concluding the share
-/// is broken. See [`ShareAuth::refusal_code`].
-async fn serve_stream(
-    conn: &Connection,
-    mut send: SendStream,
-    mut recv: RecvStream,
-    auth: &ShareAuth,
-    tree: &LiveTree,
-    hashes: Option<&super::hash::ChunkCache>,
-) -> Result<()> {
-    let mut header = [0u8; REQUEST_HEADER_LEN];
-    if recv.read_exact(&mut header).await.is_err() {
-        // The stream died before delivering a full header — nothing to serve.
-        return Ok(());
-    }
-    if !auth.accepts(&header) {
-        conn.close(auth.refusal_code().into(), auth.refusal_reason());
-        return Ok(());
-    }
-    match header[SECRET_LEN] {
-        OP_MANIFEST => {
-            let envelope = tree.manifest_envelope();
-            send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
-            let len = u32::try_from(envelope.len()).context("manifest too large")?;
-            send.write_all(&len.to_le_bytes()).await?;
-            send.write_all(&envelope).await?;
-        }
-        OP_WATCH => {
-            // Long-lived, unlike every other op: it returns when the consumer
-            // goes away, so it must not fall through to the `finish` below.
-            return serve_watch(send, tree).await;
-        }
-        OP_READ => {
-            let mut request = [0u8; 16];
-            if recv.read_exact(&mut request).await.is_err() {
-                return Ok(());
-            }
-            let index = u32::from_le_bytes(request[..4].try_into().expect("4 bytes"));
-            let offset = u64::from_le_bytes(request[4..12].try_into().expect("8 bytes"));
-            let len = u32::from_le_bytes(request[12..].try_into().expect("4 bytes"));
-            let (status, data) = answer_read(tree, index, offset, len).await;
-            send.write_all(&[status.to_byte()]).await?;
-            let data_len = u32::try_from(data.len()).expect("bounded by MAX_READ_LEN");
-            send.write_all(&data_len.to_le_bytes()).await?;
-            send.write_all(&data).await?;
-        }
-        OP_CHUNK_MAP => {
-            let mut request = [0u8; 4];
-            if recv.read_exact(&mut request).await.is_err() {
-                return Ok(());
-            }
-            let index = u32::from_le_bytes(request);
-            // `None` covers two cases that look identical from the far side and
-            // should: this producer keeps no chunk table, or it cannot address
-            // that index. Either way the consumer falls back to reading from
-            // this origin, which is exactly what `BadIndex` tells it.
-            let answer = match hashes {
-                Some(cache) => cache.map_of_index(tree, index).await,
-                None => None,
-            };
-            let Some(map) = answer else {
-                send.write_all(&[ReadStatus::BadIndex.to_byte()]).await?;
-                let _ = send.finish();
-                return Ok(());
-            };
-            let addresses: Vec<[u8; 32]> =
-                map.leaves().iter().map(|leaf| *leaf.as_bytes()).collect();
-            let body = agent_share_proto::framing::encode_chunk_map(
-                map.root().as_bytes(),
-                map.size(),
-                &addresses,
-            );
-            send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
-            let len = u32::try_from(body.len()).context("chunk map too large")?;
-            send.write_all(&len.to_le_bytes()).await?;
-            send.write_all(&body).await?;
-        }
-        OP_CHUNK => {
-            let mut request = [0u8; 32];
-            if recv.read_exact(&mut request).await.is_err() {
-                return Ok(());
-            }
-            // An origin only ever knows addresses it computed from files in
-            // this share, so answering by address alone cannot be used to probe
-            // what the host holds elsewhere. A store shared across shares has
-            // to scope this deliberately; see the browser seeder.
-            let answer = match hashes {
-                Some(cache) => {
-                    cache
-                        .chunk(fofoca_chunks::ChunkHash::from_bytes(request))
-                        .await
-                }
-                None => None,
-            };
-            let Some(bytes) = answer else {
-                send.write_all(&[ReadStatus::BadIndex.to_byte()]).await?;
-                let _ = send.finish();
-                return Ok(());
-            };
-            send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
-            let len = u32::try_from(bytes.len()).context("chunk too large")?;
-            send.write_all(&len.to_le_bytes()).await?;
-            send.write_all(&bytes).await?;
-        }
-        OP_HAVE => {
-            let mut request = [0u8; 32];
-            if recv.read_exact(&mut request).await.is_err() {
-                return Ok(());
-            }
-            let root = fofoca_chunks::Root::from_bytes(request);
-            let coverage = match hashes {
-                Some(cache) => cache.have(root).await.ok(),
-                None => None,
-            };
-            let Some(coverage) = coverage else {
-                send.write_all(&[ReadStatus::BadIndex.to_byte()]).await?;
-                let _ = send.finish();
-                return Ok(());
-            };
-            let chunks = u32::try_from(coverage.len()).context("coverage too large")?;
-            let body = agent_share_proto::framing::encode_have(chunks, coverage.as_bits());
-            send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
-            let len = u32::try_from(body.len()).context("coverage too large")?;
-            send.write_all(&len.to_le_bytes()).await?;
-            send.write_all(&body).await?;
-        }
-        other => {
-            // Unknown op: drop just this stream, keep the connection.
-            tracing::debug!(op = other, "rejecting unknown mount op");
-            return Ok(());
-        }
-    }
-    // `finish` only marks the stream done; wait (briefly) for the consumer's
-    // ACK so a fast/loopback connection doesn't race the stream teardown ahead
-    // of the last bytes.
-    let _ = send.finish();
-    let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
-    Ok(())
-}
-
-/// Stream tree changes until the consumer hangs up.
-///
-/// The opening frame is the whole manifest, so a consumer needs no separate
-/// [`OP_MANIFEST`] round-trip and cannot race a change into the gap between
-/// the two. Everything after it is a delta, applied in order — which is why
-/// this rides one QUIC stream and why falling behind is answered with a fresh
-/// manifest rather than by skipping ahead.
-async fn serve_watch(mut send: SendStream, tree: &LiveTree) -> Result<()> {
-    // Subscribe *before* snapshotting the manifest: the other order would drop
-    // any change landing in between, and the consumer would never hear of it.
-    let mut updates = tree.subscribe();
-    let mut frame = tree.opening_frame();
-    loop {
-        let len = u32::try_from(frame.len()).context("watch frame too large")?;
-        send.write_all(&[ReadStatus::Ok.to_byte()]).await?;
-        send.write_all(&len.to_le_bytes()).await?;
-        send.write_all(&frame).await?;
-        frame = match updates.recv().await {
-            Ok(next) => next.as_ref().clone(),
-            Err(broadcast::error::RecvError::Lagged(missed)) => {
-                // Deltas only mean anything applied in order and in full, so a
-                // consumer that missed some cannot be caught up with the next
-                // one. Resend the whole tree instead.
-                tracing::debug!(missed, "watcher fell behind; resending the manifest");
-                tree.opening_frame()
-            }
-            Err(broadcast::error::RecvError::Closed) => return Ok(()),
-        };
-    }
-}
-
 /// Serve one ranged read. Opens the file per request — simple, correct, and
 /// no fd table held hostage by however many files a consumer touches; the OS
 /// dentry/page cache makes the reopen cheap.
-async fn answer_read(tree: &LiveTree, index: u32, offset: u64, len: u32) -> (ReadStatus, Vec<u8>) {
+pub(super) async fn answer_read(
+    tree: &LiveTree,
+    index: u32,
+    offset: u64,
+    len: u32,
+) -> (ReadStatus, Vec<u8>) {
     if len > MAX_READ_LEN {
         return (ReadStatus::LenOverCap, Vec::new());
     }

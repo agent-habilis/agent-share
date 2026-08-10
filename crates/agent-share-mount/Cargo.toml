@@ -1,0 +1,55 @@
+[package]
+name = "agent-share-mount"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "the mount protocol's behaviour: one server dispatch, one seeder, one scheduler, shared by the CLI and the browser"
+license = "MIT"
+repository = "https://github.com/agent-habilis/agent-share"
+keywords = ["p2p", "chunks", "iroh", "share", "wasm"]
+categories = ["network-programming", "wasm"]
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "agent_share_mount"
+path = "src/lib.rs"
+
+# **This crate must build for the host *and* for `wasm32-unknown-unknown`.**
+# That is the whole point of it: the CLI and the browser were running two copies
+# of the mount protocol server, and two copies drift. Anything that only exists
+# on one side — `tokio`, `nfsserve`, `notify`, `wasm-bindgen`, `web-sys` — belongs
+# in the caller, not here, and `tests/isolation.rs` fails the build if it lands.
+#
+# `agent-share-proto` owns the *bytes* of this protocol; this crate owns its
+# *behaviour*. The split is why proto can keep its stricter rule of taking
+# `iroh-base` and never opening a connection: reading and writing a stream
+# somebody else opened lives here instead.
+[dependencies]
+agent-share-proto = { path = "../agent-share-proto" }
+fofoca-chunks = { path = "../fofoca-chunks" }
+anyhow.workspace = true
+# Channels for the seeder's watch feed. Wasm-clean and runtime-agnostic, which
+# is why the feed is a `futures` mpsc on both sides rather than each platform's
+# own — the one thing the CLI could not reuse was tokio's broadcast.
+futures = "0.3"
+
+# For `iroh::endpoint::{Connection, SendStream, RecvStream}` and nothing else —
+# this crate never opens a connection, it reads and writes streams somebody else
+# opened.
+#
+# **Declared here rather than inherited, and the rev is restated as a result.**
+# `default-features = false` is not optional: with fofoca's defaults on, the
+# graph pulls tokio's `net` feature and therefore `mio`, which fails to compile
+# for `wasm32-unknown-unknown` outright. Cargo refuses to let a member turn
+# default features *off* for an inherited dependency ("`default-features =
+# false` cannot override workspace's `default-features`"), so inheritance cannot
+# express what this crate needs.
+#
+# The rev must stay in step with the workspace root and with
+# `agent-share-wasm-client`, which restates it for the same reason. Three copies
+# is the cost of a dependency that means different things on two targets.
+fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b", default-features = false }

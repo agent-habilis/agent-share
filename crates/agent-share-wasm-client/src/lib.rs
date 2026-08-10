@@ -225,7 +225,7 @@ pub struct ShareClient {
     /// Opened on the first sync rather than at connect: a tab that only browses
     /// should not create a database, and `IndexedDB` can be refused outright in
     /// private mode — which must cost seeding, never the share.
-    store: RefCell<Option<Rc<IdbStore>>>,
+    store: RefCell<Option<Arc<IdbStore>>>,
     /// Manifest indices fully held, so the UI can mark what is seedable and the
     /// card can advertise it.
     ///
@@ -1403,7 +1403,7 @@ impl ShareClient {
         // The sidecar: what lets a refreshed tab stand this share back up
         // with no live source at all.
         persist_manifest(&self.token, store.as_ref(), &envelope).await;
-        self.republish(&envelope, &manifest, Rc::clone(&store))
+        self.republish(&envelope, &manifest, Arc::clone(&store))
             .await?;
 
         let out = serde_json::json!({
@@ -1895,7 +1895,7 @@ impl ShareClient {
         &self,
         bytes: &[u8],
         manifest: &MountManifest,
-        store: Rc<IdbStore>,
+        store: Arc<IdbStore>,
     ) -> Result<(), JsValue> {
         let mut held = BTreeSet::new();
         let rows = self.rows.borrow().clone();
@@ -1910,7 +1910,7 @@ impl ShareClient {
         // Serving before advertising: the seeder must answer for a chunk by the
         // time the card claims it, or a reader lands on `BadIndex`.
         self.seeder
-            .update(Rc::new(bytes.to_vec()), rows, store);
+            .update(Arc::new(bytes.to_vec()), rows, store);
         self.publish_serving(bytes, manifest).await;
         Ok(())
     }
@@ -1947,13 +1947,13 @@ impl ShareClient {
         let Ok(Some(store)) = IdbStore::adopt(&self.store_name()).await else {
             return Ok(());
         };
-        let store = Rc::new(store);
+        let store = Arc::new(store);
         // Rows come from the store, never from an in-memory tally: a tally that
         // lost an entry to the reload would make this tab claim less than it
         // has, and would make a later sweep delete more than it should.
         let rows = rows_in_store(store.as_ref(), &manifest).await;
         *self.rows.borrow_mut() = rows;
-        *self.store.borrow_mut() = Some(Rc::clone(&store));
+        *self.store.borrow_mut() = Some(Arc::clone(&store));
         // A tab that seeded in an earlier session re-persists the (possibly
         // newer) manifest on its next healthy visit, keeping the sidecar fresh
         // for the next resurrection.
@@ -1968,16 +1968,16 @@ impl ShareClient {
         store_name_for(&self.token)
     }
 
-    async fn open_store(&self) -> Result<Rc<IdbStore>, JsValue> {
+    async fn open_store(&self) -> Result<Arc<IdbStore>, JsValue> {
         if let Some(store) = self.store.borrow().as_ref() {
-            return Ok(Rc::clone(store));
+            return Ok(Arc::clone(store));
         }
-        let store = Rc::new(
+        let store = Arc::new(
             IdbStore::open(&self.store_name())
                 .await
                 .map_err(|error| err("opening local storage", &error))?,
         );
-        *self.store.borrow_mut() = Some(Rc::clone(&store));
+        *self.store.borrow_mut() = Some(Arc::clone(&store));
         Ok(store)
     }
 
@@ -3369,7 +3369,7 @@ async fn persist_manifest(token: &[u8; SECRET_LEN], store: &IdbStore, envelope: 
 /// which re-arm nothing and fall back to waiting for a live peer.
 async fn load_persisted_manifest(
     token: &[u8; SECRET_LEN],
-) -> Option<(Vec<u8>, MountManifest, Rc<IdbStore>)> {
+) -> Option<(Vec<u8>, MountManifest, Arc<IdbStore>)> {
     let storage = local_storage()?;
     let raw = storage.get_item(&manifest_locator_key(token)).ok()??;
     let locator: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -3378,7 +3378,7 @@ async fn load_persisted_manifest(
     // Adopt-only: a tab reaching this path has a locator, which only a sync in
     // this origin could have written — so the database exists, and creating one
     // here would leave storage behind for somebody who merely browsed.
-    let store = Rc::new(IdbStore::adopt(&store_name_for(token)).await.ok()??);
+    let store = Arc::new(IdbStore::adopt(&store_name_for(token)).await.ok()??);
     let row = store.map(root).await.ok()??;
     let mut envelope = Vec::with_capacity(row.size() as usize);
     for position in 0..row.len() {
@@ -3899,7 +3899,7 @@ async fn connect_via_seeder(
     // already carries a tree (a reused membership re-armed on an earlier
     // attempt, or fed by a previous session's sync).
     {
-        use produce::ServeSource as _;
+        use agent_share_mount::ServeSource as _;
         if seeder.manifest_envelope().is_none()
             && let Some((bytes, manifest, store)) = load_persisted_manifest(&token).await
         {
@@ -3930,7 +3930,7 @@ async fn connect_via_seeder(
                     held.len()
                 )));
                 // Serving before advertising, as everywhere else.
-                seeder.update(Rc::new(bytes), rows, store);
+                seeder.update(Arc::new(bytes), rows, store);
                 mesh_peer.set_tree(fingerprint).await;
                 mesh_peer.set_serving(serving).await;
             }

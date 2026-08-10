@@ -5,7 +5,6 @@
 //! answerer) and the mount ALPN (manifest / read / watch).
 
 use std::cell::{Cell, RefCell};
-use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -13,9 +12,10 @@ use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::framing::{
     BENCH_KIND_ECHO, BENCH_KIND_FILL, MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES,
     MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_CHUNK, OP_CHUNK_MAP, OP_HAVE,
-    OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_MANIFEST,
-    WEBRTC_SIGNAL_ALPN, decode_bench_request_prefix, encode_chunk_map, encode_have,
+    REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_MANIFEST, WEBRTC_SIGNAL_ALPN,
+    decode_bench_request_prefix,
 };
+use agent_share_mount::{ServeSource, Watcher, serve_stream};
 use agent_share_proto::authorship::{SIGNATURE_LEN, SignedManifest};
 use agent_share_proto::lookup::LookupOpts;
 use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
@@ -83,7 +83,7 @@ impl ChunkTable {
     }
 }
 
-struct ProducerShared {
+pub(crate) struct ProducerShared {
     state: LiveState<FileSystemFileHandle>,
     watchers: Vec<mpsc::UnboundedSender<Rc<Vec<u8>>>>,
     chunks: ChunkTable,
@@ -91,62 +91,43 @@ struct ProducerShared {
 
 type Shared = Rc<RefCell<ProducerShared>>;
 
-/// What a mount-protocol server answers from.
+/// The browser's end of a watch feed.
 ///
-/// One dispatch loop ([`serve_stream`]), two byte sources: the producer's
-/// live File System Access tree, and a seeding viewer's local store
-/// ([`crate::seed::SeederShared`]). The trait is the seam that keeps the
-/// `OP_MANIFEST`/`OP_READ`/`OP_WATCH` match from being copied per source —
-/// RFC 01 phase 2's warning, honoured inside this crate.
-///
-/// Futures here are `!Send` and that is fine: wasm is single-threaded and the
-/// handler spawns its work with `spawn_local`.
-///
-/// A watch registration: the opening frame, then the update stream.
-pub(crate) type WatchFeed = (Vec<u8>, mpsc::UnboundedReceiver<Rc<Vec<u8>>>);
+/// The trait it satisfies lives in [`agent_share_mount`], shared with the CLI,
+/// which broadcasts `Arc<Vec<u8>>` over tokio instead. The frame type is the
+/// one thing that could not be shared, so it is the one thing named here.
+pub(crate) struct FrameFeed(pub(crate) mpsc::UnboundedReceiver<Rc<Vec<u8>>>);
 
-pub(crate) trait ServeSource: Clone + 'static {
-    /// The body to answer `OP_MANIFEST` with: `version ‖ signature ‖ manifest`.
-    ///
-    /// **Verbatim** — for a seeder this is the origin's envelope, never a
-    /// re-wrap, because the fingerprint and every READ index are defined over
-    /// the manifest inside it and the signature over both. A browser holds no
-    /// authorship key, so a seeder that dropped the signature could never hand
-    /// the next reader anything it could check.
-    ///
-    /// `None` refuses the request (a seeder that has not synced yet has nothing
-    /// to vouch for), which closes the stream rather than inventing an answer.
-    fn manifest_envelope(&self) -> Option<Vec<u8>>;
-    /// Register a watcher: the opening frame plus the update stream, or `None`
-    /// to refuse. A seeder's stream only carries frames when its own snapshot
-    /// moves (it follows the origin, and freezes when the origin dies) — it
-    /// never fabricates deltas of its own.
-    fn subscribe(&self) -> Option<WatchFeed>;
-    /// Answer one `OP_READ`. A source that is not sure it holds the bytes
-    /// answers `BadIndex`, never a short read — guard #3.
-    fn answer_read(
-        &self,
-        index: u32,
-        offset: u64,
-        len: u32,
-    ) -> impl Future<Output = (ReadStatus, Vec<u8>)>;
-    /// Answer one `OP_CHUNK_MAP`: the ordered addresses of a file's chunks,
-    /// computed on first ask and kept afterwards.
-    fn answer_chunk_map(&self, index: u32) -> impl Future<Output = Option<ChunkMap>>;
-    /// Answer one `OP_CHUNK`: the bytes at an address, or `None`.
-    ///
-    /// **A source must answer only for addresses reachable from a row it holds
-    /// for this share.** Otherwise a peer with one link could ask, one address
-    /// at a time, what else this host is storing.
-    fn answer_chunk(&self, address: ChunkHash) -> impl Future<Output = Option<Vec<u8>>>;
-    /// Answer one `OP_HAVE`: exactly which chunks of `root` can be served.
-    ///
-    /// Partial is a first-class answer — a source holding half a file serves
-    /// that half and says so.
-    fn answer_have(&self, root: Root) -> impl Future<Output = Option<Coverage>>;
+impl Watcher for FrameFeed {
+    /// The sender's own `Rc`, so a frame is never copied to cross the seam.
+    type Frame = Rc<Vec<u8>>;
+
+    async fn recv(&mut self) -> Option<Self::Frame> {
+        self.0.next().await
+    }
 }
 
-impl ServeSource for Shared {
+/// A watch registration: the opening frame, then the update stream.
+pub(crate) type WatchFeed = (Vec<u8>, FrameFeed);
+
+/// A share served from a File System Access tree.
+///
+/// A newtype over [`Shared`] rather than an impl on it: [`ServeSource`] is
+/// `agent_share_mount`'s now, and a foreign trait cannot be implemented for
+/// `Rc<RefCell<…>>`. It also puts the browser and the CLI on the same shape —
+/// each has a `ProducerSource` wrapping whatever it reads through to.
+#[derive(Clone)]
+pub(crate) struct ProducerSource(Shared);
+
+impl ProducerSource {
+    pub(crate) fn new(shared: Shared) -> Self {
+        Self(shared)
+    }
+}
+
+impl ServeSource for ProducerSource {
+    type Watcher = FrameFeed;
+
     /// A browser-produced share is **unsigned**: there is no key here to sign
     /// with and nowhere durable to keep one, so the envelope carries a zero
     /// signature and the ticket this producer hands out names no author. A
@@ -157,7 +138,7 @@ impl ServeSource for Shared {
             SignedManifest {
                 version: 0,
                 signature: [0u8; SIGNATURE_LEN],
-                manifest: self.borrow().state.encoded().to_vec(),
+                manifest: self.0.borrow().state.encoded().to_vec(),
             }
             .encode(),
         )
@@ -165,32 +146,32 @@ impl ServeSource for Shared {
 
     fn subscribe(&self) -> Option<WatchFeed> {
         let (tx, rx) = mpsc::unbounded::<Rc<Vec<u8>>>();
-        let mut borrowed = self.borrow_mut();
+        let mut borrowed = self.0.borrow_mut();
         borrowed.watchers.push(tx);
         let mut frame = Vec::with_capacity(1 + borrowed.state.encoded().len());
         frame.push(WATCH_FRAME_MANIFEST);
         frame.extend_from_slice(borrowed.state.encoded());
-        Some((frame, rx))
+        Some((frame, FrameFeed(rx)))
     }
 
     async fn answer_read(&self, index: u32, offset: u64, len: u32) -> (ReadStatus, Vec<u8>) {
-        answer_read(self, index, offset, len).await
+        answer_read(&self.0, index, offset, len).await
     }
 
     async fn answer_chunk_map(&self, index: u32) -> Option<ChunkMap> {
-        producer_chunk_map(self, index).await
+        producer_chunk_map(&self.0, index).await
     }
 
     async fn answer_chunk(&self, address: ChunkHash) -> Option<Vec<u8>> {
-        producer_chunk(self, address).await
+        producer_chunk(&self.0, address).await
     }
 
     async fn answer_have(&self, root: Root) -> Option<Coverage> {
-        let index = { self.borrow().chunks.slot_of_root.get(&root).copied()? };
+        let index = { self.0.borrow().chunks.slot_of_root.get(&root).copied()? };
         // Recomputing rather than trusting the cached row is what notices a
         // file that moved: if it did, the row is rebuilt under a new root and
         // this one stops being served at all.
-        let row = producer_chunk_map(self, index).await?;
+        let row = producer_chunk_map(&self.0, index).await?;
         if row.root() != root {
             return None;
         }
@@ -354,7 +335,7 @@ impl ShareProducer {
         let protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> = vec![
             (
                 MOUNT_ALPN.to_vec(),
-                Box::new(MountHandler::new(Rc::clone(&shared), auth)),
+                Box::new(MountHandler::new(ProducerSource::new(Rc::clone(&shared)), auth)),
             ),
             (
                 WEBRTC_SIGNAL_ALPN.to_vec(),
@@ -1028,150 +1009,6 @@ async fn serve_mount<S: ServeSource>(
         });
     }
     Ok(())
-}
-
-async fn serve_stream<S: ServeSource>(
-    conn: &Connection,
-    mut send: fofoca::iroh::endpoint::SendStream,
-    mut recv: fofoca::iroh::endpoint::RecvStream,
-    auth: &ShareAuth,
-    source: S,
-) -> Result<(), JsValue> {
-    let mut header = [0u8; REQUEST_HEADER_LEN];
-    if recv.read_exact(&mut header).await.is_err() {
-        return Ok(());
-    }
-    if !auth.accepts(&header) {
-        // The close code is how a consumer tells "wrong password, try again"
-        // from "this share refuses to talk". See `ShareAuth::refusal_code`.
-        conn.close(auth.refusal_code().into(), auth.refusal_reason());
-        return Ok(());
-    }
-    match header[SECRET_LEN] {
-        OP_MANIFEST => {
-            // A source with nothing to vouch for closes the stream unanswered
-            // rather than inventing a reply — the caller's read fails and it
-            // moves to its next candidate.
-            let Some(manifest_bytes) = source.manifest_envelope() else {
-                return Ok(());
-            };
-            write_ok_body(&mut send, &manifest_bytes).await?;
-        }
-        OP_WATCH => {
-            let Some((opening, mut rx)) = source.subscribe() else {
-                return Ok(());
-            };
-            if write_watch_frame(&mut send, &opening).await.is_err() {
-                return Ok(());
-            }
-            while let Some(frame) = rx.next().await {
-                if write_watch_frame(&mut send, &frame).await.is_err() {
-                    break;
-                }
-            }
-            return Ok(());
-        }
-        OP_READ => {
-            let mut request = [0u8; 16];
-            if recv.read_exact(&mut request).await.is_err() {
-                return Ok(());
-            }
-            let index = u32::from_le_bytes(request[..4].try_into().expect("4"));
-            let offset = u64::from_le_bytes(request[4..12].try_into().expect("8"));
-            let len = u32::from_le_bytes(request[12..].try_into().expect("4"));
-            let (status, data) = source.answer_read(index, offset, len).await;
-            send.write_all(&[status.to_byte()])
-                .await
-                .map_err(|error| err("write status", &error))?;
-            let data_len = u32::try_from(data.len()).expect("bounded");
-            send.write_all(&data_len.to_le_bytes())
-                .await
-                .map_err(|error| err("write len", &error))?;
-            send.write_all(&data)
-                .await
-                .map_err(|error| err("write body", &error))?;
-        }
-        OP_CHUNK_MAP => {
-            let mut request = [0u8; 4];
-            if recv.read_exact(&mut request).await.is_err() {
-                return Ok(());
-            }
-            // A browser source *can* address its own files now, which it could
-            // not before: it reads them once, lazily, exactly as the native
-            // origin does. Until this existed, `agent-share mirror` could not
-            // verify a browser-produced share at all.
-            let index = u32::from_le_bytes(request);
-            let Some(row) = source.answer_chunk_map(index).await else {
-                send.write_all(&[ReadStatus::BadIndex.to_byte()])
-                    .await
-                    .map_err(|error| err("write chunk map status", &error))?;
-                let _ = send.finish();
-                return Ok(());
-            };
-            let addresses: Vec<[u8; 32]> =
-                row.leaves().iter().map(|leaf| *leaf.as_bytes()).collect();
-            let body = encode_chunk_map(row.root().as_bytes(), row.size(), &addresses);
-            write_ok_body(&mut send, &body).await?;
-        }
-        OP_CHUNK => {
-            let mut request = [0u8; 32];
-            if recv.read_exact(&mut request).await.is_err() {
-                return Ok(());
-            }
-            let Some(bytes) = source.answer_chunk(ChunkHash::from_bytes(request)).await else {
-                send.write_all(&[ReadStatus::BadIndex.to_byte()])
-                    .await
-                    .map_err(|error| err("write chunk status", &error))?;
-                let _ = send.finish();
-                return Ok(());
-            };
-            write_ok_body(&mut send, &bytes).await?;
-        }
-        OP_HAVE => {
-            let mut request = [0u8; 32];
-            if recv.read_exact(&mut request).await.is_err() {
-                return Ok(());
-            }
-            let Some(coverage) = source.answer_have(Root::from_bytes(request)).await else {
-                send.write_all(&[ReadStatus::BadIndex.to_byte()])
-                    .await
-                    .map_err(|error| err("write have status", &error))?;
-                let _ = send.finish();
-                return Ok(());
-            };
-            let chunks = u32::try_from(coverage.len()).unwrap_or(u32::MAX);
-            let body = encode_have(chunks, coverage.as_bits());
-            write_ok_body(&mut send, &body).await?;
-        }
-        _ => return Ok(()),
-    }
-    let _ = send.finish();
-    Ok(())
-}
-
-async fn write_ok_body(
-    send: &mut fofoca::iroh::endpoint::SendStream,
-    body: &[u8],
-) -> Result<(), JsValue> {
-    send.write_all(&[ReadStatus::Ok.to_byte()])
-        .await
-        .map_err(|error| err("write status", &error))?;
-    let len = u32::try_from(body.len()).map_err(|_| JsValue::from_str("body too large"))?;
-    send.write_all(&len.to_le_bytes())
-        .await
-        .map_err(|error| err("write len", &error))?;
-    send.write_all(body)
-        .await
-        .map_err(|error| err("write body", &error))?;
-    Ok(())
-}
-
-/// Every watch frame: `status(Ok) ‖ len(u32 LE) ‖ frame`, matching native.
-async fn write_watch_frame(
-    send: &mut fofoca::iroh::endpoint::SendStream,
-    frame: &[u8],
-) -> Result<(), JsValue> {
-    write_ok_body(send, frame).await
 }
 
 async fn answer_read(shared: &Shared, index: u32, offset: u64, len: u32) -> (ReadStatus, Vec<u8>) {

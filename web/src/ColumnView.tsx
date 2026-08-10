@@ -33,8 +33,9 @@ const ROW_CHROME = 2
  */
 const SLOT = { flex: 'none', width: '1ch', textAlign: 'center' } as const
 /**
- * The chevron rides the row's trailing edge, and the gutter it vacated becomes
- * the gap that keeps it from reading as one compound glyph with the seed dot.
+ * The gap keeps the chevron from reading as one compound glyph with the seed
+ * dot beside it. The row's own trailing padding is what holds it off the column
+ * divider.
  */
 const CHEVRON_SLOT = { ...SLOT, marginLeft: '1ch' } as const
 /**
@@ -103,12 +104,28 @@ function measureCh(el: Element): number {
   return width > 0 ? width : 8
 }
 
+/**
+ * The trailing gutter this column's rows carry, in `ch`.
+ *
+ * It exists to hold the disclosure chevron off the column divider, so a column
+ * of files alone has no chevron and needs none — their empty chevron slot
+ * already stands them clear of the edge.
+ *
+ * Decided per *column*, never per row: rows in one column must agree, or the
+ * seed marks stop lining up, which is the one thing the fixed slot widths above
+ * exist to guarantee. Returned as a number so the CSS and `fitColumnWidth`
+ * share it rather than each carrying their own copy of the rule.
+ */
+function trailingGutter(dir: DirNode): number {
+  return dir.children.some((child) => child.kind === 'dir') ? 1 : 0
+}
+
 function fitColumnWidth(dir: DirNode, padX: number): number {
   let longest = 0
   for (const child of dir.children) {
     if (child.name.length > longest) longest = child.name.length
   }
-  return Math.max(MIN_WIDTH, longest + ROW_CHROME + padX * 2)
+  return Math.max(MIN_WIDTH, longest + ROW_CHROME + trailingGutter(dir) + padX * 2)
 }
 
 /**
@@ -366,6 +383,7 @@ function Column({
               node={child}
               active={child.name === selected}
               padX={padX}
+              gutter={trailingGutter(dir)}
               onSelect={() => onSelect(child)}
               held={held}
               coverage={coverage}
@@ -384,6 +402,7 @@ function Row({
   node,
   active,
   padX,
+  gutter,
   onSelect,
   held,
   coverage,
@@ -393,6 +412,8 @@ function Row({
   node: Node
   active: boolean
   padX: number
+  /** Trailing gutter in `ch`, from [`trailingGutter`]. */
+  gutter: number
   onSelect: () => void
   held: ReadonlySet<number>
   /** Fraction of each partially-held file. See `seeding.ts`. */
@@ -435,10 +456,14 @@ function Row({
         width: '100%',
         boxSizing: 'border-box',
         cursor: 'pointer',
-        // Full-bleed highlight; name keeps the left gutter. Chevron sits on the
-        // trailing edge like Finder column view.
+        // Full-bleed highlight; the name keeps the left gutter, and a column
+        // holding folders keeps one on the right so the chevron clears the
+        // divider instead of touching it. Padding rather than a margin on the
+        // chevron: both marks are flex children here, so one value moves them
+        // together and a file's empty chevron slot stays aligned with a
+        // folder's by construction.
         paddingLeft: `${padX}ch`,
-        paddingRight: 0,
+        paddingRight: `${gutter}ch`,
         // `t.bgSelected` is the CSS var, not a hex — it has to be, or the
         // active row would not follow the light/dark scheme switch.
         background: active ? t.bgSelected : 'transparent',
@@ -453,14 +478,18 @@ function Row({
         A fixed one-character slot, not a bare glyph: the geometric marks are
         outside the monospace face's core and their advance is not guaranteed,
         so the width is pinned here and the glyph centred in it. The dot then
-        holds its place as a sync lands, and the name column never reflows. A
-        hollow mark for partial rather than a second colour: the difference
-        that matters is held or not, and a folder mid-sync should not read as
-        an error.
+        holds its place as a sync lands, and the name column never reflows.
+
+        The shape says *how much* and the colour says *whether*: `◐` against `●`
+        is partial against full, while accent against subtle is holding
+        something against holding nothing. Partial used to be subtle too, which
+        gave it the same colour as a node holding nothing — the one distinction
+        the mark exists to draw. Still no third colour: a folder mid-sync is
+        progress, not a fault.
       */}
       <div style={SLOT}>
         <Text
-          color={state === 'full' ? 'accent' : 'fgSubtle'}
+          color={state === 'none' ? 'fgSubtle' : 'accent'}
           title={seedLabel(state, node, held, coverage)}
         >
           {state === 'full' ? '\u25cf' : state === 'partial' ? '\u25d0' : '\u00b7'}
