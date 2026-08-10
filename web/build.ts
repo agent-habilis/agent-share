@@ -14,15 +14,15 @@ import { brotli, syncGlue, wasmAsset, writeWasmPath } from './scripts/wasm-asset
 
 await Bun.$`rm -rf dist`
 
-// Before the bundle: `src/wasm.ts` imports the generated path and the glue
-// mirror, so both have to be correct on disk by the time Bun reads the
+// Before the bundle: `src/wasm/index.ts` imports the generated path and the
+// glue mirror, so both have to be correct on disk by the time Bun reads the
 // entrypoints.
 const asset = await wasmAsset()
 await writeWasmPath(asset)
 await syncGlue()
 
 const result = await Bun.build({
-  entrypoints: ['./index.html', './lab/index.html'],
+  entrypoints: ['./src/index.html', './src/lab/index.html'],
   outdir: './dist',
   minify: true,
   target: 'browser',

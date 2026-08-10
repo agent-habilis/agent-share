@@ -1,0 +1,206 @@
+/**
+ * The landing page: create a share from a local folder, or join one by ticket.
+ */
+
+import { Badge, Box, Button, Input, Stack, Text } from 'moonspace-dom'
+import { component, signal } from 'visage-dom'
+
+import { Centered } from '../../components/Centered/index.tsx'
+import { Chrome } from '../../components/Chrome/index.tsx'
+import { FailedBody, type FailureKind } from '../../components/FailedBody/index.tsx'
+import { LoadingBody } from '../../components/LoadingBody/index.tsx'
+import { useShareNav } from '../nav.ts'
+import { canProduce, pickShareRoot, startProducer, type ShareProducer } from '../../lib/produce.ts'
+import { parseShareInput, shareUrl } from '../../lib/ticket/index.ts'
+import { humanBytes } from '../../lib/tree.ts'
+
+type HomeState =
+  | { phase: 'landing' }
+  | { phase: 'creating' }
+  | { phase: 'serving'; producer: ShareProducer }
+  | { phase: 'failed'; reason: string; kind?: FailureKind }
+
+export const HomePage = component(function* (_props) {
+  // Nested plain functions below capture `ctx`; `this` would not reach them.
+  const ctx = this
+  const nav = useShareNav(this)
+  const state = signal<HomeState>({ phase: 'landing' })
+  /**
+   * Optional password for the share about to be created. Read at the moment
+   * the folder is picked, not stored: this is the only place it exists, and
+   * once `ShareProducer` has stretched it into a token nothing needs it again.
+   */
+  let newSharePassword = ''
+
+  async function createShare(): Promise<void> {
+    if (!canProduce()) {
+      state.value = {
+        phase: 'failed',
+        kind: 'unsupported',
+        reason: 'This browser cannot share folders (File System Access API required)',
+      }
+      return
+    }
+    try {
+      const root = await pickShareRoot()
+      if (ctx.aborted.aborted) return
+      state.value = { phase: 'creating' }
+      // Empty means unprotected. An empty string is not a password, and
+      // passing one would protect the share with something nobody can type.
+      const producer = await startProducer(
+        root,
+        newSharePassword.length > 0 ? newSharePassword : undefined,
+      )
+      if (ctx.aborted.aborted) {
+        await producer.stop()
+        return
+      }
+      state.value = { phase: 'serving', producer }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      if (!ctx.aborted.aborted) {
+        state.value = { phase: 'failed', reason: String(error) }
+      }
+    }
+  }
+
+  function joinShare(): void {
+    const raw = window.prompt('Paste a share ticket or URL')
+    if (raw === null) return
+    const ticket = parseShareInput(raw)
+    if (!ticket) return
+    nav.go(ticket, 'files')
+  }
+
+  async function stopServing(): Promise<void> {
+    const current = state.peek()
+    if (current.phase !== 'serving') return
+    // Leave 'serving' before awaiting, not after. The teardown takes a mesh
+    // departure broadcast and an endpoint close; while that runs the button is
+    // still on screen, and a second click used to re-read 'serving' and call
+    // `stop()` again.
+    state.value = { phase: 'landing' }
+    try {
+      await current.producer.stop()
+    } catch (error) {
+      // Nothing left to recover: the share is already off the UI. Report it
+      // rather than surfacing an unhandled rejection.
+      console.warn('[share] stopping the share failed', error)
+    }
+  }
+
+  ctx.aborted.addEventListener('abort', () => {
+    const current = state.peek()
+    if (current.phase === 'serving') void current.producer.stop()
+  })
+
+  yield () => {
+    const current = state.value
+    if (current.phase === 'creating') {
+      return (
+        <Chrome>
+          <LoadingBody label="creating share…" />
+        </Chrome>
+      )
+    }
+    if (current.phase === 'failed') {
+      return (
+        <Chrome
+          trailing={
+            <Button variant="secondary" onclick={() => {
+              state.value = { phase: 'landing' }
+            }}>
+              Back
+            </Button>
+          }
+        >
+          <FailedBody reason={current.reason} kind={current.kind} />
+        </Chrome>
+      )
+    }
+    if (current.phase === 'serving') {
+      const url = shareUrl(current.producer.ticket)
+      return (
+        <Chrome
+          trailing={
+            <Button variant="danger" onclick={() => void stopServing()}>
+              Stop sharing
+            </Button>
+          }
+        >
+          <Centered>
+            <div style={{ padding: '0 2ch', maxWidth: '72ch', width: '100%' }}>
+              <Box border="line" padX={2} padY={1}>
+                <Stack direction="column" gap={1}>
+                  <Stack direction="row" gap={1}>
+                    <Text weight="bold">Sharing</Text>
+                    <Badge tone="success" variant="outline">
+                      {current.producer.transport}
+                    </Badge>
+                    <Text color="fgMuted">
+                      {current.producer.files} files · {humanBytes(current.producer.bytes)}
+                    </Text>
+                  </Stack>
+                  <Text color="fgMuted">Peers open this link:</Text>
+                  {/*
+                    `Copy link` below takes the whole string; selection is for
+                    taking part of it — the ticket alone, say.
+                  */}
+                  <Text class="selectable">{url}</Text>
+                  {/*
+                    The password is deliberately not in the link — that is what
+                    makes the link postable. Say so, so the sender knows the
+                    recipient will be asked for something they have to supply.
+                  */}
+                  {current.producer.passwordProtected ? (
+                    <Text color="fgMuted">
+                      Password-protected — send the password separately; the link alone
+                      will not open it.
+                    </Text>
+                  ) : null}
+                  <Button
+                    variant="primary"
+                    onclick={() => {
+                      void navigator.clipboard.writeText(url)
+                    }}
+                  >
+                    Copy link
+                  </Button>
+                </Stack>
+              </Box>
+            </div>
+          </Centered>
+        </Chrome>
+      )
+    }
+
+    return (
+      <Chrome>
+        <Centered>
+          <Stack direction="column" gap={1}>
+            <Button variant="primary" onclick={() => void createShare()}>
+              Add files/folder
+            </Button>
+            {/*
+              Above the picker rather than after it: the folder picker needs a
+              user gesture, so the password has to already be typed when the
+              button is clicked. Empty is the default and means an open share,
+              which is what this tool did before passwords existed.
+            */}
+            <Input
+              type="password"
+              placeholder="Password (optional)"
+              aria-label="Password for the share"
+              oninput={(event: Event) => {
+                newSharePassword = (event.target as HTMLInputElement).value
+              }}
+            />
+            <Button variant="secondary" onclick={() => joinShare()}>
+              Join a share
+            </Button>
+          </Stack>
+        </Centered>
+      </Chrome>
+    )
+  }
+})

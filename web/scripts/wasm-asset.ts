@@ -41,8 +41,8 @@ const WEB_ROOT = new URL('../', import.meta.url)
 export const WASM_SOURCE =
   '../crates/agent-share-wasm-client/dist/web/agent_share_wasm_client_bg.wasm'
 
-/** Module holding the generated path, imported by `src/wasm.ts`. */
-const GENERATED = new URL('src/wasm-path.ts', WEB_ROOT)
+/** Module holding the generated path, imported by `src/wasm/index.ts`. */
+const GENERATED = new URL('src/wasm/path.ts', WEB_ROOT)
 
 /** URL directory the binary is served from. See the header. */
 export const WASM_DIR = '/wasm'
@@ -160,12 +160,12 @@ export function wasmResponse(
 }
 
 /** The glue files wasm-bindgen leaves beside the binary. The `.d.ts` rides
- * along so the type-only import in `src/wasm.ts` resolves against the same
+ * along so the type-only import in `src/wasm/index.ts` resolves against the same
  * mirror the runtime import uses. */
 const GLUE_SOURCES = ['agent_share_wasm_client.js', 'agent_share_wasm_client.d.ts'] as const
 
-/** Where the glue lands inside `src/` — generated, gitignored. */
-const GLUE_DIR = new URL('src/wasm-glue/', WEB_ROOT)
+/** Where the glue lands inside `src/wasm/` — generated, gitignored. */
+const GLUE_DIR = new URL('src/wasm/glue/', WEB_ROOT)
 
 /** The directory the glue is mirrored from. */
 const DIST_DIR = new URL(`${WASM_SOURCE}/../`, WEB_ROOT)

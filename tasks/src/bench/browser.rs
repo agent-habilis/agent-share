@@ -1,9 +1,9 @@
 //! The browser cells: a real headless Chrome driving `/lab`.
 //!
 //! No application code changes to make this drivable. `/lab` is click-driven,
-//! but it is built on stable committed DOM ids (`web/lab/index.html`) and
-//! `runBench` already ends at `web/src/lab.ts:126` with `log('report', report)`
-//! — and `logger` (`lab.ts:22-40`) `JSON.stringify`s any non-string. So the
+//! but it is built on stable committed DOM ids (`web/src/lab/index.html`) and
+//! `runBench` already ends at `web/src/lab/index.ts:126` with `log('report', report)`
+//! — and `logger` (`lab/index.ts:22-40`) `JSON.stringify`s any non-string. So the
 //! `BenchReport` is already sitting in `#rx-log` as JSON; nobody had read it.
 //!
 //! Chrome rather than Node deliberately: `node-datachannel` is `libdatachannel`,
@@ -22,7 +22,7 @@ use super::row::{BenchReport, Cpu, Row};
 use super::{CellResult, Options, WASM_ARTIFACT};
 use crate::util::{self, output};
 
-/// The browser's bench window is fixed: `lab.ts:102` passes `undefined` for
+/// The browser's bench window is fixed: `lab/index.ts:102` passes `undefined` for
 /// duration, so `DEFAULT_BENCH_DURATION_SECS` applies and `--duration` cannot
 /// reach it without an app change.
 const BROWSER_WINDOW: Duration = Duration::from_secs(30);
@@ -268,7 +268,7 @@ fn assert_wasm_is_fresh(root: &Path, url: &str) -> Res<()> {
 /// The URL path the dev server actually answers the wasm on.
 ///
 /// Content-addressed, so it cannot be a constant here: `web/scripts/wasm-asset.ts`
-/// hashes the binary and writes the path into `web/src/wasm-path.ts`, and the
+/// hashes the binary and writes the path into `web/src/wasm/path.ts`, and the
 /// dev server 404s the old fixed name on purpose. Read from that generated file
 /// rather than re-deriving the hash, so there is one source of truth and no
 /// second implementation of the digest to drift.
@@ -276,7 +276,7 @@ fn assert_wasm_is_fresh(root: &Path, url: &str) -> Res<()> {
 /// Safe to read at this point in the run: `dev.ts` regenerates it before it
 /// binds a port, and the caller has already seen the server's ready line.
 fn served_wasm_path(root: &Path) -> Res<String> {
-    const GENERATED: &str = "web/src/wasm-path.ts";
+    const GENERATED: &str = "web/src/wasm/path.ts";
     let source = std::fs::read_to_string(root.join(GENERATED))
         .map_err(|error| format!("cannot read {GENERATED}: {error}"))?;
     source
@@ -337,7 +337,7 @@ fn produce_cell(binary: &str, opts: &Options, cell: &str, transport: &str) -> Re
 
 fn finish(cell: &str, direction: &str, reports: Vec<BenchReport>, cpu: Option<Cpu>) -> Row {
     let mut notes = vec![
-        "the bench window is pinned at 30 s — `lab.ts:102` passes `undefined` \
+        "the bench window is pinned at 30 s — `lab/index.ts:102` passes `undefined` \
          for duration, so `--duration` does not reach browser cells"
             .to_owned(),
         "signalling is brokered over the iroh relay before the direct data \

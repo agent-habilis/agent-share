@@ -73,7 +73,7 @@ enum Task {
     /// no privileges: RTT is measured per row, not injected.
     Bench {
         /// Seconds per bench window (native cells only — the browser's is
-        /// pinned at 30 s by `web/src/lab.ts`).
+        /// pinned at 30 s by `web/src/lab/index.ts`).
         #[arg(long, default_value_t = 15)]
         duration: u64,
         /// Runs per cell; the row reports the median and the spread.

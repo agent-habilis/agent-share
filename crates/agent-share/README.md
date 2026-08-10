@@ -26,7 +26,7 @@ has no transport flag. After connect the consumer measures for **30s** by defaul
 (`--duration`). `relay` dials **only** the iroh relay URL (direct IPs stripped);
 `webrtc` dials **only** the WebRTC custom addr. Same-machine WebRTC still uses
 host ICE (localhost), so compare against a forced relay to see a real gap. The
-browser lab at `web/lab.html` and `npx agent-share bench` expose the same pair.
+browser lab at `web/src/lab/index.html` and `npx agent-share bench` expose the same pair.
 
 ## Where things live
 

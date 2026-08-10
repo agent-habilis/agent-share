@@ -1,7 +1,7 @@
 /**
  * Dev server: HTML multipage (`/` + `/lab`) plus the wasm binary at a
  * content-addressed HTTP path. The crate's glue defaults to `file://` for that
- * binary; callers pass the hashed path instead (see `src/wasm.ts`).
+ * binary; callers pass the hashed path instead (see `src/wasm/index.ts`).
  *
  * The hash is what stops a rebuilt binary being shadowed by a cached one — see
  * `scripts/wasm-asset.ts`.
@@ -13,7 +13,7 @@
  * invisible to it forever, so it went on answering for a build that no longer
  * existed. `/wasm/:name` re-reads the current binary instead (cheaply — the
  * bytes are memoised against the file's `stat`), and the watcher below
- * regenerates `src/wasm-path.ts` so `--hot` rebundles the app onto the new
+ * regenerates `src/wasm/path.ts` so `--hot` rebundles the app onto the new
  * hash. A rebuild now heals itself; nobody has to remember to restart.
  *
  * `/*` is the SPA catch-all so `/files/<ticket>` and `/info/<ticket>` hit the
@@ -33,8 +33,8 @@ import { stat } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import index from './index.html'
-import lab from './lab/index.html'
+import index from './src/index.html'
+import lab from './src/lab/index.html'
 import {
   syncGlue,
   tryWasmAsset,
@@ -75,7 +75,7 @@ async function currentAsset(): Promise<WasmAsset | null> {
 }
 
 /**
- * Point `src/wasm.ts` at the current build, so `--hot` rebundles onto it.
+ * Point `src/wasm/index.ts` at the current build, so `--hot` rebundles onto it.
  * Returns the build it published, if there was one.
  */
 async function writeCurrentPath(): Promise<WasmAsset | null> {
@@ -88,11 +88,11 @@ async function writeCurrentPath(): Promise<WasmAsset | null> {
 }
 
 // Before binding: `tasks/src/bench/browser.rs` reads the generated path back
-// out the moment this server reports a URL, and `src/wasm.ts` imports it.
+// out the moment this server reports a URL, and `src/wasm/index.ts` imports it.
 // Going through `writeCurrentPath` rather than a bare read leaves the cache
 // warm, so the first page load does not hash 7 MB a second time. The glue
 // mirror must be current before the first bundle for the same reason the
-// path must: `src/wasm.ts` imports both.
+// path must: `src/wasm/index.ts` imports both.
 await syncGlue()
 const initial = await writeCurrentPath()
 if (!initial) {
@@ -143,7 +143,7 @@ const server = Bun.serve({
 // file would publish a path for a build that never existed.
 //
 // The sibling glue files are watched too — the LinkError this heals: the
-// glue is bundled from the `src/wasm-glue/` mirror, and without a re-sync
+// glue is bundled from the `src/wasm/glue/` mirror, and without a re-sync
 // here a rebuilt binary met glue cached at server start, failing to
 // instantiate on a binding only one side knew about.
 try {
@@ -158,7 +158,7 @@ try {
       pending = null
       void Promise.all([writeCurrentPath(), syncGlue()]).then(([asset, glueMoved]) => {
         console.log(asset ? `  wasm ${asset.name}` : '  wasm missing')
-        if (glueMoved) console.log('  glue re-synced into src/wasm-glue/')
+        if (glueMoved) console.log('  glue re-synced into src/wasm/glue/')
       })
     }, 150)
   }).unref()

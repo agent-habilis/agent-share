@@ -1464,8 +1464,9 @@ fn cell_reconnect(ctx: &Ctx<'_>) -> Res<()> {
     // `reconnecting` is rendered in exactly one place — `TechInfo`'s status —
     // because the breadcrumb deliberately never says it ("redialing is the
     // app's permanent background posture … naming it in the chrome would label
-    // the normal state of the world", `web/src/App.tsx`). This cell used to
-    // close the panel first and then wait for a word only the panel renders.
+    // the normal state of the world", `web/src/pages/files/index.tsx`). This
+    // cell used to close the panel first and then wait for a word only the
+    // panel renders.
     wait_for_true(
         "window.__e2eSawReconnecting",
         ACTION_TIMEOUT,

@@ -6,8 +6,8 @@ import { component, render } from 'visage-dom'
 
 import './app.css'
 
-import { App } from './App.tsx'
-import { loadWasm } from './wasm.ts'
+import { App } from './pages/index.ts'
+import { loadWasm } from './wasm/index.ts'
 
 // Start the wasm fetch+compile now rather than when a session mounts — it is
 // the largest asset on the connect path, and the promise memo in `wasm.ts`
