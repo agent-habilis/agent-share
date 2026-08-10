@@ -307,12 +307,23 @@ impl<S: ChunkSource> Seeder<S> {
                 .collect();
             (roots, Arc::clone(&state.store))
         };
-        let mut held = Vec::new();
-        for (index, root, chunks) in roots {
-            if complete(store.as_ref(), root, chunks).await {
-                held.push(index);
-            }
-        }
+        // One question for the whole share rather than one per file: on the
+        // browser's store a per-root answer probes that root's chunks, and this
+        // asks about all of them at once — see `ChunkSource::coverage_of`.
+        //
+        // Counted against the row for the reason [`complete`] gives: an empty
+        // coverage is what a store answers for a root it has never seen, and
+        // `is_complete` cannot tell that from a zero-chunk file.
+        let addresses: Vec<Root> = roots.iter().map(|(_, root, _)| *root).collect();
+        let Ok(coverages) = store.coverage_of(&addresses).await else {
+            return Vec::new();
+        };
+        let mut held: Vec<u32> = roots
+            .iter()
+            .zip(coverages)
+            .filter(|((_, _, chunks), coverage)| coverage.count() == *chunks)
+            .map(|((index, _, _), _)| *index)
+            .collect();
         held.sort_unstable();
         held
     }

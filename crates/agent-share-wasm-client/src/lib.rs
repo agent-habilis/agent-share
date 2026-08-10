@@ -1507,22 +1507,31 @@ impl ShareClient {
         let Ok(store) = self.open_store().await else {
             return js_sys::JSON::parse("{}");
         };
-        let rows = self.rows.borrow().clone();
+        let rows: Vec<(u32, ChunkMap)> = self
+            .rows
+            .borrow()
+            .iter()
+            .map(|(index, row)| (*index, row.clone()))
+            .collect();
+        // Asked once for every row rather than once per row. This repaints while
+        // a transfer is in flight, and a per-root question here enumerated the
+        // whole chunk store each time — every share the tab has ever touched,
+        // per file, per repaint.
+        let addresses: Vec<Root> = rows.iter().map(|(_, row)| row.root()).collect();
+        let Ok(coverages) = store.coverage_of(&addresses).await else {
+            return js_sys::JSON::parse("{}");
+        };
         let mut out = serde_json::Map::new();
-        for (index, row) in &rows {
+        for ((index, row), coverage) in rows.iter().zip(coverages) {
             // Counted against the row rather than asked `Coverage::fraction`,
             // which answers `1.0` for an empty coverage — and a store with no
             // map for that root answers exactly that. Left as-is, a file this
             // tab holds nothing of paints as fully seeded, which is the one
             // reading the grid must never give.
-            let held = store
-                .coverage(row.root())
-                .await
-                .map_or(0, |coverage| coverage.count());
             let fraction = if row.is_empty() {
                 1.0
             } else {
-                held as f64 / row.len() as f64
+                coverage.count() as f64 / row.len() as f64
             };
             if let Some(number) = serde_json::Number::from_f64(fraction) {
                 out.insert(index.to_string(), serde_json::Value::Number(number));

@@ -133,6 +133,94 @@ async fn coverage_grows_chunk_by_chunk() {
     assert!(store.coverage(map.root()).await.expect("cov").is_complete());
 }
 
+/// **The case only a real browser can fail.**
+///
+/// `coverage` probes one root's leaves and `coverage_of` enumerates the keyspace
+/// once, and both of them issue every request before awaiting any — because an
+/// `IndexedDB` transaction goes inactive the moment control returns to the event
+/// loop with nothing outstanding, and because a request that completes before
+/// its `onsuccess` is attached never fires it. Get either wrong and this hangs
+/// or raises `TransactionInactiveError`; nothing on the host can tell.
+///
+/// Several roots and several chunks each, since a single-request answer would
+/// pass whatever the transaction handling did.
+#[wasm_bindgen_test]
+async fn coverage_of_answers_many_roots_in_one_pass() {
+    let store = fresh("coverage-of").await;
+    let whole = body(CHUNK_BYTES_USIZE * 3, 41);
+    let partial = body(CHUNK_BYTES_USIZE * 4, 42);
+    let untouched = body(CHUNK_BYTES_USIZE * 2, 43);
+
+    let whole_map = ChunkMap::build(&whole);
+    let partial_map = ChunkMap::build(&partial);
+    let untouched_map = ChunkMap::build(&untouched);
+    for map in [&whole_map, &partial_map, &untouched_map] {
+        store.put_map(map).await.expect("put_map");
+    }
+
+    for index in 0..whole_map.len() {
+        let range = whole_map.range_of(index);
+        let start = usize::try_from(range.start).expect("fits");
+        let end = usize::try_from(range.end).expect("fits");
+        store
+            .put(whole_map.leaf(index).expect("in range"), &whole[start..end])
+            .await
+            .expect("put");
+    }
+    // One chunk in the middle: a hole, not a prefix.
+    let range = partial_map.range_of(2);
+    let start = usize::try_from(range.start).expect("fits");
+    let end = usize::try_from(range.end).expect("fits");
+    store
+        .put(partial_map.leaf(2).expect("in range"), &partial[start..end])
+        .await
+        .expect("put");
+
+    let roots = [whole_map.root(), partial_map.root(), untouched_map.root()];
+    let batched = store.coverage_of(&roots).await.expect("coverage_of");
+    assert_eq!(batched.len(), 3, "one answer per root, in order");
+    assert!(batched[0].is_complete());
+    assert_eq!(batched[1].count(), 1);
+    assert!(batched[1].contains(2));
+    assert_eq!(batched[2].count(), 0);
+
+    // And the two routes to the same answer agree, which is the contract the
+    // host suite states and only this can check for `IdbStore`.
+    for (root, batch) in roots.iter().zip(&batched) {
+        let single = store.coverage(*root).await.expect("coverage");
+        assert_eq!(batch.as_bits(), single.as_bits(), "routes disagreed");
+        assert_eq!(batch.len(), single.len());
+    }
+}
+
+/// A root the store never saw keeps its slot rather than being dropped, or
+/// every later answer slides onto the wrong file.
+#[wasm_bindgen_test]
+async fn coverage_of_keeps_its_place_for_an_unknown_root() {
+    let store = fresh("coverage-of-unknown").await;
+    let known = body(CHUNK_BYTES_USIZE, 44);
+    let map = ChunkMap::build(&known);
+    store.put_map(&map).await.expect("put_map");
+    store
+        .put(map.leaf(0).expect("in range"), &known)
+        .await
+        .expect("put");
+
+    let stranger = ChunkMap::build(&body(4096, 45)).root();
+    let coverages = store
+        .coverage_of(&[stranger, map.root()])
+        .await
+        .expect("coverage_of");
+    assert_eq!(coverages.len(), 2);
+    assert_eq!(coverages[0].count(), 0);
+    assert!(coverages[1].is_complete());
+
+    assert!(
+        store.coverage_of(&[]).await.expect("empty").is_empty(),
+        "asking about nothing is not an error"
+    );
+}
+
 /// Dedup, in the browser: two files sharing a chunk store it once, and the
 /// second file is partly held without ever being fetched.
 #[wasm_bindgen_test]

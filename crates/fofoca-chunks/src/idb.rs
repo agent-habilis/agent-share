@@ -53,12 +53,25 @@ fn js_err(context: &str, error: &JsValue) -> anyhow::Error {
 /// The success/error closure pair kept alive for the duration of one await.
 type Handlers = Option<(Closure<dyn FnMut()>, Closure<dyn FnMut()>)>;
 
-/// Await an `IndexedDB` request.
+/// Hook an `IndexedDB` request **now**, and hand back the future for its result.
 ///
-/// The closures are dropped after the await rather than `forget`-ed: this runs
-/// once per chunk, and leaking a pair per chunk would be a leak proportional to
-/// the data transferred.
-async fn done(request: &IdbRequest) -> Result<JsValue> {
+/// The synchronous half of [`done`], split out for callers that issue many
+/// requests before awaiting any of them. Both halves of that pattern need the
+/// hooking to happen before the first yield:
+///
+/// - A transaction goes inactive as soon as control returns to the event loop
+///   with no request outstanding, so every request has to be *issued* while the
+///   caller still holds the thread.
+/// - A request that completes before `onsuccess` is attached never fires it, and
+///   the await would hang forever.
+///
+/// An `async fn` does its work on first poll, which is after both deadlines —
+/// hence a plain `fn` returning a future.
+///
+/// The closures are dropped when that future completes rather than `forget`-ed:
+/// this runs once per chunk, and leaking a pair per chunk would be a leak
+/// proportional to the data transferred.
+fn watch(request: &IdbRequest) -> impl Future<Output = Result<JsValue>> + use<> {
     let mut keep: Handlers = None;
     let promise = js_sys::Promise::new(&mut |resolve, reject| {
         let ok_request = request.clone();
@@ -79,9 +92,16 @@ async fn done(request: &IdbRequest) -> Result<JsValue> {
         request.set_onerror(Some(bad.as_ref().unchecked_ref()));
         keep = Some((ok, bad));
     });
-    let outcome = JsFuture::from(promise).await;
-    drop(keep);
-    outcome.map_err(|error| js_err("an IndexedDB request", &error))
+    async move {
+        let outcome = JsFuture::from(promise).await;
+        drop(keep);
+        outcome.map_err(|error| js_err("an IndexedDB request", &error))
+    }
+}
+
+/// Await an `IndexedDB` request.
+async fn done(request: &IdbRequest) -> Result<JsValue> {
+    watch(request).await
 }
 
 /// Await a transaction's completion.
@@ -329,6 +349,36 @@ impl IdbStore {
         Ok((transaction, store))
     }
 
+    /// Which of `addresses` this store holds, in one transaction.
+    ///
+    /// `get_key` rather than `get`: the question is presence, and `get` would
+    /// pull every chunk's bytes across the boundary — 64 `KiB` a piece — to
+    /// answer it. And one transaction rather than one each, because the
+    /// per-request overhead is what makes a per-chunk loop slow, not the lookups.
+    ///
+    /// Every request is issued before any is awaited. That is required twice
+    /// over — see [`watch`] — and it is why this collects futures rather than
+    /// awaiting in the loop that builds them.
+    async fn present(&self, addresses: &[ChunkHash]) -> Result<Vec<bool>> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (_transaction, store) = self.object_store(CHUNKS, IdbTransactionMode::Readonly)?;
+        let mut pending = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            let request = store
+                .get_key(&JsValue::from_str(&address.to_hex()))
+                .map_err(|error| js_err("probing for a chunk", &error))?;
+            pending.push(watch(&request));
+        }
+        let mut held = Vec::with_capacity(pending.len());
+        for probe in pending {
+            let value = probe.await?;
+            held.push(!value.is_undefined() && !value.is_null());
+        }
+        Ok(held)
+    }
+
     async fn read(&self, name: &str, key: &str) -> Result<Option<Vec<u8>>> {
         let (_transaction, store) = self.object_store(name, IdbTransactionMode::Readonly)?;
         let request = store
@@ -471,7 +521,7 @@ impl ChunkSource for IdbStore {
     }
 
     async fn has(&self, hash: ChunkHash) -> Result<bool> {
-        Ok(self.read(CHUNKS, &hash.to_hex()).await?.is_some())
+        Ok(self.present(&[hash]).await?.first().copied().unwrap_or(false))
     }
 
     async fn map(&self, root: Root) -> Result<Option<ChunkMap>> {
@@ -481,19 +531,58 @@ impl ChunkSource for IdbStore {
         Ok(Some(decode_map(&bytes)?))
     }
 
+    /// Probes this root's leaves, and scans nothing.
+    ///
+    /// The store is global across every share this peer has touched, so asking
+    /// it to enumerate itself to answer for one file costs the whole keyspace to
+    /// learn about a handful of chunks. Probing costs the file.
+    ///
+    /// [`Self::coverage_of`] takes the opposite route, and the two are not in
+    /// disagreement: see the note there.
     async fn coverage(&self, root: Root) -> Result<Coverage> {
         let Some(map) = self.map(root).await? else {
             return Ok(Coverage::empty(0));
         };
-        let held = self.stored_addresses().await?;
-        let held: HashSet<ChunkHash> = held.into_iter().collect();
+        let held = self.present(map.leaves()).await?;
         let mut coverage = Coverage::empty(map.len());
-        for (index, leaf) in map.leaves().iter().enumerate() {
-            if held.contains(leaf) {
+        for (index, present) in held.iter().enumerate() {
+            if *present {
                 coverage.insert(index);
             }
         }
         Ok(coverage)
+    }
+
+    /// Enumerates the keyspace once, and probes nothing.
+    ///
+    /// The inverse of [`Self::coverage`]'s trade, and deliberately: a caller
+    /// asking about every root it knows is asking about most of what it stores,
+    /// so one enumeration answers all of them at a cost the per-root probes
+    /// would pay again for each. The default loop on the trait would re-scan the
+    /// store per root, which is the quadratic this method exists to remove.
+    ///
+    /// A root with no stored map covers nothing, and holds its place in the
+    /// answer — callers zip these back onto what they asked about.
+    async fn coverage_of(&self, roots: &[Root]) -> Result<Vec<Coverage>> {
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let held: HashSet<ChunkHash> = self.stored_addresses().await?.into_iter().collect();
+        let mut out = Vec::with_capacity(roots.len());
+        for root in roots {
+            let Some(map) = self.map(*root).await? else {
+                out.push(Coverage::empty(0));
+                continue;
+            };
+            let mut coverage = Coverage::empty(map.len());
+            for (index, leaf) in map.leaves().iter().enumerate() {
+                if held.contains(leaf) {
+                    coverage.insert(index);
+                }
+            }
+            out.push(coverage);
+        }
+        Ok(out)
     }
 
     async fn bind(&self, file: &FileId) -> Result<Option<Root>> {

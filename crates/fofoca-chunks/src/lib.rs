@@ -563,6 +563,32 @@ pub trait ChunkSource {
     /// "in full" before it may be shared.
     fn coverage(&self, root: Root) -> impl Future<Output = Result<Coverage>>;
 
+    /// Coverage for several roots, asked once.
+    ///
+    /// One `Coverage` per input root, in the same order, so a caller can zip the
+    /// answers back onto whatever it asked about. An unknown root covers
+    /// nothing, exactly as [`Self::coverage`] says.
+    ///
+    /// Exists because "what do I hold of *everything*" is a different question
+    /// from "what do I hold of *this*", and a backend may answer them by
+    /// different routes. The default is the obvious loop, which is right
+    /// wherever a per-root answer already costs what the row costs; a backend
+    /// where it does not overrides this. See `IdbStore`, where the single-root
+    /// answer probes leaves and the batched one takes a single snapshot of the
+    /// keyspace — the loop there would re-scan the whole store per root.
+    ///
+    /// # Errors
+    /// Whatever the backend's [`Self::coverage`] would raise for one root.
+    fn coverage_of(&self, roots: &[Root]) -> impl Future<Output = Result<Vec<Coverage>>> {
+        async move {
+            let mut out = Vec::with_capacity(roots.len());
+            for root in roots {
+                out.push(self.coverage(*root).await?);
+            }
+            Ok(out)
+        }
+    }
+
     /// The root bound to this file *version*, if the file still matches it.
     ///
     /// `None` means *do not answer for this*: either nothing was ever bound, or

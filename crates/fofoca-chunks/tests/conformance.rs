@@ -36,6 +36,18 @@ fn body(len: usize, seed: u8) -> Vec<u8> {
         .collect()
 }
 
+/// Store one chunk of `bytes` as `map` describes it.
+///
+/// The four lines this replaces appear verbatim wherever a case needs a file to
+/// be part-held, which is most of the coverage ones.
+async fn store_chunk(store: &impl ChunkStore, map: &ChunkMap, bytes: &[u8], index: usize) {
+    let range = map.range_of(index);
+    let start = usize::try_from(range.start).expect("fits");
+    let end = usize::try_from(range.end).expect("fits");
+    let leaf = map.leaf(index).expect("in range");
+    store.put(leaf, &bytes[start..end]).await.expect("put");
+}
+
 /// What a backend supplies beyond the traits.
 ///
 /// One thing, and it is exactly what the traits keep opaque: **where a file
@@ -123,6 +135,9 @@ macro_rules! for_each_case {
         $case!(coverage_shrinks_when_chunks_are_cleared);
         $case!(stored_chunks_still_verify_against_their_map);
         $case!(coverage_survives_being_described_and_rebuilt);
+        $case!(coverage_of_agrees_with_coverage_root_for_root);
+        $case!(coverage_of_keeps_its_place_for_a_root_it_does_not_know);
+        $case!(coverage_of_nothing_is_nothing);
         $case!(putting_a_held_chunk_again_is_idempotent);
         $case!(a_one_bit_difference_is_caught);
     };
@@ -204,6 +219,81 @@ async fn an_unknown_root_covers_nothing(harness: &impl Harness) {
     let coverage = store.coverage(map.root()).await.expect("coverage");
     assert_eq!(coverage.len(), 0);
     assert_eq!(coverage.count(), 0);
+}
+
+/// The batched question must answer exactly what the single one does.
+///
+/// A backend is free to reach the two answers by different routes — the browser
+/// store probes one root's leaves and enumerates the keyspace for many — and
+/// this is what holds those routes to one meaning. Asked over a mix of held,
+/// part-held and untouched files, because a disagreement is likeliest where the
+/// answer is neither empty nor full.
+async fn coverage_of_agrees_with_coverage_root_for_root(harness: &impl Harness) {
+    let store = harness.store();
+    let whole = body(CHUNK_BYTES_USIZE * 2, 21);
+    let partial = body(CHUNK_BYTES_USIZE * 3, 22);
+    let untouched = body(CHUNK_BYTES_USIZE, 23);
+
+    let whole_map = ChunkMap::build(&whole);
+    let partial_map = ChunkMap::build(&partial);
+    let untouched_map = ChunkMap::build(&untouched);
+    store.put_map(&whole_map).await.expect("put_map");
+    store.put_map(&partial_map).await.expect("put_map");
+    store.put_map(&untouched_map).await.expect("put_map");
+
+    for index in 0..whole_map.len() {
+        store_chunk(store, &whole_map, &whole, index).await;
+    }
+    // The middle chunk only, so the run has a hole in it rather than a prefix.
+    store_chunk(store, &partial_map, &partial, 1).await;
+
+    let roots = [whole_map.root(), partial_map.root(), untouched_map.root()];
+    let batched = store.coverage_of(&roots).await.expect("coverage_of");
+    assert_eq!(batched.len(), roots.len(), "one answer per root, in order");
+    for (root, batch) in roots.iter().zip(&batched) {
+        let single = store.coverage(*root).await.expect("coverage");
+        assert_eq!(batch.len(), single.len(), "disagreed on length for {root:?}");
+        assert_eq!(
+            batch.as_bits(),
+            single.as_bits(),
+            "disagreed on which chunks for {root:?}"
+        );
+    }
+    assert!(batched[0].is_complete());
+    assert_eq!(batched[1].count(), 1);
+    assert_eq!(batched[2].count(), 0);
+}
+
+/// Positional, so a caller can zip the answers onto what it asked about. A root
+/// the store never saw has to hold its slot rather than being skipped — dropping
+/// it would slide every later answer onto the wrong file.
+async fn coverage_of_keeps_its_place_for_a_root_it_does_not_know(harness: &impl Harness) {
+    let store = harness.store();
+    let known = body(CHUNK_BYTES_USIZE, 24);
+    let map = ChunkMap::build(&known);
+    store.put_map(&map).await.expect("put_map");
+    store_chunk(store, &map, &known, 0).await;
+
+    let stranger = ChunkMap::build(&body(4096, 25)).root();
+    let coverages = store
+        .coverage_of(&[stranger, map.root(), stranger])
+        .await
+        .expect("coverage_of");
+
+    assert_eq!(coverages.len(), 3);
+    assert_eq!(coverages[0].count(), 0);
+    assert_eq!(coverages[0].len(), 0, "an unknown root covers nothing");
+    assert!(coverages[1].is_complete(), "the known root kept its slot");
+    assert_eq!(coverages[2].count(), 0);
+}
+
+/// Asking about nothing is not an error. The callers build this slice from
+/// whatever rows they happen to hold, and a peer that has learned none is the
+/// ordinary state on a tab that has only browsed.
+async fn coverage_of_nothing_is_nothing(harness: &impl Harness) {
+    let store = harness.store();
+    let coverages = store.coverage_of(&[]).await.expect("coverage_of");
+    assert!(coverages.is_empty());
 }
 
 /// **Partial is a first-class answer.** This is the behaviour that replaces the
