@@ -141,36 +141,42 @@ impl SourceSet {
         }
     }
 
-    /// Which slots this mount can serve, for its peer card.
+    /// Which slots this mount can serve *whole*, for its peer card.
     ///
-    /// Derived from the rows it has addressed rather than from a tally, so a
-    /// number here is one the store can actually stand behind.
+    /// Asked of the seeder rather than walked here, so a browser tab and a CLI
+    /// mount put the same meaning on the wire. `serving` is the whole-slot
+    /// contract — `vouches` reads it to pick a peer for an `OP_READ`, which
+    /// refuses on any hole — so a slot held in part belongs to
+    /// [`agent_share_proto::PeerCard::holding`] and `OP_HAVE`, not here.
+    /// Listing it would send readers to bytes that are not there.
     pub(super) async fn serving(&self) -> Option<String> {
-        let store = self.store.as_ref()?;
-        let rows = self.rows.lock().ok()?.clone();
-        let mut held = Vec::new();
-        for (index, row) in &rows {
-            if store
-                .coverage(row.root())
-                .await
-                .is_ok_and(|coverage| coverage.count() > 0)
-            {
-                held.push(*index);
-            }
-        }
-        held.sort_unstable();
+        let held = self.seeder.complete_slots().await;
         agent_share_proto::serving::encode_serving(&held, self.total_slots)
     }
 
-    /// Hand the seeder what this mount now holds.
+    /// Whether this mount holds any chunk at all, for its peer card.
+    pub(super) fn holding(&self) -> bool {
+        self.seeder.is_armed()
+    }
+
+    /// Hand the seeder the row behind bytes this mount just kept.
     ///
     /// Store first, advertise second — the ordering the crash-consistency rule
     /// already follows, and the reason a peer never claims bytes it cannot
     /// serve.
-    fn refresh_seeder(&self) {
+    ///
+    /// The first call installs the store and the envelope, which is what arms
+    /// the seeder at all. After that a row is adopted on its own: this runs on
+    /// every read that fetched anything, and [`Seeder::update`] rebuilds its
+    /// scope set from every row it holds, which over a large share is quadratic.
+    fn adopt_into_seeder(&self, index: u32, row: &ChunkMap) {
         let Some(store) = self.store.clone() else {
             return;
         };
+        if self.seeder.is_armed() {
+            self.seeder.adopt(index, row);
+            return;
+        }
         let rows = self
             .rows
             .lock()
@@ -274,7 +280,7 @@ impl SourceSet {
             cursor += take as u64;
         }
         if fetched_any {
-            self.refresh_seeder();
+            self.adopt_into_seeder(index, &row);
         }
         Some(out)
     }

@@ -42,6 +42,9 @@ pub const CARD_TREE: &str = "tree";
 /// one whose availability was too scattered to fit the frame.
 pub const CARD_SERVING: &str = "serving";
 
+/// Card key for [`PeerCard::holding`].
+pub const CARD_HOLDING: &str = "holding";
+
 /// Structured identity written to `/peers/<nick>/card`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerCard {
@@ -69,6 +72,24 @@ pub struct PeerCard {
     /// nothing without agreeing which manifest it indexes into.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serving: Option<String>,
+    /// Whether this peer holds **any** chunk of this share.
+    ///
+    /// [`Self::serving`] answers a different question — which slots can be read
+    /// *whole* — and a peer part-way through a transfer answers `None` to it
+    /// while being a perfectly good chunk source: a chunk is addressed by the
+    /// hash of its own bytes, so holding one is enough to serve one. Readers
+    /// pick whole-file sources off `serving` and chunk sources off this.
+    ///
+    /// Deliberately a flag and not a bitfield. Per-chunk availability changes as
+    /// every range lands, and this rides a CRDT that keeps history — see
+    /// [`crate::serving`]. The detail is answered live by `OP_HAVE`; this only
+    /// says whether it is worth the round trip.
+    ///
+    /// `None` means *unknown*, not *nothing*: a peer built before this field
+    /// omits it, and reading that as "holds nothing" would make every older peer
+    /// invisible. Fall back to [`Self::serving`] being present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holding: Option<bool>,
 }
 
 impl PeerCard {
@@ -95,6 +116,7 @@ impl PeerCard {
             role,
             tree: None,
             serving: None,
+            holding: None,
         }
     }
 
@@ -114,6 +136,29 @@ impl PeerCard {
     pub fn with_serving(mut self, serving: Option<String>) -> Self {
         self.serving = serving;
         self
+    }
+
+    /// Set whether this peer holds any chunk at all. See [`Self::holding`].
+    #[must_use]
+    pub fn with_holding(mut self, holding: Option<bool>) -> Self {
+        self.holding = holding;
+        self
+    }
+
+    /// Whether this peer is worth dialling for bytes at all.
+    ///
+    /// The question every "is this a candidate source" filter is really asking,
+    /// and the reason it is a method rather than a field test: [`Self::holding`]
+    /// answers it exactly, but a peer built before that field existed omits it,
+    /// and reading absent as *holds nothing* would make every older peer
+    /// invisible to a newer one. So absent falls back to the older proxy —
+    /// [`Self::serving`] being present — which is what the filters used before.
+    ///
+    /// Says nothing about *which* slots. A caller that needs a whole file must
+    /// still consult `serving`; this only says the round trip is worth making.
+    #[must_use]
+    pub fn holds_something(&self) -> bool {
+        self.holding.unwrap_or_else(|| self.serving.is_some())
     }
 
     /// JSON object for the `card` field of a meta merge
@@ -165,6 +210,9 @@ impl PeerCard {
                 CARD_SERVING.to_owned(),
                 serde_json::Value::String(serving.clone()),
             );
+        }
+        if let Some(holding) = self.holding {
+            map.insert(CARD_HOLDING.to_owned(), serde_json::Value::Bool(holding));
         }
         serde_json::Value::Object(map)
     }
@@ -218,6 +266,7 @@ impl PeerCard {
             .get(CARD_SERVING)
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
+        let holding = value.get(CARD_HOLDING).and_then(serde_json::Value::as_bool);
         Some(Self {
             endpoint,
             app,
@@ -228,6 +277,7 @@ impl PeerCard {
             role,
             tree,
             serving,
+            holding,
         })
     }
 }
@@ -258,6 +308,41 @@ mod tests {
         let parsed = PeerCard::from_card_value(&with.to_card_value()).expect("parse");
         assert_eq!(parsed, with);
         assert_eq!(parsed.tree.as_deref(), Some("0123456789abcdef"));
+    }
+
+    #[test]
+    fn holding_round_trips_through_the_card() {
+        for holding in [true, false] {
+            let with = card().with_holding(Some(holding));
+            let parsed = PeerCard::from_card_value(&with.to_card_value()).expect("parse");
+            assert_eq!(parsed, with);
+            assert_eq!(parsed.holding, Some(holding));
+        }
+    }
+
+    /// **Absent must read as unknown, not as "holds nothing".**
+    ///
+    /// A peer built before `holding` existed omits the key, and every candidate
+    /// filter asks [`PeerCard::holds_something`]. Reading absent as `false`
+    /// would make each of those peers invisible to a newer one — a mesh that
+    /// silently stops sharing across a version boundary.
+    #[test]
+    fn an_absent_holding_falls_back_to_serving() {
+        let older = card().with_serving(Some("0-5".to_owned()));
+        let parsed = PeerCard::from_card_value(&older.to_card_value()).expect("parse");
+        assert_eq!(parsed.holding, None, "absent must not decode as false");
+        assert!(parsed.holds_something(), "an older seeder must stay visible");
+
+        let browsing = PeerCard::from_card_value(&card().to_card_value()).expect("parse");
+        assert!(!browsing.holds_something(), "no serving and no flag is nothing");
+    }
+
+    /// The state the flag exists for: part-way through a transfer, nothing is
+    /// servable whole and the peer is still worth asking for chunks.
+    #[test]
+    fn a_partial_holder_is_worth_dialling_with_no_serving() {
+        let partial = card().with_serving(None).with_holding(Some(true));
+        assert!(partial.holds_something());
     }
 
     /// Absent rather than null: a peer that has not learned its manifest yet

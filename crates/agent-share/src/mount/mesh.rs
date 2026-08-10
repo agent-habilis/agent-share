@@ -116,11 +116,25 @@ pub(crate) type CardBook = Arc<Mutex<Roster>>;
 /// any manifest, and a producer's tree changes under `live.rs`'s rescan.
 type SharedTree = Arc<Mutex<Option<String>>>;
 
-/// Which slots we can serve, as [`agent_share_proto::serving`] encodes them.
+/// What this peer advertises it can give.
 ///
+/// The two travel together because they are published together and read
+/// together: `serving` is the whole-slot contract a reader picks an `OP_READ`
+/// source with, and `holding` says whether it is worth asking for chunks at all
+/// — see [`agent_share_proto::PeerCard::holding`]. A mount part-way through a
+/// transfer is `holding` with no `serving`, which is precisely the state the
+/// pair exists to express.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(crate) struct Advertised {
+    /// Slots servable whole, as [`agent_share_proto::serving`] encodes them.
+    pub(crate) serving: Option<String>,
+    /// Whether this peer holds any chunk of the share.
+    pub(crate) holding: bool,
+}
+
 /// Shared like [`SharedTree`] and for the same reason: a mirror's coverage
 /// changes as it fetches, so this cannot be fixed at join.
-type SharedServing = Arc<Mutex<Option<String>>>;
+type SharedServing = Arc<Mutex<Advertised>>;
 
 /// What the outside world can ask the driver to do.
 ///
@@ -253,7 +267,13 @@ impl ShareDriver {
             self.role.clone(),
         )
         .with_tree(self.tree.lock().ok().and_then(|tree| tree.clone()))
-        .with_serving(self.serving.lock().ok().and_then(|serving| serving.clone()));
+        .with_serving(
+            self.serving
+                .lock()
+                .ok()
+                .and_then(|advertised| advertised.serving.clone()),
+        )
+        .with_holding(self.serving.lock().ok().map(|advertised| advertised.holding));
         let merge = serde_json::json!({
             "peers": {
                 ctx.author.as_str(): {
@@ -447,15 +467,19 @@ impl ShareMesh {
     /// Idempotent by value like [`Self::set_tree`], and for the same reason: a
     /// mirror recomputes this far more often than it changes, and a card
     /// rewrite is a CRDT merge sent to every peer.
-    pub(crate) async fn set_serving(&self, encoded: Option<String>) {
+    pub(crate) async fn set_serving(&self, encoded: Option<String>, holding: bool) {
         {
+            let next = Advertised {
+                serving: encoded,
+                holding,
+            };
             let Ok(mut current) = self.serving.lock() else {
                 return;
             };
-            if *current == encoded {
+            if *current == next {
                 return;
             }
-            *current = encoded;
+            *current = next;
         }
         let Some(node) = self.node.as_ref() else {
             return;
@@ -783,7 +807,10 @@ pub(crate) async fn join(opts: JoinOpts) -> Result<ShareMesh> {
     // its *mesh* traffic rides the same unicast plane the producer's does.
     let book: CardBook = Arc::new(Mutex::new(Roster::default()));
     let tree: SharedTree = Arc::new(Mutex::new(tree));
-    let serving: SharedServing = Arc::new(Mutex::new(serving));
+    let serving: SharedServing = Arc::new(Mutex::new(Advertised {
+        holding: serving.is_some(),
+        serving,
+    }));
     let driver = ShareDriver::new(
         env!("CARGO_PKG_VERSION").to_owned(),
         "rust".to_owned(),

@@ -163,6 +163,38 @@ impl<S> Seeder<S> {
         }
     }
 
+    /// Adopt one row, leaving everything else as it stands.
+    ///
+    /// **This is what lets a chunk be seeded the moment it lands.** A chunk is
+    /// addressed by `blake3` of its own bytes, so holding one is enough to serve
+    /// one — but [`Self::answer_chunk`] answers only for addresses reachable
+    /// from a row this seeder knows, and a downloader that waited for its whole
+    /// transfer to finish before saying so would be invisible for exactly the
+    /// window it has bytes worth asking for. Called with the row *before* its
+    /// chunks are fetched, every one of them is servable as it arrives.
+    ///
+    /// [`Self::update`] rebuilds the scope set from every row it is given, which
+    /// is O(all chunks) — per file over a large share that is quadratic. This
+    /// costs one row.
+    ///
+    /// A no-op until [`Self::update`] has supplied a store and an envelope:
+    /// there is nothing to answer *with* yet, and a row alone would not change
+    /// that.
+    ///
+    /// [`Self::answer_chunk`]: crate::ServeSource::answer_chunk
+    ///
+    /// # Panics
+    /// The lock is poisoned.
+    pub fn adopt(&self, index: u32, row: &ChunkMap) {
+        let mut inner = self.0.write().expect("the seeder lock is poisoned");
+        let Some(state) = inner.state.as_mut() else {
+            return;
+        };
+        state.slot_of_root.insert(row.root(), index);
+        state.in_scope.extend(row.leaves().iter().copied());
+        state.rows.insert(index, row.clone());
+    }
+
     /// Whether this peer holds anything at all for this share.
     ///
     /// # Panics
@@ -642,6 +674,77 @@ mod tests {
                 seeder.complete_slots().await.contains(&7),
                 "the narrow check and the walk must agree"
             );
+        });
+    }
+
+    /// **One chunk is enough to seed one chunk.**
+    ///
+    /// The claim the whole partial-seeding design rests on: a peer that has
+    /// fetched part of a file answers for the part it has, reports it through
+    /// `OP_HAVE`, and is still honest that it cannot serve the slot whole. A
+    /// downloader is therefore useful to the swarm from its first chunk rather
+    /// than from its last.
+    #[test]
+    fn one_chunk_is_enough_to_seed_that_chunk() {
+        futures::executor::block_on(async {
+            use fofoca_chunks::ChunkStore as _;
+
+            // Two chunks, so "some" and "all" are genuinely different.
+            let bytes = vec![7u8; fofoca_chunks::CHUNK_BYTES_USIZE + 1];
+            let store = Arc::new(MemStore::new());
+            let (seeder, row) = armed(Arc::clone(&store), &bytes);
+            assert!(row.len() >= 2, "the fixture must span more than one chunk");
+
+            store.put_map(&row).await.expect("put the map");
+            let first = row.leaf(0).expect("leaf");
+            let range = row.range_of(0);
+            let end = usize::try_from(range.end).expect("a test file fits usize");
+            store.put(first, &bytes[..end]).await.expect("put");
+
+            assert_eq!(
+                seeder.answer_chunk(first).await.as_deref(),
+                Some(&bytes[..end]),
+                "a held chunk must be served, whole file or not"
+            );
+            let coverage = seeder.answer_have(row.root()).await.expect("in scope");
+            assert_eq!(coverage.count(), 1, "OP_HAVE must report the one held chunk");
+            assert!(
+                seeder.complete_slots().await.is_empty(),
+                "the card must not claim a slot that cannot be read whole"
+            );
+            assert!(seeder.is_armed(), "a partial holder still holds something");
+        });
+    }
+
+    /// `adopt` is what makes a chunk servable the moment it lands: before it the
+    /// address is out of scope, and an out-of-scope address is refused exactly
+    /// like one nobody holds.
+    #[test]
+    fn a_row_is_not_servable_until_it_is_adopted() {
+        futures::executor::block_on(async {
+            use fofoca_chunks::ChunkStore as _;
+
+            let bytes = b"the bytes of a file";
+            let store = Arc::new(MemStore::new());
+            let (seeder, _) = armed(Arc::clone(&store), b"a different file");
+
+            // A second file, stored but never adopted.
+            let row = ChunkMap::build(bytes);
+            store.put_map(&row).await.expect("put the map");
+            let address = row.leaf(0).expect("leaf");
+            store.put(address, bytes).await.expect("put");
+            assert!(
+                seeder.answer_chunk(address).await.is_none(),
+                "an unadopted address is outside this share's scope"
+            );
+
+            seeder.adopt(9, &row);
+            assert_eq!(
+                seeder.answer_chunk(address).await.as_deref(),
+                Some(&bytes[..]),
+                "adopting the row brings its chunks into scope"
+            );
+            assert_eq!(seeder.complete_slots().await, vec![9]);
         });
     }
 

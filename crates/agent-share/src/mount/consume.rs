@@ -554,7 +554,7 @@ async fn bootstrap_from_seeders(
                     .present()
                     .into_iter()
                     .filter(|card| card.endpoint != local)
-                    .filter(|card| card.tree.is_some() && card.serving.is_some())
+                    .filter(|card| card.tree.is_some() && card.holds_something())
                     .collect()
             })
             .unwrap_or_default();
@@ -1273,10 +1273,13 @@ fn spawn_serving_updates(sources: Arc<super::sources::SourceSet>, mesh: Arc<Shar
         let mut last = None;
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            let serving = sources.serving().await;
-            if serving != last {
-                mesh.set_serving(serving.clone()).await;
-                last = serving;
+            // Both, because they move independently: a mount that has kept some
+            // chunks of every file is `holding` with nothing servable whole, and
+            // that is the state worth advertising the moment it is true.
+            let next = (sources.serving().await, sources.holding());
+            if Some(&next) != last.as_ref() {
+                mesh.set_serving(next.0.clone(), next.1).await;
+                last = Some(next);
             }
         }
     });

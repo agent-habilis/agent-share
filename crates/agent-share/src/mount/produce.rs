@@ -193,7 +193,11 @@ pub(crate) async fn serve(
                             // it sends readers to a peer that cannot answer.
                             // Both dedupe by value, so a rescan that changed
                             // nothing costs no gossip.
-                            mesh.set_serving(tree.serving()).await;
+                            // A producer serves from the tree itself, so anything it can
+                            // list it holds whole; the two answers coincide.
+                            let serving = tree.serving();
+                            let holding = serving.is_some();
+                            mesh.set_serving(serving, holding).await;
                         }
                         Err(RecvError::Closed) => {
                             // The watcher is gone; the share still serves.

@@ -95,6 +95,17 @@ describe('partial holdings', () => {
     expect(seedLabel('partial', target, new Set(), coverage)).toBe('seeding 1%')
   })
 
+  test('a file with no coverage entry reads as nothing, never as full', () => {
+    // The contract `coverage_map` has to produce. It asks the store per row,
+    // and an empty coverage answers `1.0` to `fraction()` — so a row the store
+    // has no map for once arrived here as "fully seeded". Absent means unknown,
+    // and unknown must paint as nothing rather than as a promise.
+    const root = dir('', [file('never-fetched.bin', 0)])
+    const target = root.children[0] as FileNode
+    expect(fileSeedState(target, new Set(), new Map())).toBe('none')
+    expect(fileSeedState(target, new Set(), new Map([[0, 0]]))).toBe('none')
+  })
+
   test('a fully-covered file reads as full even before the held set catches up', () => {
     // `held` is refreshed synchronously and coverage lands a tick later, so the
     // two disagree briefly. Neither ordering may report less than is held.

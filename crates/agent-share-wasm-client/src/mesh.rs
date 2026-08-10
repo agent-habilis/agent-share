@@ -75,9 +75,24 @@ impl CardParts {
 /// the tab's whole life. The native peer carries the same split.
 pub(crate) type SharedTree = Arc<Mutex<Option<String>>>;
 
-/// Which manifest slots this tab can serve, as `agent_share_proto::serving`
-/// encodes them. Shared for the same reason as [`SharedTree`].
-pub(crate) type SharedServing = Arc<Mutex<Option<String>>>;
+/// What this tab advertises it can give.
+///
+/// The two travel together because they are published together and read
+/// together: `serving` is the whole-slot contract a reader picks an `OP_READ`
+/// source with, and `holding` says whether it is worth asking for chunks at all
+/// — see `PeerCard::holding`. A tab part-way through a download is `holding`
+/// with nothing servable whole, which is the state the pair exists to express.
+/// The native peer carries the same split.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(crate) struct Advertised {
+    /// Slots servable whole, as `agent_share_proto::serving` encodes them.
+    pub(crate) serving: Option<String>,
+    /// Whether this tab holds any chunk of the share.
+    pub(crate) holding: bool,
+}
+
+/// Shared for the same reason as [`SharedTree`].
+pub(crate) type SharedServing = Arc<Mutex<Advertised>>;
 
 /// What the outside world can ask the share driver to do. See the native
 /// `ShareRequest`; the two are deliberately the same shape.
@@ -224,7 +239,13 @@ impl ShareMeshDriver {
             .clone()
             .into_card(ctx.endpoint.id().to_string())
             .with_tree(self.tree.lock().ok().and_then(|tree| tree.clone()))
-            .with_serving(self.serving.lock().ok().and_then(|serving| serving.clone()));
+            .with_serving(
+                self.serving
+                    .lock()
+                    .ok()
+                    .and_then(|advertised| advertised.serving.clone()),
+            )
+            .with_holding(self.serving.lock().ok().map(|advertised| advertised.holding));
         let merge = serde_json::json!({
             "peers": {
                 ctx.author.as_str(): {
@@ -565,16 +586,20 @@ impl MeshPeer {
     ///
     /// `None` clears the field, which reads as *cannot vouch* rather than
     /// *holds nothing* — the distinction `serving` is built on.
-    pub(crate) async fn set_serving(&self, encoded: Option<String>) {
+    pub(crate) async fn set_serving(&self, encoded: Option<String>, holding: bool) {
         {
+            let next = Advertised {
+                serving: encoded,
+                holding,
+            };
             // Scoped: never hold a std `Mutex` across the await below.
             let Ok(mut current) = self.serving.lock() else {
                 return;
             };
-            if *current == encoded {
+            if *current == next {
                 return;
             }
-            *current = encoded;
+            *current = next;
         }
         let sender = self.node.borrow().as_ref().map(Node::sender);
         let Some(sender) = sender else {
@@ -826,7 +851,7 @@ async fn spawn_peer_inner(
     // `handle_signals: false` — there are no process signals in a tab, and the
     // engine's signal registration is host-only anyway.
     let tree: SharedTree = Arc::new(Mutex::new(None));
-    let serving: SharedServing = Arc::new(Mutex::new(None));
+    let serving: SharedServing = Arc::new(Mutex::new(Advertised::default()));
     let driver = ShareMeshDriver::new(
         card,
         Arc::clone(&tree),

@@ -84,6 +84,14 @@ type State =
   | { phase: 'needs-password'; error?: string }
   | { phase: 'failed'; reason: string; kind?: FailureKind }
 
+/**
+ * How often the availability grid repaints while bytes are arriving.
+ *
+ * A second is well under the eye's threshold for "live" and well over the cost
+ * of a coverage sweep, which reads the store once per known row.
+ */
+const HOLDINGS_REPAINT_MS = 1_000
+
 /** Fall back to the deepest prefix that still exists in the manifest. */
 function prunePath(current: string[], manifest: Manifest): string[] {
   const dirs = new Set(manifest.dirs.map((dir) => dir.rel_path))
@@ -584,6 +592,7 @@ const Session = component<{
       },
       abort,
     }
+    const untrack = trackHoldings(current.client)
     try {
       const onProgress = (progress: Progress) => {
         transfer.value = { kind: 'download', progress, abort }
@@ -604,6 +613,7 @@ const Session = component<{
         downloadError.value = error instanceof Error ? error.message : String(error)
       }
     } finally {
+      untrack()
       if (transfer.peek()?.kind === 'download') transfer.value = null
       // Whatever landed — including a cancelled transfer's whole chunks — is
       // now servable, so adopt it into the seeder and say so. After the
@@ -630,6 +640,24 @@ const Session = component<{
       .catch((error: unknown) => {
         console.debug('[share] publishing what we hold failed', error)
       })
+  }
+
+  /**
+   * Repaint what this tab holds while bytes are still arriving.
+   *
+   * A file is seedable chunk by chunk, so leaving the grid on "not held" until
+   * the transfer ends understates what this tab is already handing the swarm —
+   * for the whole window where that is most worth saying. Returns the stop.
+   *
+   * Polled rather than driven off progress because `sync` reports none of its
+   * own, and on an interval because `coverage_map` asks the store once per known
+   * row. A tab in the background gets throttled to seconds by the browser, which
+   * costs nothing here: the repaint is a courtesy, and the `finally` below is
+   * what guarantees the final state.
+   */
+  function trackHoldings(client: Client): () => void {
+    const timer = setInterval(() => refreshHeld(client), HOLDINGS_REPAINT_MS)
+    return () => clearInterval(timer)
   }
 
   /** Take the client's held set into the signal, and repaint. */
@@ -670,6 +698,7 @@ const Session = component<{
     if (current.phase !== 'ready') return
     seeding.value = true
     seedError.value = null
+    const untrack = trackHoldings(current.client)
     try {
       await current.client.sync(only)
       refreshHeld(current.client)
@@ -681,7 +710,12 @@ const Session = component<{
       seedError.value = String(error)
       console.warn('[share] sync failed', error)
     } finally {
+      untrack()
       seeding.value = false
+      // A sync that failed part-way still left whole chunks behind, and they
+      // are seedable — so the last word on what this tab holds comes after the
+      // failure, not only after a success.
+      refreshHeld(current.client)
     }
   }
 

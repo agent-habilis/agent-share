@@ -1348,6 +1348,21 @@ impl ShareClient {
         let mut unverified = 0u32;
         let mut skipped = 0u32;
 
+        // Armed **before** the first byte is fetched, not after the last.
+        //
+        // A chunk is addressed by the hash of its own bytes, so holding one is
+        // enough to serve one — but the seeder answers only for addresses
+        // reachable from a row it knows, and it used to learn every row at the
+        // end of this loop. A tab pulling a large share was therefore invisible
+        // as a source for the entire download, which is exactly the window it
+        // has bytes other peers are waiting for. From here each row is adopted
+        // as it is learned and every chunk is servable as it lands.
+        self.seeder.update(
+            Arc::new(envelope.clone()),
+            self.rows.borrow().clone(),
+            Arc::clone(&store),
+        );
+
         for (index, entry) in manifest.files.iter().enumerate() {
             // A tombstone holds a slot open so later indices keep meaning what
             // they meant. There is nothing to fetch.
@@ -1384,6 +1399,10 @@ impl ShareClient {
                 self.remember_row(index, &row);
                 continue;
             }
+
+            // Before the fetch, so the chunks below are servable as they land
+            // rather than when the whole share finishes.
+            self.remember_row(index, &row);
 
             // Only the missing chunks, and spread over every peer that holds
             // them. Pressing Seed after a preview therefore costs the
@@ -1491,10 +1510,20 @@ impl ShareClient {
         let rows = self.rows.borrow().clone();
         let mut out = serde_json::Map::new();
         for (index, row) in &rows {
-            let fraction = store
+            // Counted against the row rather than asked `Coverage::fraction`,
+            // which answers `1.0` for an empty coverage — and a store with no
+            // map for that root answers exactly that. Left as-is, a file this
+            // tab holds nothing of paints as fully seeded, which is the one
+            // reading the grid must never give.
+            let held = store
                 .coverage(row.root())
                 .await
-                .map_or(0.0, |coverage| coverage.fraction());
+                .map_or(0, |coverage| coverage.count());
+            let fraction = if row.is_empty() {
+                1.0
+            } else {
+                held as f64 / row.len() as f64
+            };
             if let Some(number) = serde_json::Number::from_f64(fraction) {
                 out.insert(index.to_string(), serde_json::Value::Number(number));
             }
@@ -1515,8 +1544,16 @@ impl ShareClient {
         Ok(None)
     }
 
+    /// Keep a row, and let the seeder answer for it.
+    ///
+    /// The two belong together: `rows` is what this tab can address, and the
+    /// seeder's scope is what it will answer for. Learning one without the other
+    /// is how a tab ends up holding chunks it refuses to serve.
     fn remember_row(&self, index: u32, row: &ChunkMap) {
         self.rows.borrow_mut().insert(index, row.clone());
+        // A no-op until the seeder has a store and an envelope, which is why
+        // `sync` arms it before its loop rather than after.
+        self.seeder.adopt(index, row);
     }
 
     /// Store whichever whole chunks of `row` lie inside `bytes` at `offset`.
@@ -1603,7 +1640,10 @@ impl ShareClient {
             .into_iter()
             .filter(|card| card.endpoint != home && card.endpoint != own)
             // A card with no `serving` holds nothing worth dialling for bulk.
-            .filter(|card| card.serving.is_some())
+            // Not `serving`: that is the whole-slot contract, and a peer
+            // part-way through its own download is exactly the chunk source
+            // this dial is looking for.
+            .filter(|card| card.holds_something())
             .map(|card| card.endpoint)
             .take(SWARM_WIDTH)
             .collect();
@@ -2023,8 +2063,14 @@ impl ShareClient {
             return;
         };
         mesh.set_tree(fingerprint).await;
-        let serving = self.card.borrow().serving();
-        mesh.set_serving(serving).await;
+        // `holding` rather than "serving is Some": a tab that has fetched
+        // chunks of every file and finished none serves nothing whole and is
+        // still a chunk source worth dialling.
+        let (serving, holding) = {
+            let card = self.card.borrow();
+            (card.serving(), self.seeder.is_armed())
+        };
+        mesh.set_serving(serving, holding).await;
     }
 
     /// Read a whole file, in protocol-sized pieces.
@@ -3268,7 +3314,7 @@ fn judge_adopted_tree(
 ) -> TreeVerdict {
     let others: Vec<agent_share_proto::PeerCard> = cards
         .iter()
-        .filter(|card| card.endpoint != own && card.tree.is_some() && card.serving.is_some())
+        .filter(|card| card.endpoint != own && card.tree.is_some() && card.holds_something())
         .cloned()
         .collect();
     match majority_tree(&others) {
@@ -3486,7 +3532,9 @@ async fn watch_for_lost_holdings(
         let Some(peer) = mesh_peer_of(&mesh) else {
             continue;
         };
-        peer.set_serving(published).await;
+        // Still holding: losing one slot whole does not mean losing its chunks,
+        // and the seeder answers for whatever survived.
+        peer.set_serving(published, seeder.is_armed()).await;
     }
 }
 
@@ -4062,7 +4110,9 @@ async fn connect_via_seeder(
                     held.len()
                 )));
                 mesh_peer.set_tree(tree).await;
-                mesh_peer.set_serving(serving).await;
+                // Armed by the `update` just above, so this tab is a chunk
+                // source even when nothing it recovered is complete.
+                mesh_peer.set_serving(serving, seeder.is_armed()).await;
             }
         }
     }
@@ -4089,7 +4139,7 @@ async fn connect_via_seeder(
             .into_iter()
             .filter(|card| {
                 card.tree.is_some()
-                    && card.serving.is_some()
+                    && card.holds_something()
                     && card.endpoint != mesh_peer.hub().local_id().to_string()
             })
             .collect();
