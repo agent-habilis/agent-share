@@ -13,6 +13,7 @@
  */
 
 import { wasmAsset } from './scripts/wasm-asset.ts'
+import { STREAM_PREFIX } from './src/service-worker/protocol.ts'
 
 const ROOT = new URL('./dist/', import.meta.url)
 
@@ -59,6 +60,20 @@ const server = Bun.serve({
 
     if (pathname === '/lab' || pathname === '/lab/') {
       return new Response(distFile('/lab/index.html'))
+    }
+
+    // Answered explicitly, matching the dev server. These URLs exist only while
+    // a service worker is controlling the page, so reaching the network means
+    // there is none — and the SPA fallback below would hand `index.html` to a
+    // media element, which surfaces as a codec error naming the wrong problem.
+    // `looksLikeAsset` happens to 404 the common case already, but only because
+    // the name carries an extension; a shared file without one would take the
+    // shell.
+    if (pathname.startsWith(`${STREAM_PREFIX}/`)) {
+      return new Response(
+        'no service worker is controlling this page, so nothing can answer a stream URL',
+        { status: 404, headers: { 'content-type': 'text/plain;charset=utf-8' } },
+      )
     }
 
     // The wasm negotiates its precompressed siblings, like a static host

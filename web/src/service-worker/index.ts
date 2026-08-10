@@ -25,7 +25,7 @@
  *
  * # The id in the URL is opaque on purpose
  *
- * `/__stream/<id>/<name>` carries a per-registration key, never the ticket and
+ * `/service-worker/<id>/<name>` carries a per-registration key, never the ticket and
  * never the manifest path. The ticket is a bearer capability for the whole
  * share; putting it in a URL would spread it into worker scope, into anything
  * that logs a request, and into the browser's download shelf. `<name>` is

@@ -19,7 +19,7 @@ function reader(size: number) {
 
 function ranged(header: string | null, size = 1000): Request {
   void size
-  return new Request('https://example.test/__stream/abc/clip.mp4', {
+  return new Request('https://example.test/service-worker/abc/clip.mp4', {
     headers: header ? { Range: header } : {},
   })
 }

@@ -4,7 +4,7 @@
  * Registers the worker, hands it one file at a time, and answers the reads it
  * asks for. The worker parses `Range`; this side owns the bytes, because it is
  * the only process holding both the peer connection and the chunk store — see
- * the header of `src/sw/index.ts`.
+ * the header of `src/service-worker/index.ts`.
  *
  * **Every entry point returns `null` rather than throwing when the worker is
  * unavailable.** No service worker on this browser, an insecure context, Safari
@@ -19,7 +19,7 @@ import {
   type ReadReply,
   type WhoOwnsMessage,
   type WorkerMessage,
-} from '../../sw/protocol.ts'
+} from '../../service-worker/protocol.ts'
 import type { StreamEntry } from './range.ts'
 
 /** What a caller needs to read one file. */
@@ -79,7 +79,7 @@ function worker(): Promise<ServiceWorkerRegistration | null> {
     try {
       // Root scope, which is what the script's own path buys: a worker's
       // default scope is its directory, and only a root-served script can
-      // control `/__stream/…`.
+      // control `/service-worker/…`.
       const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' })
       await navigator.serviceWorker.ready
       return registration

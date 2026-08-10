@@ -9,7 +9,7 @@
 import type { StreamEntry } from '../lib/stream/range.ts'
 
 /** Where a registered file is served from. See the note on the id in `sw`. */
-export const STREAM_PREFIX = '/__stream'
+export const STREAM_PREFIX = '/service-worker'
 
 /** Page → worker: serve this file under `id` until told otherwise. */
 export interface RegisterMessage {

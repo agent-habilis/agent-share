@@ -39,9 +39,9 @@ if (!result.success) {
 // hashed name would register a second worker per build instead of updating the
 // one already installed. It also has to sit at the root — a worker's default
 // scope is its own directory, and only a root-served script controls
-// `/__stream/…`.
+// `/service-worker/…`.
 const sw = await Bun.build({
-  entrypoints: ['./src/sw/index.ts'],
+  entrypoints: ['./src/service-worker/index.ts'],
   outdir: './dist',
   naming: 'sw.js',
   minify: true,
