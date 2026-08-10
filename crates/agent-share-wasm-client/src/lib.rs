@@ -229,15 +229,10 @@ pub struct ShareClient {
     /// Manifest indices fully held, so the UI can mark what is seedable and the
     /// card can advertise it.
     ///
-    /// Indices rather than paths because that is what a `READ` addresses and
-    /// what the availability grid paints. Recomputed from the store rather than
-    /// accumulated, so a reload shows what actually survived instead of what
-    /// this session happened to fetch.
-    ///
     /// Shared so [`watch_for_lost_holdings`] can shrink it: an eviction has to
     /// correct the grid and the card together, or the UI keeps promising bytes
     /// the mesh has already been told are gone.
-    held: Rc<RefCell<BTreeSet<u32>>>,
+    card: Rc<RefCell<CardHoldings>>,
     /// Chunk rows for slots this tab has learned, by manifest index.
     ///
     /// The row is what makes a chunk addressable: without it an address is
@@ -356,7 +351,7 @@ fn new_share_client(
         swarm_dialled: Cell::new(false),
         retraction_watched: Cell::new(false),
         store: RefCell::new(None),
-        held: Rc::new(RefCell::new(BTreeSet::new())),
+        card: Rc::new(RefCell::new(CardHoldings::default())),
         rows: RefCell::new(HashMap::new()),
         seeder: seed::SeederShared::new(),
         from_origin: true,
@@ -546,7 +541,7 @@ impl ShareClient {
         let ticket = MountTicket::decode(&ticket).map_err(|error| err("decode ticket", &error))?;
         let auth = redeem_auth(&ticket, password.as_deref())?;
         match load_persisted_manifest(auth.token()).await {
-            Some((_, manifest, _)) => serde_wasm(&manifest),
+            Some((_, _, manifest, _)) => serde_wasm(&manifest),
             None => Ok(JsValue::UNDEFINED),
         }
     }
@@ -1340,7 +1335,9 @@ impl ShareClient {
     /// bytes do not match the root the origin published.
     pub async fn sync(&self, only: Option<Vec<String>>) -> Result<JsValue, JsValue> {
         let FetchedManifest {
-            envelope, manifest, ..
+            envelope,
+            body,
+            manifest,
         } = self.fetch_manifest().await?;
         let store = self.open_store().await?;
         let only = only.unwrap_or_default();
@@ -1410,7 +1407,7 @@ impl ShareClient {
         // The sidecar: what lets a refreshed tab stand this share back up
         // with no live source at all.
         persist_manifest(&self.token, store.as_ref(), &envelope).await;
-        self.republish(&envelope, &manifest, Arc::clone(&store))
+        self.republish(&envelope, &body, &manifest, Arc::clone(&store))
             .await?;
 
         let out = serde_json::json!({
@@ -1419,7 +1416,7 @@ impl ShareClient {
             "verified": verified,
             "unverified": unverified,
             "skipped": skipped,
-            "held": self.held.borrow().len(),
+            "held": self.card.borrow().held.len(),
         });
         js_sys::JSON::parse(&out.to_string())
     }
@@ -1467,10 +1464,12 @@ impl ShareClient {
     /// chunk by the time the card claims it, or a reader lands on `BadIndex`.
     pub async fn republish_holdings(&self) -> Result<(), JsValue> {
         let FetchedManifest {
-            envelope, manifest, ..
+            envelope,
+            body,
+            manifest,
         } = self.fetch_manifest().await?;
         let store = self.open_store().await?;
-        self.republish(&envelope, &manifest, store).await
+        self.republish(&envelope, &body, &manifest, store).await
     }
 
     /// What share of each known slot this tab holds, as `{ index: fraction }`.
@@ -1899,12 +1898,14 @@ impl ShareClient {
 
     /// Adopt what this tab holds into the seeder, then advertise it.
     ///
-    /// `envelope` is the whole `OP_MANIFEST` body, which is what the seeder
-    /// re-serves. It is deliberately *not* what the card's tree is fingerprinted
-    /// over — see [`Self::publish_serving`].
+    /// The two byte strings are not interchangeable and the compiler cannot say
+    /// so: `envelope` is the whole `OP_MANIFEST` body that the seeder re-serves,
+    /// `body` is the bare manifest inside it, which is the only thing a
+    /// fingerprint may be taken over. [`FetchedManifest`] carries both, named.
     async fn republish(
         &self,
         envelope: &[u8],
+        body: &[u8],
         manifest: &MountManifest,
         store: Arc<IdbStore>,
     ) -> Result<(), JsValue> {
@@ -1916,16 +1917,19 @@ impl ShareClient {
         // Asked of the seeder rather than walked here, so this and the
         // retraction below cannot disagree about what "fully held" means — two
         // rules would flap, each undoing the other's card.
-        *self.held.borrow_mut() = self.seeder.complete_slots().await.into_iter().collect();
-        self.publish_serving(manifest).await;
+        *self.card.borrow_mut() = CardHoldings {
+            held: self.seeder.complete_slots().await.into_iter().collect(),
+            slots: manifest.files.len(),
+        };
+        self.publish_serving(body).await;
         // Started here rather than at connect: this is the first moment the card
         // promises anything, and by now the seeder is final — the dead-origin
         // path swaps in the waiting mesh's seeder while connecting.
         if !self.retraction_watched.replace(true) {
             wasm_bindgen_futures::spawn_local(watch_for_lost_holdings(
-                self.seeder.clone(),
+                self.seeder.downgrade(),
                 Rc::clone(&self.mesh),
-                Rc::clone(&self.held),
+                Rc::clone(&self.card),
             ));
         }
         Ok(())
@@ -1935,7 +1939,7 @@ impl ShareClient {
     #[must_use]
     #[wasm_bindgen(getter)]
     pub fn held(&self) -> Vec<u32> {
-        self.held.borrow().iter().copied().collect()
+        self.card.borrow().held.iter().copied().collect()
     }
 
     /// Whether the mount reaches the ticket's origin, or a seeder standing in
@@ -1953,7 +1957,9 @@ impl ShareClient {
     /// grid. Never fails: a tab with no store simply holds nothing.
     pub async fn refresh_held(&self) -> Result<(), JsValue> {
         let Ok(FetchedManifest {
-            envelope, manifest, ..
+            envelope,
+            body,
+            manifest,
         }) = self.fetch_manifest().await
         else {
             return Ok(());
@@ -1976,7 +1982,7 @@ impl ShareClient {
         if !self.rows.borrow().is_empty() {
             persist_manifest(&self.token, store.as_ref(), &envelope).await;
         }
-        self.republish(&envelope, &manifest, store).await
+        self.republish(&envelope, &body, &manifest, store).await
     }
 
     /// Where this share's blocks live. See [`store_name_for`].
@@ -2003,17 +2009,13 @@ impl ShareClient {
     /// manifest it indexes into, so a `serving` set published against the wrong
     /// tree would send readers to the wrong files.
     ///
-    /// **Takes the manifest, never bytes.** `card.tree` is defined over the bare
-    /// manifest, while every caller here holds the *envelope* — the signed
-    /// `version ‖ signature ‖ manifest` the seeder re-serves. When signing
-    /// landed, those two stopped being the same bytes and this function kept
-    /// being handed the envelope, so a tab that synced advertised a tree
-    /// fingerprint no other peer computes. Fingerprinting the struct removes the
-    /// choice: `decode` → `encode` round-trips byte-for-byte
-    /// (`encoding_is_canonical`), so this is the body's fingerprint by
-    /// construction.
-    async fn publish_serving(&self, manifest: &MountManifest) {
-        let fingerprint = manifest.fingerprint();
+    /// `body` is the **bare manifest**, which is the domain `card.tree` is
+    /// defined over — never the envelope around it. Callers hold both and it is
+    /// the envelope that is closer to hand, which is how this once came to
+    /// publish a tree fingerprint no other peer computes: signing split the two
+    /// and the caller kept passing the one it had.
+    async fn publish_serving(&self, body: &[u8]) {
+        let fingerprint = agent_share_proto::manifest::manifest_fingerprint(body);
         *self.last_tree.borrow_mut() = Some(fingerprint.clone());
         // Cloned out of the cell, not borrowed across the two awaits below:
         // see the note on the `mesh` field.
@@ -2021,12 +2023,8 @@ impl ShareClient {
             return;
         };
         mesh.set_tree(fingerprint).await;
-        let held: Vec<u32> = self.held.borrow().iter().copied().collect();
-        mesh.set_serving(agent_share_proto::serving::encode_serving(
-            &held,
-            manifest.files.len(),
-        ))
-        .await;
+        let serving = self.card.borrow().serving();
+        mesh.set_serving(serving).await;
     }
 
     /// Read a whole file, in protocol-sized pieces.
@@ -3395,7 +3393,7 @@ async fn persist_manifest(token: &[u8; SECRET_LEN], store: &IdbStore, envelope: 
 /// which re-arm nothing and fall back to waiting for a live peer.
 async fn load_persisted_manifest(
     token: &[u8; SECRET_LEN],
-) -> Option<(Vec<u8>, MountManifest, Arc<IdbStore>)> {
+) -> Option<(Vec<u8>, String, MountManifest, Arc<IdbStore>)> {
     let storage = local_storage()?;
     let raw = storage.get_item(&manifest_locator_key(token)).ok()??;
     let locator: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -3419,8 +3417,9 @@ async fn load_persisted_manifest(
     if agent_share_proto::manifest::manifest_fingerprint(&signed.manifest) != tree {
         return None;
     }
+    let tree = tree.to_owned();
     let manifest = MountManifest::decode(&signed.manifest).ok()?;
-    Some((envelope, manifest, store))
+    Some((envelope, tree, manifest, store))
 }
 
 /// Take back what this tab can no longer serve.
@@ -3434,62 +3433,98 @@ async fn load_persisted_manifest(
 ///
 /// The seeder reports the slot and passes no verdict, because a refusal is not
 /// proof of loss: reading into a hole of a slot this tab never advertised is
-/// ordinary. So the claim is the filter, and the store is the authority.
+/// ordinary. So the claim is the filter, and the store is the authority — see
+/// [`agent_share_mount::Seeder::holes`], which also records why only the read
+/// path reports and what that costs.
+///
+/// Holds a weak seeder, so a client the app dropped does not keep this tab's
+/// rows and chunk-address set alive behind a task nobody will poll again.
 async fn watch_for_lost_holdings(
-    seeder: seed::SeederShared,
+    seeder: agent_share_mount::WeakSeeder<IdbStore>,
     mesh: Rc<RefCell<MeshSlot>>,
-    held: Rc<RefCell<BTreeSet<u32>>>,
+    card: Rc<RefCell<CardHoldings>>,
 ) {
-    use agent_share_mount::ServeSource as _;
     use futures::StreamExt as _;
 
-    let mut holes = seeder.holes();
+    // Subscribed through a strong handle, which is then dropped: from here the
+    // task holds nothing that would stop the seeder being collected, and the
+    // feed ends by itself when it is.
+    let mut holes = {
+        let Some(seeder) = seeder.upgrade() else {
+            return;
+        };
+        seeder.holes()
+    };
     while let Some(index) = holes.next().await {
-        // A reader walking a lost file refuses at every chunk boundary. One
-        // re-derivation answers the whole burst, and it is the expensive half.
-        while holes.try_recv().is_ok() {}
-        if !held.borrow().contains(&index) {
+        let Some(seeder) = seeder.upgrade() else {
+            return;
+        };
+        if !card.borrow().held.contains(&index) {
+            // Never advertised, so nothing to take back: reading into a hole of
+            // a partially-held slot is ordinary.
             continue;
         }
-        let complete: BTreeSet<u32> = seeder.complete_slots().await.into_iter().collect();
-        let lost = held.borrow().difference(&complete).count();
-        if lost == 0 {
-            // Refused, yet the store backs every slot on the card: a read that
-            // raced an update, not an eviction. Nothing to take back.
+        // Only the slot that was reported. Re-deriving the whole share would
+        // cost one coverage lookup per file, and `IdbStore::coverage`
+        // enumerates every stored address on each of them.
+        if seeder.holds(index).await {
+            // Refused, yet the store still backs it: a read that raced an
+            // update, not an eviction. Nothing to take back.
             continue;
         }
-        *held.borrow_mut() = complete.clone();
+        let published = {
+            let mut card = card.borrow_mut();
+            card.held.remove(&index);
+            card.serving()
+        };
         web_sys::console::warn_1(&JsValue::from_str(&format!(
-            "[share] {lost} slot(s) this tab advertised are no longer in storage \
-             (evicted?); retracting them from the card"
+            "[share] slot {index} is no longer in storage (evicted?); \
+             retracting it from the card"
         )));
-        // Decoded here rather than cached: this runs when something is already
-        // wrong, and a stale slot count would mis-encode the very set being
-        // corrected.
-        let Some(envelope) = seeder.manifest_envelope() else {
-            continue;
-        };
-        let Ok(signed) = SignedManifest::decode(&envelope) else {
-            continue;
-        };
-        let Ok(manifest) = MountManifest::decode(&signed.manifest) else {
-            continue;
-        };
         // Cloned out of the cell, never borrowed across the await: see the note
         // on the `mesh` field.
-        let peer = match &*mesh.borrow() {
-            MeshSlot::Joined(peer) => Some(Rc::clone(peer)),
-            MeshSlot::Pending | MeshSlot::Left => None,
-        };
-        let Some(peer) = peer else {
+        let Some(peer) = mesh_peer_of(&mesh) else {
             continue;
         };
-        let slots: Vec<u32> = complete.into_iter().collect();
-        peer.set_serving(agent_share_proto::serving::encode_serving(
-            &slots,
-            manifest.files.len(),
-        ))
-        .await;
+        peer.set_serving(published).await;
+    }
+}
+
+/// What this tab advertises it can serve, and what it takes to encode that.
+///
+/// The two travel together because neither means anything alone: a set of
+/// indices needs the slot count they index into, and publishing one against a
+/// stale other mis-states the card. Shared so the availability grid, the publish
+/// path and [`watch_for_lost_holdings`] all read one copy.
+#[derive(Debug, Default)]
+struct CardHoldings {
+    /// Manifest indices held in full.
+    ///
+    /// Indices rather than paths because that is what a `READ` addresses and
+    /// what the availability grid paints. Recomputed from the store rather than
+    /// accumulated, so a reload shows what actually survived instead of what
+    /// this session happened to fetch.
+    held: BTreeSet<u32>,
+    /// Live slots in the manifest these index into.
+    slots: usize,
+}
+
+impl CardHoldings {
+    /// The `serving` field for a peer card.
+    fn serving(&self) -> Option<String> {
+        let held: Vec<u32> = self.held.iter().copied().collect();
+        agent_share_proto::serving::encode_serving(&held, self.slots)
+    }
+}
+
+/// The mesh peer, when joined. `Pending`/`Left` read as "no mesh".
+///
+/// Takes the cell rather than `&self` so the retraction task, which outlives no
+/// `ShareClient`, resolves the peer the same way [`ShareClient::mesh_peer`] does.
+fn mesh_peer_of(mesh: &RefCell<MeshSlot>) -> Option<Rc<mesh::MeshPeer>> {
+    match &*mesh.borrow() {
+        MeshSlot::Joined(peer) => Some(Rc::clone(peer)),
+        MeshSlot::Pending | MeshSlot::Left => None,
     }
 }
 
@@ -3997,7 +4032,7 @@ async fn connect_via_seeder(
     {
         use agent_share_mount::ServeSource as _;
         if seeder.manifest_envelope().is_none()
-            && let Some((bytes, manifest, store)) = load_persisted_manifest(&token).await
+            && let Some((bytes, tree, manifest, store)) = load_persisted_manifest(&token).await
         {
             let rows = rows_in_store(&store, &manifest).await;
             web_sys::console::debug_1(&JsValue::from_str(&format!(
@@ -4015,17 +4050,18 @@ async fn connect_via_seeder(
                 // learns about them by asking, not from a CRDT that would keep
                 // every intermediate state forever.
                 let held = seeder.complete_slots().await;
-                // Over the manifest, not the envelope beside it: the locator
-                // this was loaded from records the same string, and a card
-                // carrying anything else vouches for a tree nobody recognises.
-                let fingerprint = manifest.fingerprint();
+                // `tree` came out of the locator, which records the fingerprint
+                // over the manifest and not the envelope beside it — already
+                // checked against these bytes on the way in, so re-deriving it
+                // here would re-encode a multi-MB manifest to reach the same
+                // string.
                 let serving =
                     agent_share_proto::serving::encode_serving(&held, manifest.files.len());
                 web_sys::console::debug_1(&JsValue::from_str(&format!(
-                    "[share] re-arm: advertising tree {fingerprint} serving {serving:?}                      ({} slots held)",
+                    "[share] re-arm: advertising tree {tree} serving {serving:?}                      ({} slots held)",
                     held.len()
                 )));
-                mesh_peer.set_tree(fingerprint).await;
+                mesh_peer.set_tree(tree).await;
                 mesh_peer.set_serving(serving).await;
             }
         }

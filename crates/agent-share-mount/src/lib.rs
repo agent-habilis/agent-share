@@ -41,5 +41,5 @@
 mod seed;
 mod serve;
 
-pub use seed::{Feed, Seeder};
+pub use seed::{Feed, Seeder, WeakSeeder};
 pub use serve::{ServeSource, Watcher, serve_stream};

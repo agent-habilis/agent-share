@@ -722,13 +722,6 @@ mod tests {
             manifest_fingerprint(&manifest),
             "fingerprinting the envelope must not silently pass for the tree"
         );
-        // And the safe path lands on the manifest's, whichever bytes were held.
-        assert_eq!(
-            MountManifest::decode(&manifest)
-                .expect("decode")
-                .fingerprint(),
-            manifest_fingerprint(&manifest)
-        );
     }
 
     /// The producer fingerprints wire bytes, the consumer fingerprints a

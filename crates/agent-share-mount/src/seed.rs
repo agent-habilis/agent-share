@@ -187,8 +187,18 @@ impl<S> Seeder<S> {
     ///
     /// A report is not proof of loss: a partial holding is ordinary, and reading
     /// into a hole of a slot nobody ever advertised is an ordinary refusal. The
-    /// owner decides, by re-deriving from the store — which is why this carries
-    /// the slot and no verdict.
+    /// owner decides, by checking that slot against the store — which is why
+    /// this carries the slot and no verdict.
+    ///
+    /// **Only `OP_READ` reports.** `OP_CHUNK` sees the same evidence but cannot
+    /// name a slot — [`State::in_scope`] is a flat set of addresses — and the
+    /// swarm reaches it through `OP_HAVE`, which is re-derived from the store
+    /// per request and so cannot go stale. The card is the only stale claim, and
+    /// a reader consults it before `OP_HAVE`, so a peer that is never read from
+    /// keeps a stale card until it is. That is the known cost of reporting from
+    /// the read path rather than polling; the CLI takes the other side of the
+    /// trade in `consume::spawn_serving_updates`, where a 5 s re-derive is cheap
+    /// against a local filesystem and would not be against `IndexedDB`.
     ///
     /// One receiver at a time; subscribing again drops the previous one.
     ///
@@ -204,15 +214,38 @@ impl<S> Seeder<S> {
     /// Report a slot this peer promised and could not deliver. Never blocks, and
     /// never fails: an unsubscribed or dropped feed simply has no owner to tell.
     fn report_hole(&self, index: u32) {
-        let sender = self
-            .0
-            .read()
-            .expect("the seeder lock is poisoned")
-            .holes
-            .clone();
-        if let Some(sender) = sender {
+        let inner = self.0.read().expect("the seeder lock is poisoned");
+        if let Some(sender) = inner.holes.as_ref() {
             let _ = sender.unbounded_send(index);
         }
+    }
+
+    /// A handle that does **not** keep this seeder alive.
+    ///
+    /// The retraction watcher outlives nothing: it holds one of these, so a
+    /// client that is dropped and replaced — which a redial does — takes its
+    /// rows, its address set and its store with it instead of leaving them
+    /// pinned by a task that will never be polled again.
+    #[must_use]
+    pub fn downgrade(&self) -> WeakSeeder<S> {
+        WeakSeeder(Arc::downgrade(&self.0))
+    }
+}
+
+/// A [`Seeder`] handle that holds no claim on the state behind it.
+pub struct WeakSeeder<S>(std::sync::Weak<RwLock<Inner<S>>>);
+
+impl<S> std::fmt::Debug for WeakSeeder<S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("WeakSeeder").finish_non_exhaustive()
+    }
+}
+
+impl<S> WeakSeeder<S> {
+    /// The seeder, or `None` once every strong handle is gone.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<Seeder<S>> {
+        self.0.upgrade().map(Seeder)
     }
 }
 
@@ -222,6 +255,9 @@ impl<S: ChunkSource> Seeder<S> {
     /// The card's `serving` set is exactly this, and deriving it here rather
     /// than caching it is the same rule [`Seeder::update`] follows: a coverage
     /// figure kept in memory is a claim that can outlive the bytes it describes.
+    ///
+    /// One store round trip per row, so this belongs on the paths that already
+    /// walk the whole share. To re-check a single slot, use [`Self::holds`].
     ///
     /// # Panics
     /// The lock is poisoned.
@@ -241,22 +277,47 @@ impl<S: ChunkSource> Seeder<S> {
         };
         let mut held = Vec::new();
         for (index, root, chunks) in roots {
-            // Counted against the row rather than asked `is_complete`, which is
-            // true of an empty coverage — and a store that has never heard of a
-            // root answers exactly that. The two are indistinguishable to
-            // `is_complete` and opposite in meaning: a zero-chunk file really is
-            // fully held, while an evicted chunk *map* holds nothing at all.
-            if store
-                .coverage(root)
-                .await
-                .is_ok_and(|coverage| coverage.count() == chunks)
-            {
+            if complete(store.as_ref(), root, chunks).await {
                 held.push(index);
             }
         }
         held.sort_unstable();
         held
     }
+
+    /// Whether this peer still holds all of one slot.
+    ///
+    /// The narrow question behind [`Self::holes`]: a report names a slot, so
+    /// answering it costs one coverage lookup rather than a walk of the share.
+    ///
+    /// # Panics
+    /// The lock is poisoned.
+    pub async fn holds(&self, index: u32) -> bool {
+        let Some((root, chunks, store)) = ({
+            let inner = self.0.read().expect("the seeder lock is poisoned");
+            inner.state.as_ref().and_then(|state| {
+                let row = state.rows.get(&index)?;
+                Some((row.root(), row.len(), Arc::clone(&state.store)))
+            })
+        }) else {
+            return false;
+        };
+        complete(store.as_ref(), root, chunks).await
+    }
+}
+
+/// Whether `store` holds every one of a row's `chunks`.
+///
+/// Counted against the row rather than asked [`Coverage::is_complete`], which is
+/// true of an empty coverage — and a store that has never heard of a root
+/// answers exactly that. The two are indistinguishable to `is_complete` and
+/// opposite in meaning: a zero-chunk file really is fully held, while an evicted
+/// chunk *map* holds nothing at all.
+async fn complete<S: ChunkSource>(store: &S, root: Root, chunks: usize) -> bool {
+    store
+        .coverage(root)
+        .await
+        .is_ok_and(|coverage| coverage.count() == chunks)
 }
 
 /// The manifest inside an `OP_MANIFEST` envelope, for a watch frame.
@@ -551,5 +612,47 @@ mod tests {
                 "a fully stored slot is servable"
             );
         });
+    }
+
+    /// The narrow re-check behind a hole report. It has to agree with
+    /// `complete_slots` — two rules for "fully held" would flap, each undoing
+    /// the other's card — and it must not claim a slot it has no row for.
+    #[test]
+    fn holds_answers_for_one_slot_only() {
+        futures::executor::block_on(async {
+            use fofoca_chunks::ChunkStore as _;
+
+            let bytes = b"the bytes of a file";
+            let store = Arc::new(MemStore::new());
+            let (seeder, row) = armed(Arc::clone(&store), bytes);
+            assert!(!seeder.holds(7).await, "nothing is stored yet");
+            assert!(!seeder.holds(99).await, "a slot with no row is never held");
+
+            store.put_map(&row).await.expect("put the map");
+            for position in 0..row.len() {
+                let range = row.range_of(position);
+                let start = usize::try_from(range.start).expect("a test file fits usize");
+                let end = usize::try_from(range.end).expect("a test file fits usize");
+                let address = row.leaf(position).expect("leaf");
+                store.put(address, &bytes[start..end]).await.expect("put");
+            }
+            assert!(seeder.holds(7).await);
+            assert_eq!(
+                seeder.holds(7).await,
+                seeder.complete_slots().await.contains(&7),
+                "the narrow check and the walk must agree"
+            );
+        });
+    }
+
+    /// The watcher must not be what keeps a retired client's rows, address set
+    /// and store alive.
+    #[test]
+    fn a_weak_handle_does_not_keep_the_seeder_alive() {
+        let (seeder, _) = armed(Arc::new(MemStore::new()), b"the bytes of a file");
+        let weak = seeder.downgrade();
+        assert!(weak.upgrade().is_some());
+        drop(seeder);
+        assert!(weak.upgrade().is_none(), "the seeder was pinned by a Weak");
     }
 }
