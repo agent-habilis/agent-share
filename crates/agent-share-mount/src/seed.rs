@@ -73,6 +73,11 @@ struct Inner<S> {
     /// snapshot does: it follows the origin while the origin lives and freezes
     /// when it dies, and never fabricates a delta of its own.
     watchers: Vec<mpsc::UnboundedSender<Arc<Vec<u8>>>>,
+    /// Where to report a slot this peer was asked for and could not complete.
+    ///
+    /// One owner — whoever published the card that made the promise. See
+    /// [`Seeder::holes`].
+    holes: Option<mpsc::UnboundedSender<u32>>,
 }
 
 /// A shared handle, cloned into the protocol handler.
@@ -108,6 +113,7 @@ impl<S> Seeder<S> {
         Self(Arc::new(RwLock::new(Inner {
             state: None,
             watchers: Vec::new(),
+            holes: None,
         })))
     }
 
@@ -168,6 +174,88 @@ impl<S> Seeder<S> {
             .expect("the seeder lock is poisoned")
             .state
             .is_some()
+    }
+
+    /// Slots this peer was asked to serve and could not complete.
+    ///
+    /// Serving is honest on its own: a hole answers `BadIndex` rather than a
+    /// short read, and `OP_HAVE` is derived from the store at the moment it is
+    /// asked. What cannot correct itself is the *card* — `serving` is a set
+    /// published earlier, and a store the browser evicted under quota pressure
+    /// leaves it claiming bytes this peer no longer has. This is the feed that
+    /// tells its owner to look again.
+    ///
+    /// A report is not proof of loss: a partial holding is ordinary, and reading
+    /// into a hole of a slot nobody ever advertised is an ordinary refusal. The
+    /// owner decides, by re-deriving from the store — which is why this carries
+    /// the slot and no verdict.
+    ///
+    /// One receiver at a time; subscribing again drops the previous one.
+    ///
+    /// # Panics
+    /// The lock is poisoned.
+    #[must_use]
+    pub fn holes(&self) -> mpsc::UnboundedReceiver<u32> {
+        let (tx, rx) = mpsc::unbounded();
+        self.0.write().expect("the seeder lock is poisoned").holes = Some(tx);
+        rx
+    }
+
+    /// Report a slot this peer promised and could not deliver. Never blocks, and
+    /// never fails: an unsubscribed or dropped feed simply has no owner to tell.
+    fn report_hole(&self, index: u32) {
+        let sender = self
+            .0
+            .read()
+            .expect("the seeder lock is poisoned")
+            .holes
+            .clone();
+        if let Some(sender) = sender {
+            let _ = sender.unbounded_send(index);
+        }
+    }
+}
+
+impl<S: ChunkSource> Seeder<S> {
+    /// Which slots this peer holds *in full*, asked of the store right now.
+    ///
+    /// The card's `serving` set is exactly this, and deriving it here rather
+    /// than caching it is the same rule [`Seeder::update`] follows: a coverage
+    /// figure kept in memory is a claim that can outlive the bytes it describes.
+    ///
+    /// # Panics
+    /// The lock is poisoned.
+    pub async fn complete_slots(&self) -> Vec<u32> {
+        // Snapshotted, never held across the awaits below.
+        let (roots, store) = {
+            let inner = self.0.read().expect("the seeder lock is poisoned");
+            let Some(state) = inner.state.as_ref() else {
+                return Vec::new();
+            };
+            let roots: Vec<(u32, Root, usize)> = state
+                .rows
+                .iter()
+                .map(|(index, row)| (*index, row.root(), row.len()))
+                .collect();
+            (roots, Arc::clone(&state.store))
+        };
+        let mut held = Vec::new();
+        for (index, root, chunks) in roots {
+            // Counted against the row rather than asked `is_complete`, which is
+            // true of an empty coverage — and a store that has never heard of a
+            // root answers exactly that. The two are indistinguishable to
+            // `is_complete` and opposite in meaning: a zero-chunk file really is
+            // fully held, while an evicted chunk *map* holds nothing at all.
+            if store
+                .coverage(root)
+                .await
+                .is_ok_and(|coverage| coverage.count() == chunks)
+            {
+                held.push(index);
+            }
+        }
+        held.sort_unstable();
+        held
     }
 }
 
@@ -250,11 +338,16 @@ impl<S: ChunkSource + 'static> ServeSource for Seeder<S> {
         while cursor < end {
             let position = row.index_at(cursor);
             let Some(address) = row.leaf(position) else {
+                self.report_hole(index);
                 return (ReadStatus::BadIndex, Vec::new());
             };
             let Ok(Some(chunk)) = store.get(address).await else {
                 // A hole. Refusing outright is the only honest answer, since a
                 // partial `OP_READ` is indistinguishable from end-of-file.
+                //
+                // Reported as well as refused: the read is correct either way,
+                // but if this slot is on our card the card is now a lie.
+                self.report_hole(index);
                 return (ReadStatus::BadIndex, Vec::new());
             };
             let range = row.range_of(position);
@@ -263,6 +356,7 @@ impl<S: ChunkSource + 'static> ServeSource for Seeder<S> {
                 .unwrap_or(usize::MAX)
                 .min(chunk.len().saturating_sub(within));
             if take == 0 {
+                self.report_hole(index);
                 return (ReadStatus::BadIndex, Vec::new());
             }
             out.extend_from_slice(&chunk[within..within + take]);
@@ -308,6 +402,7 @@ impl<S: ChunkSource + 'static> ServeSource for Seeder<S> {
 mod tests {
     use super::Seeder;
     use crate::ServeSource as _;
+    use std::sync::Arc;
     use fofoca_chunks::{ChunkMap, MemStore, Root, chunk_hash};
 
     /// Typed once so every case names the same store. `MemStore` rather than a
@@ -371,5 +466,90 @@ mod tests {
     #[test]
     fn an_empty_seeder_is_not_armed() {
         assert!(!empty().is_armed());
+    }
+
+    /// An armed seeder over `store`, serving `bytes` at slot 7.
+    ///
+    /// The envelope is a real [`SignedManifest`] because `update` unwraps one
+    /// for its watch frame; its contents do not matter to any case here.
+    fn armed(store: Arc<MemStore>, bytes: &[u8]) -> (Seeder<MemStore>, ChunkMap) {
+        use agent_share_proto::authorship::{SIGNATURE_LEN, SignedManifest};
+
+        let row = ChunkMap::build(bytes);
+        let envelope = SignedManifest {
+            version: 1,
+            signature: [0u8; SIGNATURE_LEN],
+            manifest: agent_share_proto::manifest::MountManifest::default().encode(),
+        }
+        .encode();
+        let seeder = Seeder::new();
+        let mut rows = std::collections::HashMap::new();
+        rows.insert(7u32, row.clone());
+        seeder.update(Arc::new(envelope), rows, store);
+        (seeder, row)
+    }
+
+    /// The eviction signal. The browser drops `IndexedDB` under quota pressure
+    /// without asking, so a slot the card claims can stop being backed by
+    /// anything. Refusing the read is already right; reporting it is what lets
+    /// the owner take the claim back off the card.
+    #[test]
+    fn a_hole_reports_the_slot_it_refused() {
+        futures::executor::block_on(async {
+            // A row whose chunks were never stored: what an eviction leaves.
+            let (seeder, _) = armed(Arc::new(MemStore::new()), b"the bytes of a file");
+            let mut holes = seeder.holes();
+            let (status, _) = seeder.answer_read(7, 0, 8).await;
+            assert_eq!(status, agent_share_proto::manifest::ReadStatus::BadIndex);
+            assert_eq!(holes.try_recv().ok(), Some(7), "the slot was not reported");
+        });
+    }
+
+    /// A slot this peer never knew is refused in silence. Only a *broken
+    /// promise* is worth reporting, and there was no promise here — reporting it
+    /// would spend a coverage walk on every probe of an unknown index.
+    #[test]
+    fn an_unknown_slot_is_refused_without_a_report() {
+        futures::executor::block_on(async {
+            let (seeder, _) = armed(Arc::new(MemStore::new()), b"the bytes of a file");
+            let mut holes = seeder.holes();
+            let (status, _) = seeder.answer_read(99, 0, 8).await;
+            assert_eq!(status, agent_share_proto::manifest::ReadStatus::BadIndex);
+            assert_eq!(holes.try_recv().ok(), None, "an unknown slot was reported");
+        });
+    }
+
+    /// What the card is allowed to claim, and the trap underneath it: a store
+    /// that has never heard of a root answers with an *empty* coverage, and
+    /// `is_complete` is true of that. Counting against the row tells the
+    /// zero-chunk file apart from the evicted chunk map.
+    #[test]
+    fn complete_slots_asks_the_store_and_not_the_row() {
+        futures::executor::block_on(async {
+            use fofoca_chunks::ChunkStore as _;
+
+            let bytes = b"the bytes of a file";
+            let store = Arc::new(MemStore::new());
+            let (seeder, row) = armed(Arc::clone(&store), bytes);
+            assert!(
+                seeder.complete_slots().await.is_empty(),
+                "a row with no stored map or chunks is not a holding"
+            );
+
+            store.put_map(&row).await.expect("put the map");
+            for position in 0..row.len() {
+                let range = row.range_of(position);
+                let start = usize::try_from(range.start).expect("a test file fits usize");
+                let end = usize::try_from(range.end).expect("a test file fits usize");
+                let slice = &bytes[start..end];
+                let address = row.leaf(position).expect("leaf");
+                store.put(address, slice).await.expect("put the chunk");
+            }
+            assert_eq!(
+                seeder.complete_slots().await,
+                vec![7],
+                "a fully stored slot is servable"
+            );
+        });
     }
 }

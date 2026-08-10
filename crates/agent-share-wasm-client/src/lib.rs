@@ -233,7 +233,11 @@ pub struct ShareClient {
     /// what the availability grid paints. Recomputed from the store rather than
     /// accumulated, so a reload shows what actually survived instead of what
     /// this session happened to fetch.
-    held: RefCell<BTreeSet<u32>>,
+    ///
+    /// Shared so [`watch_for_lost_holdings`] can shrink it: an eviction has to
+    /// correct the grid and the card together, or the UI keeps promising bytes
+    /// the mesh has already been told are gone.
+    held: Rc<RefCell<BTreeSet<u32>>>,
     /// Chunk rows for slots this tab has learned, by manifest index.
     ///
     /// The row is what makes a chunk addressable: without it an address is
@@ -280,6 +284,8 @@ pub struct ShareClient {
     swarm: RefCell<Vec<SwarmPeer>>,
     /// Whether the lazy dial above has already run.
     swarm_dialled: Cell<bool>,
+    /// Whether [`watch_for_lost_holdings`] is already running for this client.
+    retraction_watched: Cell<bool>,
 }
 
 /// One extra source of chunks.
@@ -348,8 +354,9 @@ fn new_share_client(
         manifest_fetched: Rc::new(Cell::new(false)),
         swarm: RefCell::new(Vec::new()),
         swarm_dialled: Cell::new(false),
+        retraction_watched: Cell::new(false),
         store: RefCell::new(None),
-        held: RefCell::new(BTreeSet::new()),
+        held: Rc::new(RefCell::new(BTreeSet::new())),
         rows: RefCell::new(HashMap::new()),
         seeder: seed::SeederShared::new(),
         from_origin: true,
@@ -1901,21 +1908,26 @@ impl ShareClient {
         manifest: &MountManifest,
         store: Arc<IdbStore>,
     ) -> Result<(), JsValue> {
-        let mut held = BTreeSet::new();
         let rows = self.rows.borrow().clone();
-        for (index, row) in &rows {
-            if let Ok(coverage) = store.coverage(row.root()).await
-                && coverage.is_complete()
-            {
-                held.insert(*index);
-            }
-        }
-        *self.held.borrow_mut() = held;
         // Serving before advertising: the seeder must answer for a chunk by the
         // time the card claims it, or a reader lands on `BadIndex`.
         self.seeder
             .update(Arc::new(envelope.to_vec()), rows, store);
+        // Asked of the seeder rather than walked here, so this and the
+        // retraction below cannot disagree about what "fully held" means — two
+        // rules would flap, each undoing the other's card.
+        *self.held.borrow_mut() = self.seeder.complete_slots().await.into_iter().collect();
         self.publish_serving(manifest).await;
+        // Started here rather than at connect: this is the first moment the card
+        // promises anything, and by now the seeder is final — the dead-origin
+        // path swaps in the waiting mesh's seeder while connecting.
+        if !self.retraction_watched.replace(true) {
+            wasm_bindgen_futures::spawn_local(watch_for_lost_holdings(
+                self.seeder.clone(),
+                Rc::clone(&self.mesh),
+                Rc::clone(&self.held),
+            ));
+        }
         Ok(())
     }
 
@@ -3411,6 +3423,76 @@ async fn load_persisted_manifest(
     Some((envelope, manifest, store))
 }
 
+/// Take back what this tab can no longer serve.
+///
+/// The browser evicts IndexedDB under quota pressure without asking, and the
+/// card is the one claim that cannot notice. Serving itself is already honest —
+/// a hole answers `BadIndex`, and `OP_HAVE` re-reads the store every time — but
+/// until the `serving` set is corrected, readers keep being routed here and keep
+/// being refused. Hypercore names the same obligation on `core.clear()`: a peer
+/// whose holdings shrank gossips that they did.
+///
+/// The seeder reports the slot and passes no verdict, because a refusal is not
+/// proof of loss: reading into a hole of a slot this tab never advertised is
+/// ordinary. So the claim is the filter, and the store is the authority.
+async fn watch_for_lost_holdings(
+    seeder: seed::SeederShared,
+    mesh: Rc<RefCell<MeshSlot>>,
+    held: Rc<RefCell<BTreeSet<u32>>>,
+) {
+    use agent_share_mount::ServeSource as _;
+    use futures::StreamExt as _;
+
+    let mut holes = seeder.holes();
+    while let Some(index) = holes.next().await {
+        // A reader walking a lost file refuses at every chunk boundary. One
+        // re-derivation answers the whole burst, and it is the expensive half.
+        while holes.try_recv().is_ok() {}
+        if !held.borrow().contains(&index) {
+            continue;
+        }
+        let complete: BTreeSet<u32> = seeder.complete_slots().await.into_iter().collect();
+        let lost = held.borrow().difference(&complete).count();
+        if lost == 0 {
+            // Refused, yet the store backs every slot on the card: a read that
+            // raced an update, not an eviction. Nothing to take back.
+            continue;
+        }
+        *held.borrow_mut() = complete.clone();
+        web_sys::console::warn_1(&JsValue::from_str(&format!(
+            "[share] {lost} slot(s) this tab advertised are no longer in storage \
+             (evicted?); retracting them from the card"
+        )));
+        // Decoded here rather than cached: this runs when something is already
+        // wrong, and a stale slot count would mis-encode the very set being
+        // corrected.
+        let Some(envelope) = seeder.manifest_envelope() else {
+            continue;
+        };
+        let Ok(signed) = SignedManifest::decode(&envelope) else {
+            continue;
+        };
+        let Ok(manifest) = MountManifest::decode(&signed.manifest) else {
+            continue;
+        };
+        // Cloned out of the cell, never borrowed across the await: see the note
+        // on the `mesh` field.
+        let peer = match &*mesh.borrow() {
+            MeshSlot::Joined(peer) => Some(Rc::clone(peer)),
+            MeshSlot::Pending | MeshSlot::Left => None,
+        };
+        let Some(peer) = peer else {
+            continue;
+        };
+        let slots: Vec<u32> = complete.into_iter().collect();
+        peer.set_serving(agent_share_proto::serving::encode_serving(
+            &slots,
+            manifest.files.len(),
+        ))
+        .await;
+    }
+}
+
 /// Chunk rows this store already holds for `manifest`, by manifest index.
 ///
 /// The live set, derived from **persisted rows** rather than from anything this
@@ -3924,22 +4006,18 @@ async fn connect_via_seeder(
                 manifest.files.len()
             )));
             if !rows.is_empty() {
+                // Serving before advertising, as everywhere else — and it has to
+                // come first here anyway, since the held set is now asked of the
+                // seeder rather than walked separately.
+                seeder.update(Arc::new(bytes), rows, store);
                 // Only complete slots go on the card, which is a *discovery*
                 // hint: partial holdings are real and servable, but a reader
                 // learns about them by asking, not from a CRDT that would keep
                 // every intermediate state forever.
-                let mut held = Vec::new();
-                for (index, row) in &rows {
-                    if let Ok(coverage) = store.coverage(row.root()).await
-                        && coverage.is_complete()
-                    {
-                        held.push(*index);
-                    }
-                }
-                // Over the manifest, not the `bytes` envelope beside it: the
-                // locator this was loaded from records the same string, and a
-                // card carrying anything else vouches for a tree nobody
-                // recognises.
+                let held = seeder.complete_slots().await;
+                // Over the manifest, not the envelope beside it: the locator
+                // this was loaded from records the same string, and a card
+                // carrying anything else vouches for a tree nobody recognises.
                 let fingerprint = manifest.fingerprint();
                 let serving =
                     agent_share_proto::serving::encode_serving(&held, manifest.files.len());
@@ -3947,8 +4025,6 @@ async fn connect_via_seeder(
                     "[share] re-arm: advertising tree {fingerprint} serving {serving:?}                      ({} slots held)",
                     held.len()
                 )));
-                // Serving before advertising, as everywhere else.
-                seeder.update(Arc::new(bytes), rows, store);
                 mesh_peer.set_tree(fingerprint).await;
                 mesh_peer.set_serving(serving).await;
             }
