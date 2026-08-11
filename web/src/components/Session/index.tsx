@@ -22,6 +22,7 @@ import { forgetPassword, rememberPassword, rememberedPassword } from './password
 import {
   SessionCtx,
   transferLabel,
+  type RateSample,
   type SessionApi,
   type SessionReady,
   type Transfer,
@@ -91,6 +92,15 @@ type State =
  * of a coverage sweep, which reads the store once per known row.
  */
 const HOLDINGS_REPAINT_MS = 1_000
+
+/**
+ * How many rate readings `history` keeps — a minute at the 1s sampler tick.
+ *
+ * Long enough that the shape of a transfer is legible and short enough that a
+ * stall shows up as the graph draining rather than as a flat tail nobody
+ * notices.
+ */
+const HISTORY_TICKS = 60
 
 /** Fall back to the deepest prefix that still exists in the manifest. */
 function prunePath(current: string[], manifest: Manifest): string[] {
@@ -162,6 +172,12 @@ const Session = component<{
    * that read it repaint each second — the file list must not.
    */
   const sample = signal<TransferSnapshot | null>(null)
+  /** The last minute of rates, oldest first. See `SessionApi.history`. */
+  const history = signal<readonly RateSample[]>([])
+  const openedAt = Date.now()
+  const lastActivityAt = signal(0)
+  /** Wire bytes at the previous tick, to tell movement from a quiet keep-alive. */
+  let movedBytes = 0
   /** Bumped by the same tick, for views that re-read `info()` rather than this. */
   const tick = signal(0)
   /** Set by the Info page while it is mounted. See `SessionApi.wantsPeerIps`. */
@@ -191,14 +207,24 @@ const Session = component<{
     }
     // QUIC, for the whole connection — the half that answers on the relay path,
     // where there is no candidate pair to ask.
+    const link = current.client.sample_link()
     sample.value = {
-      link: current.client.sample_link(),
+      link,
       gossip: current.client.peers_gossip,
       direct: current.client.peers_direct,
       // A live mount on the relay (or IP) is a connected peer the direct
       // count cannot see — the WebRTC-path mount is already inside it.
       relayPeer: !current.client.closed && current.client.transport !== 'webrtc',
     }
+    // A fresh array rather than a mutated one: signals compare by identity, so
+    // pushing in place would leave every reader on the value it already drew.
+    history.value = [
+      ...history.peek().slice(1 - HISTORY_TICKS),
+      { up: link.total.up_bps, down: link.total.down_bps },
+    ]
+    const moved = link.total.sent + link.total.received
+    if (moved > movedBytes) lastActivityAt.value = Date.now()
+    movedBytes = moved
     tick.value = tick.peek() + 1
   })
 
@@ -809,6 +835,9 @@ const Session = component<{
     coverage,
     transfer,
     sample,
+    history,
+    openedAt,
+    lastActivityAt,
     tick,
     seeding,
     mountError,

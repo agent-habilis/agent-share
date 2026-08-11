@@ -22,6 +22,12 @@ export type Transfer = {
   abort: AbortController
 }
 
+/** One tick's throughput, in bytes per second. See `SessionApi.history`. */
+export interface RateSample {
+  readonly up: number
+  readonly down: number
+}
+
 /** What the top bar says while `kind` is in flight. */
 export function transferLabel(kind: Transfer['kind']): string {
   return kind === 'download' ? 'downloading' : kind === 'mounting' ? 'mounting' : 'syncing'
@@ -49,6 +55,27 @@ export interface SessionApi {
   readonly coverage: ReadonlySignal<ReadonlyMap<number, number>>
   readonly transfer: ReadonlySignal<Transfer | null>
   readonly sample: ReadonlySignal<TransferSnapshot | null>
+  /**
+   * The recent rate readings, oldest first — one per sampler tick, capped at a
+   * minute's worth.
+   *
+   * `sample` is the instant; this is the shape of the last minute, which is the
+   * only thing that distinguishes a stalled transfer from a slow one. Kept here
+   * rather than in the view that draws it because the sampler is the one clock
+   * allowed to advance, and a view that started its own would zero every rate
+   * on screen.
+   */
+  readonly history: ReadonlySignal<readonly RateSample[]>
+  /** Wall clock when this session was opened. Never changes. */
+  readonly openedAt: number
+  /**
+   * Wall clock of the last tick on which mount bytes actually moved, or 0
+   * before any have.
+   *
+   * Wire bytes, so a connection kept alive with nothing to say does not count
+   * as activity — the whole point is telling an idle session from a live one.
+   */
+  readonly lastActivityAt: ReadonlySignal<number>
   /** The session sampler's tick, for views that re-read the client each one. */
   readonly tick: ReadonlySignal<number>
   readonly seeding: ReadonlySignal<boolean>

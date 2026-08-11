@@ -46,8 +46,12 @@ export const InfoPage = component(function* () {
         <TechInfo
           client={ready.client}
           tick={session.tick}
-          fileCount={files.length}
-          totalBytes={files.reduce((sum, file) => sum + file.size, 0)}
+          files={files}
+          held={session.held}
+          coverage={session.coverage}
+          history={session.history}
+          openedAt={session.openedAt}
+          lastActivityAt={session.lastActivityAt}
           status={session.status.value}
           mounted={session.mounted.value}
           mountError={session.mountError.value}

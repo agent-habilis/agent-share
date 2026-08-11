@@ -9,282 +9,507 @@
  *
  * That tick is 1s, and the interval *is* the averaging window for the up/down
  * rates, since they come from differencing cumulative counters.
+ *
+ * ## Layout
+ *
+ * A bento of panels rather than one column of labelled lines, because the
+ * questions this pane answers are separate ones — how fast is it going, who is
+ * it talking to, what is carrying the bytes — and a flat list gives every fact
+ * the same weight. One column on a narrow window, two above `WIDE_PX`, with the
+ * two panels that hold a grid or a table spanning both.
+ *
+ * Panels are separated by a raised background rather than by a rule — see
+ * `Panel`. Six bordered boxes on one screen is six rectangles competing with
+ * the peer table's own rules; a shade change groups just as well and leaves the
+ * ink for the data.
  */
 
-import { Button, Stack, Text, t } from 'moonspace-dom'
-import { component, interval, listen, signal } from 'visage-dom'
-import type { ReadonlySignal } from 'visage-dom'
+import {
+  Badge,
+  Box,
+  Button,
+  ProgressBar,
+  Stack,
+  StatusDot,
+  Table,
+  Text,
+  rows,
+  t,
+} from "moonspace-dom";
+import { component, interval, listen, signal } from "visage-dom";
+import type { ReadonlySignal } from "visage-dom";
+import type { Child } from "visage-dom/types";
+import { Style, css, raw } from "visage-style";
 
-import { missingSlots, peerAvailability } from './availability/index.ts'
-import { sortPeers } from './peers/index.ts'
-import type { PeerAvailability } from './availability/index.ts'
-import { formatIpWithFlag, isGeoLookupCandidate, lookupCountryCode } from './countryFlag/index.ts'
-import { formatRate, laneSummary } from '../../lib/transferStats/index.ts'
-import type { LinkSample } from '../../lib/transferStats/index.ts'
-import { humanBytes } from '../../lib/tree.ts'
+import {
+  missingSlots,
+  peerAvailability,
+  slotCoverage,
+} from "./availability/index.ts";
+import {
+  CELLS,
+  GRID_SIDE,
+  PEER_CELLS,
+  isCoarse,
+  resampleSlots,
+} from "./availabilityGrid/index.ts";
+import { sortPeers } from "./peers/index.ts";
+import type { PeerAvailability } from "./availability/index.ts";
+import {
+  formatIpWithFlag,
+  isGeoLookupCandidate,
+  lookupCountryCode,
+} from "./countryFlag/index.ts";
+import { shareProgress } from "./progress/index.ts";
+import { SlotGrid } from "./SlotGrid/index.tsx";
+import { sparkline } from "./sparkline/index.ts";
+import type { RateSample } from "../Session/session.ts";
+import { fileSeedState, type Coverage } from "../../lib/seeding/index.ts";
+import { formatRate, laneSummary } from "../../lib/transferStats/index.ts";
+import type { LinkSample } from "../../lib/transferStats/index.ts";
+import { humanBytes } from "../../lib/tree.ts";
+import type { FileNode } from "../../lib/tree.ts";
 
 export interface InfoClient {
-  info(): unknown
-  refresh_peer_ips(): Promise<void>
+  info(): unknown;
+  refresh_peer_ips(): Promise<void>;
 }
 
 export interface TechInfoProps {
-  client: InfoClient
+  client: InfoClient;
   /** The session sampler's tick. Read during render, to repaint on each one. */
-  tick: ReadonlySignal<number>
-  fileCount: number
-  totalBytes: number
+  tick: ReadonlySignal<number>;
+  /** Every file in the manifest, in slot order. The share's whole address space. */
+  files: readonly FileNode[];
+  /** Slots this tab holds in full, and how much of the partial ones. */
+  held: ReadonlySignal<ReadonlySet<number>>;
+  coverage: ReadonlySignal<Coverage>;
+  /** The last minute of rates, for the sparklines. */
+  history: ReadonlySignal<readonly RateSample[]>;
+  openedAt: number;
+  lastActivityAt: ReadonlySignal<number>;
   /** ready / mounting / syncing / downloading / mounted */
-  status: string
-  mounted: boolean
-  mountError: string | null
+  status: string;
+  mounted: boolean;
+  mountError: string | null;
   /** Reveal the dev tools. Set by `?dev=true`; off for anyone handed a link. */
-  dev: boolean
+  dev: boolean;
   /** Close the mount connection, so the reconnect path can be exercised. */
-  onKillConnection: () => void
+  onKillConnection: () => void;
   /** True while a reconnect is already running — nothing left to kill. */
-  killDisabled: boolean
-  onClose: () => void
+  killDisabled: boolean;
+  onClose: () => void;
 }
 
 interface PeerRow {
-  id: string
-  role: string
-  flags: string
-  client: string
-  version: string | null
-  ip: string | null
-  ip_kind: string | null
-  proto: string
+  id: string;
+  role: string;
+  flags: string;
+  client: string;
+  version: string | null;
+  ip: string | null;
+  ip_kind: string | null;
+  proto: string;
   /** Wire bytes on the selected ICE pair — includes SCTP/DTLS/STUN framing. */
-  bytes_sent: number
-  bytes_received: number
+  bytes_sent: number;
+  bytes_received: number;
   /** Bytes/second since the previous sample; 0 until there are two. */
-  up_bps: number
-  down_bps: number
+  up_bps: number;
+  down_bps: number;
   /** Round-trip time in ms, or null when the pair has not been measured. */
-  rtt_ms: number | null
+  rtt_ms: number | null;
   /**
    * Which manifest slots this peer says it can serve — `*`, run-length ranges,
    * or absent when it has not said. See `availability.ts`.
    */
-  serving: string | null
+  serving: string | null;
   /**
    * Manifest fingerprint those slot numbers index into. Squares from peers on
    * different trees do not line up and must not be drawn as though they do.
    */
-  tree: string | null
+  tree: string | null;
 }
 
-/**
- * One peer's availability as a row of squares, the way a BitTorrent client
- * paints pieces.
- *
- * A square is one manifest slot — one file — because that is what this protocol
- * addresses bytes with and therefore what a peer can honestly answer for.
- *
- * Three states rather than two, and the third is the point: **filled** for a
- * slot the peer holds, **empty** for one it does not, and a single muted bar
- * for a peer that has published nothing. Drawing an all-empty row for the last
- * case would claim the peer has nothing, when what we actually know is that it
- * has not said.
- */
-function AvailabilityRow(props: {
-  peer: PeerAvailability
-  total: number
-  ourTree: string | null
-}) {
-  if (props.peer.unknown) {
-    return <Text color="fgSubtle">chunks not published</Text>
-  }
-  // A slot index is meaningless across trees, so say so rather than paint
-  // squares that appear to line up with everyone else's.
-  if (props.ourTree && props.peer.tree && props.peer.tree !== props.ourTree) {
-    return <Text color="fgSubtle">chunks on a different tree</Text>
-  }
-  const held = new Set(props.peer.held)
-  const squares = Array.from({ length: props.total }, (_, slot) => held.has(slot))
-  const filled = squares.filter(Boolean).length
-  return (
-    <Stack direction="column" gap={0}>
-      <div
-        style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          gap: '1px',
-          maxWidth: '40ch',
-        }}
-      >
-        {squares.map((has, slot) => (
-          <span
-            key={slot}
-            title={`slot ${slot}: ${has ? 'available' : 'missing'}`}
-            style={{
-              width: '0.8ch',
-              height: '0.8ch',
-              background: has ? t.accent : t.bgSunken,
-              outline: has ? 'none' : `1px solid ${t.border}`,
-            }}
-          />
-        ))}
-      </div>
-      <Text color="fgSubtle">
-        {filled}/{props.total} slots{props.peer.complete ? ' · complete' : ''}
-      </Text>
-    </Stack>
-  )
+interface RelayRow {
+  url: string;
+  /** iroh homed on this one, so it has a live connection state to report. */
+  home: boolean;
+  connected: boolean;
+  last_error: string | null;
 }
 
 interface SessionInfo {
   general: {
-    transport: string
-    identity_fingerprint: string
-    mesh_up: boolean
-    nickname: string | null
-    local_endpoint: string
-    producer_endpoint: string
-    connected_ms_ui: number
-  }
+    transport: string;
+    identity_fingerprint: string;
+    mesh_up: boolean;
+    nickname: string | null;
+    local_endpoint: string;
+    producer_endpoint: string;
+    connected_ms_ui: number;
+  };
   trackers: {
-    relay_urls: string[]
-    producer_reach: { mdns: boolean; dht: boolean; relay: string }
-  }
+    relays: RelayRow[];
+    producer_reach: { mdns: boolean; dht: boolean; relay: string };
+  };
   swarm: {
-    peers_gossip: number
-    peers_direct: number
-    max_direct: number
-    peers: PeerRow[]
-  }
+    peers_gossip: number;
+    peers_direct: number;
+    max_direct: number;
+    peers: PeerRow[];
+  };
   transfer: {
-    mount_mode: string
-    mount_path: string
-    mount_paths: string[]
+    mount_mode: string;
+    mount_path: string;
+    mount_paths: string[];
     /** Why `dynamic` ended up on the relay. Null on a clean WebRTC connect. */
-    mount_fallback_reason: string | null
+    mount_fallback_reason: string | null;
     /**
      * Wire bytes on the mount connection, per path and in total — the last
      * reading the session sampler took, never a fresh one. See `link.rs`.
      */
-    link: LinkSample
+    link: LinkSample;
+  };
+}
+
+/** Where the bento goes from one column to two. */
+const WIDE_PX = 960;
+
+/**
+ * The bento.
+ *
+ * `minmax(0, 1fr)` rather than `1fr`, because a track's automatic minimum is its
+ * content — the peer table would refuse to narrow and push the column beside it
+ * off the page. Each `Box` snaps its own width down to a whole cell, so a
+ * fractional track costs nothing.
+ *
+ * The max width is two measures: the design system's 80ch is what a line of
+ * prose wants, and a panel is a line of prose plus its padding. Wider than that
+ * and the eye loses the start of the next line.
+ */
+const BENTO = css({
+  display: "grid",
+  gridTemplateColumns: raw("minmax(0, 1fr)"),
+  rowGap: raw("var(--ms-row)"),
+  columnGap: "2ch",
+  maxWidth: "164ch",
+  marginInline: "auto",
+  [`@media (min-width: ${WIDE_PX}px)`]: {
+    gridTemplateColumns: raw("repeat(2, minmax(0, 1fr))"),
+  },
+});
+
+/**
+ * Applied to a panel that wants the whole row once there are two columns.
+ *
+ * A stylesheet rendered *inside* the panel rather than a selector in `BENTO`,
+ * because `Box` owns its own `dataset` and would overwrite anything passed
+ * through for a parent selector to hook. `Style()` scopes to its parent
+ * element, so this lands on the Box itself.
+ */
+const WIDE = css({
+  [`@media (min-width: ${WIDE_PX}px)`]: { gridColumn: raw("1 / -1") },
+});
+
+/**
+ * The peer table's wrapper: a horizontal escape, since its columns have fixed
+ * widths, and one override.
+ *
+ * `Table` draws its header rule in `border`, which is right on a page of
+ * bordered components and wrong on this one — every other frame is gone, so the
+ * last remaining rule reads as a stray. Matching the column headers it sits
+ * under makes it part of the header rather than a leftover of the box.
+ */
+const PEER_TABLE = css({
+  overflowX: "auto",
+  /*
+    The attribute is doubled to win, and it has to be. `Table` compiles into the
+    same `moonspace` layer this does and at the same specificity, so the tie
+    breaks on source order — and its `<style>` sits *inside* the table, which is
+    after this one. Repeating the selector makes it (0,2,0) against (0,1,0) and
+    takes order out of it.
+  */
+  "[data-ms-rule][data-ms-rule]::before": { borderTopColor: t.fgMuted },
+});
+
+/**
+ * One panel of the bento.
+ *
+ * `Box`'s own `title` is not used, and the reason is the rule it draws under the
+ * label. That rule earns its place on a bordered box, where it continues the
+ * frame; on a filled one it is a second divider inside a shape that has already
+ * divided itself, and six of them read as a page full of lines. The row of space
+ * it occupied stays — the label still needs air under it, just not ink.
+ */
+function Panel(props: { title: string; wide?: boolean; children?: Child }) {
+  return (
+    <Box background="bgRaised" padX={2} padY={1}>
+      {props.wide ? Style(WIDE) : null}
+      <Text as="div" color="fgMuted" caps>
+        {props.title}
+      </Text>
+      <div style={{ height: rows(1) }} />
+      {props.children}
+    </Box>
+  );
+}
+
+/**
+ * Two columns inside a panel that spans both of the bento's.
+ *
+ * Without this the Activity panel is a wide box with a narrow column of text in
+ * it — the sparkline sets the width, and everything else is shorter. The graph
+ * and the holdings are separate questions anyway, so they get separate columns
+ * and collapse together on a narrow window.
+ */
+const SPLIT = css({
+  display: "grid",
+  gridTemplateColumns: raw("minmax(0, 1fr)"),
+  rowGap: raw("var(--ms-row)"),
+  columnGap: "4ch",
+  [`@media (min-width: ${WIDE_PX}px)`]: {
+    gridTemplateColumns: raw("minmax(0, 62ch) minmax(0, 1fr)"),
+  },
+});
+
+/**
+ * One peer's availability as a line of squares, the way a BitTorrent client
+ * paints pieces.
+ *
+ * Always `PEER_CELLS` wide, whatever the share's size — the column has a fixed
+ * width and a line that grew with the manifest would either overflow it or
+ * shrink to invisibility. `resampleSlots` folds the share onto that line.
+ *
+ * Three states rather than two, and the third is the point: squares for a peer
+ * that has answered, and a phrase for one that has not. Drawing an all-empty
+ * line for the second case would claim the peer holds nothing, when what we
+ * actually know is that it has not said.
+ */
+function PeerSlots(props: {
+  peer: PeerAvailability;
+  total: number;
+  ourTree: string | null;
+}) {
+  if (props.peer.unknown) {
+    return <Text color="fgMuted">not published</Text>;
   }
+  // A slot index is meaningless across trees, so say so rather than paint
+  // squares that appear to line up with everyone else's.
+  if (props.ourTree && props.peer.tree && props.peer.tree !== props.ourTree) {
+    return <Text color="fgMuted">≠ tree</Text>;
+  }
+  const held = new Set(props.peer.held);
+  const filled = props.peer.complete ? props.total : held.size;
+  return (
+    // A flex box the full height of the cell, so the line sits on the row's
+    // centre rather than on its baseline, where it reads as having slipped.
+    <span
+      title={`${filled} of ${props.total} slots`}
+      style={{ display: "flex", alignItems: "center", height: "100%" }}
+    >
+      <SlotGrid
+        states={resampleSlots(props.total, PEER_CELLS, (slot) =>
+          props.peer.complete || held.has(slot) ? "full" : "none",
+        )}
+      />
+    </span>
+  );
 }
 
 function formatDuration(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000))
-  const h = Math.floor(total / 3600)
-  const m = Math.floor((total % 3600) / 60)
-  const s = total % 60
-  if (h > 0) return `${h}h ${m}m ${s}s`
-  if (m > 0) return `${m}m ${s}s`
-  return `${s}s`
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 /** Ping to one decimal — sub-millisecond on a loopback pair is normal. */
 function pingLabel(ms: number | null | undefined): string {
-  if (ms == null || !Number.isFinite(ms)) return '—'
-  return `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`
+  if (ms == null || !Number.isFinite(ms)) return "—";
+  return `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
 }
 
 function dash(value: string | null | undefined): string {
-  return value && value.length > 0 ? value : '—'
+  return value && value.length > 0 ? value : "—";
 }
 
 function shortId(id: string): string {
-  if (id.length <= 20) return id
-  return `${id.slice(0, 8)}…${id.slice(-8)}`
+  if (id.length <= 20) return id;
+  return `${id.slice(0, 8)}…${id.slice(-8)}`;
+}
+
+/** Wall clock as `14:32:07`, since anything older than a session is impossible. */
+function clockLabel(at: number): string {
+  if (at <= 0) return "—";
+  return new Date(at).toLocaleTimeString();
+}
+
+/**
+ * Sent over received.
+ *
+ * Wire bytes, and labelled as such wherever it is shown: on a tab that has only
+ * consumed, `sent` is mostly acknowledgements, so a ratio of 0.02 is what a
+ * healthy download looks like rather than a reproach.
+ */
+function ratioLabel(link: LinkSample | null): string {
+  if (!link || link.total.received <= 0) return "—";
+  return (link.total.sent / link.total.received).toFixed(2);
 }
 
 function capabilitiesLine(): string {
-  const parts: string[] = []
-  parts.push(typeof window.showDirectoryPicker === 'function' ? 'FSA' : 'no FSA')
-  parts.push(typeof RTCPeerConnection === 'function' ? 'WebRTC' : 'no WebRTC')
-  parts.push(window.isSecureContext ? 'secure' : 'insecure')
-  return parts.join(' · ')
+  const parts: string[] = [];
+  parts.push(
+    typeof window.showDirectoryPicker === "function" ? "FSA" : "no FSA",
+  );
+  parts.push(typeof RTCPeerConnection === "function" ? "WebRTC" : "no WebRTC");
+  parts.push(window.isSecureContext ? "secure" : "insecure");
+  return parts.join(" · ");
 }
 
 function readInfo(client: InfoClient): SessionInfo | null {
   try {
-    return client.info() as SessionInfo
+    return client.info() as SessionInfo;
   } catch {
-    return null
+    return null;
   }
+}
+
+/**
+ * The sparkline's width in cells. One cell is one sampler tick.
+ *
+ * Forty rather than the full minute the history holds, so the graph, its glyph
+ * and its peak label still fit one line inside a single-column panel — where
+ * the label was wrapping and pushing the two graphs apart.
+ */
+const SPARK_CELLS = 40;
+
+/**
+ * One labelled rate history: the glyph, the line, and the peak it is drawn
+ * against.
+ *
+ * The peak is not decoration — the line is scaled to its own window, so without
+ * it a full-height graph could be a megabyte a second or a trickle.
+ */
+function Spark(props: {
+  glyph: string;
+  label: string;
+  values: readonly number[];
+}) {
+  const peak = Math.max(0, ...props.values);
+  return (
+    <Stack direction="row" gap={1}>
+      <Text color="fgMuted" aria-hidden="true">
+        {props.glyph}
+      </Text>
+      <Text
+        color="fgMuted"
+        aria-label={`${props.label} over the last ${props.values.length} seconds, peaking at ${formatRate(peak)}`}
+        style={{ whiteSpace: "pre" }}
+      >
+        {sparkline(props.values, SPARK_CELLS)}
+      </Text>
+      {/*
+        `nowrap`, because this label wrapping is what pushes the two graphs
+        apart — and two rows of `█` that no longer share a baseline read as a
+        rendering fault rather than as a narrow window.
+      */}
+      <Text color="fgMuted" style={{ whiteSpace: "nowrap" }}>
+        peak {formatRate(peak)}
+      </Text>
+    </Stack>
+  );
 }
 
 export const TechInfo = component<TechInfoProps>(function* (props) {
   // The nested plain function below captures `ctx`; `this` would not reach it.
-  const ctx = this
+  const ctx = this;
   /** IP → ISO country code (or `null` after a failed / non-candidate lookup). */
-  const countries = signal<Record<string, string | null>>({})
-  const inflight = new Set<string>()
+  const countries = signal<Record<string, string | null>>({});
+  const inflight = new Set<string>();
 
   function requestCountry(ip: string): void {
-    if (!isGeoLookupCandidate(ip)) return
-    if (Object.hasOwn(countries.peek(), ip) || inflight.has(ip)) return
-    inflight.add(ip)
+    if (!isGeoLookupCandidate(ip)) return;
+    if (Object.hasOwn(countries.peek(), ip) || inflight.has(ip)) return;
+    inflight.add(ip);
     void lookupCountryCode(ip).then((code) => {
-      inflight.delete(ip)
-      if (ctx.aborted.aborted) return
-      countries.value = { ...countries.peek(), [ip]: code }
-    })
+      inflight.delete(ip);
+      if (ctx.aborted.aborted) return;
+      countries.value = { ...countries.peek(), [ip]: code };
+    });
   }
 
   // One sweep on open, so a pane opened between ticks is not blank for up to a
   // second. The recurring sweep belongs to the session's sampler.
-  void props.client.refresh_peer_ips()
+  void props.client.refresh_peer_ips();
 
-  using _keys = listen(window, 'keydown', (event: Event) => {
-    const keyEvent = event as KeyboardEvent
-    if (keyEvent.key === 'Escape') {
-      keyEvent.preventDefault()
-      props.onClose()
+  using _keys = listen(window, "keydown", (event: Event) => {
+    const keyEvent = event as KeyboardEvent;
+    if (keyEvent.key === "Escape") {
+      keyEvent.preventDefault();
+      props.onClose();
     }
-  })
+  });
 
   yield () => {
     // Read, not used: this is the dependency that repaints the pane each time
     // the session samples.
-    props.tick.value
-    const countryMap = countries.value
-    const info = readInfo(props.client)
+    props.tick.value;
+    const countryMap = countries.value;
+    const info = readInfo(props.client);
     // Absent until the session sampler has taken its first reading.
-    const link = info?.transfer.link ?? null
-    const reach = info?.trackers.producer_reach
+    const link = info?.transfer.link ?? null;
+    const reach = info?.trackers.producer_reach;
     const reachLine = reach
       ? [
-          reach.mdns ? 'mdns' : null,
-          reach.dht ? 'dht' : null,
+          reach.mdns ? "mdns" : null,
+          reach.dht ? "dht" : null,
           `relay=${reach.relay}`,
         ]
           .filter(Boolean)
-          .join(' · ')
-      : '—'
+          .join(" · ")
+      : "—";
+    const relays = info?.trackers.relays ?? [];
+
+    const held = props.held.value;
+    const coverage = props.coverage.value;
+    const files = props.files;
+    const progress = shareProgress(files, held, coverage);
+    const history = props.history.value;
 
     // The manifest's file count, which the host already knows — a slot is a
     // file, so the grid has a width even before any peer publishes anything.
-    const totalSlots = props.fileCount
+    const totalSlots = files.length;
     // Sorted once, here, because everything below reads from it. The wasm
     // client's own order is hash-derived and reshuffles on every poll — see
     // `peers.ts`.
-    const peers = sortPeers(info?.swarm.peers ?? [])
-    const ourTree = peers.find((peer) => peer.role === 'self')?.tree ?? null
+    const peers = sortPeers(info?.swarm.peers ?? []);
+    const ourTree = peers.find((peer) => peer.role === "self")?.tree ?? null;
     const availabilities = peers.map((peer) =>
       peerAvailability(peer.id, peer.serving, peer.tree, totalSlots),
-    )
-    const gaps = totalSlots > 0 ? missingSlots(availabilities, totalSlots) : []
+    );
+    const gaps = totalSlots > 0 ? missingSlots(availabilities, totalSlots) : [];
+    /** How many visible peers can serve each slot — 0 is a slot nobody has. */
+    const swarmCoverage =
+      totalSlots > 0 ? slotCoverage(availabilities, totalSlots) : [];
+    /** How much of each slot *this tab* holds, in manifest order. */
+    const heldStates = files.map((file) => fileSeedState(file, held, coverage));
 
-    const peerRows = peers.map((peer) => {
-      if (peer.ip) requestCountry(peer.ip)
+    const peerRows = peers.map((peer, index) => {
+      if (peer.ip) requestCountry(peer.ip);
       return {
         ...peer,
-        availability: peerAvailability(peer.id, peer.serving, peer.tree, totalSlots),
+        availability: availabilities[index] as PeerAvailability,
         ipLabel: formatIpWithFlag(peer.ip, {
           countryCode: peer.ip ? (countryMap[peer.ip] ?? null) : null,
           kind: peer.ip_kind,
         }),
         // Full published label, e.g. `agent-share v0.1.0 (chrome, webrtc)`.
         clientLabel: peer.client,
-      }
-    })
+      };
+    });
 
     return (
       <div
@@ -297,143 +522,358 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
         style={{
           flex: 1,
           minHeight: 0,
-          overflowY: 'auto',
-          padding: '0 2ch calc(2 * var(--ms-row))',
+          overflowY: "auto",
+          // A row of air under the top bar, so the first panel's fill does not
+          // read as an extension of the chrome above it.
+          padding: "var(--ms-row) 2ch calc(2 * var(--ms-row))",
           background: t.bg,
         }}
       >
-        <Stack direction="column" gap={1}>
-          <Text color="fgMuted" caps>
-            General
-          </Text>
-          <Text color="fgMuted">
-            transport {dash(info?.general.transport)} · {props.fileCount} files ·{' '}
-            {humanBytes(props.totalBytes)} · direct{' '}
-            {info?.swarm.peers_direct ?? 0}/{info?.swarm.max_direct ?? 0}
-            {info?.general.mesh_up
-              ? ` · ${info.swarm.peers_gossip} on mesh`
-              : ' · mesh down'}{' '}
-            · nickname {dash(info?.general.nickname)} · fingerprint{' '}
-            {dash(info?.general.identity_fingerprint)} · status {props.status}
-            {info?.general.mesh_up ? ' · mesh up' : ' · mesh down'} · connected{' '}
-            {formatDuration(info?.general.connected_ms_ui ?? 0)}
-          </Text>
+        <div>
+          {Style(BENTO)}
 
-          <Text color="fgMuted" caps>
-            Trackers
-          </Text>
-          <Text color="fgMuted">
-            {(info?.trackers.relay_urls.length ?? 0) === 0
-              ? 'no live relay URLs'
-              : info!.trackers.relay_urls.join(' · ')}{' '}
-            · producer reach {reachLine}
-          </Text>
-
-          <Text color="fgMuted" caps>
-            Peers
-          </Text>
-          <Text color="fgMuted">
-            direct {info?.swarm.peers_direct ?? 0}/{info?.swarm.max_direct ?? 0} · gossip{' '}
-            {info?.swarm.peers_gossip ?? 0}
-          </Text>
-          {/*
-            The one thing this view can tell you that a peer list cannot: which
-            parts of the share nobody visible still holds. Once the origin is
-            gone those slots are lost until somebody who has them reappears.
-          */}
-          {totalSlots > 0 ? (
-            <Text color={gaps.length === 0 ? 'fgMuted' : 'fgSubtle'}>
-              {gaps.length === 0
-                ? `every slot is held by someone (${totalSlots})`
-                : `${gaps.length} of ${totalSlots} slots held by nobody visible`}
-            </Text>
-          ) : null}
-          {peerRows.length === 0 ? (
-            <Text color="fgSubtle">no peers</Text>
-          ) : (
-            <Stack direction="column" gap={1}>
-              {peerRows.map((peer) => (
-                <Stack key={peer.id} direction="column" gap={0}>
-                  <Text color="fgMuted">client {peer.clientLabel}</Text>
-                  <Text color="fgMuted">ip {peer.ipLabel}</Text>
-                  {/*
-                    Only for peers we hold a data channel with — a gossip-only
-                    row has no candidate pair, so 0/0 there would read as
-                    "nothing sent" rather than "not measured".
-                  */}
-                  {peer.bytes_sent > 0 || peer.bytes_received > 0 ? (
-                    <>
-                      <Text color="fgMuted">
-                        up {formatRate(peer.up_bps)} · down {formatRate(peer.down_bps)}
-                      </Text>
-                      <Text color="fgMuted">ping {pingLabel(peer.rtt_ms)}</Text>
-                      <Text color="fgMuted">
-                        sent {humanBytes(peer.bytes_sent)} · received{' '}
-                        {humanBytes(peer.bytes_received)}
-                      </Text>
-                    </>
-                  ) : null}
-                  {peer.flags ? (
-                    <Text color="fgMuted">flags {peer.flags}</Text>
-                  ) : null}
-                  <Text color="fgMuted">proto {peer.proto}</Text>
-                  {totalSlots > 0 ? (
-                    <AvailabilityRow
-                      peer={peer.availability}
-                      total={totalSlots}
-                      ourTree={ourTree}
-                    />
-                  ) : null}
-                  <Text color="fgSubtle">
-                    {peer.role} · {shortId(peer.id)}
+          <Panel title="Activity" wide>
+            <div>
+              {Style(SPLIT)}
+              <Stack direction="column" gap={1}>
+                {/*
+                  A row of space between the two graphs, and between them and the
+                  numbers. `█` fills its whole line box, so on adjacent rows a
+                  busy download and a busy upload meet in the middle and read as
+                  one bar twice as tall.
+                */}
+                <Spark
+                  glyph="↓"
+                  label="download"
+                  values={history.map((rate) => rate.down)}
+                />
+                <Spark
+                  glyph="↑"
+                  label="upload"
+                  values={history.map((rate) => rate.up)}
+                />
+                <Stack direction="column" gap={0}>
+                  <Text>
+                    down {formatRate(link?.total.down_bps ?? 0)} · up{" "}
+                    {formatRate(link?.total.up_bps ?? 0)}
+                  </Text>
+                  <Text>
+                    received {humanBytes(link?.total.received ?? 0)} · sent{" "}
+                    {humanBytes(link?.total.sent ?? 0)} · wire ratio{" "}
+                    {ratioLabel(link)}
+                  </Text>
+                  <Text>
+                    opened {clockLabel(props.openedAt)} · last activity{" "}
+                    {clockLabel(props.lastActivityAt.value)} · connected{" "}
+                    {formatDuration(info?.general.connected_ms_ui ?? 0)}
                   </Text>
                 </Stack>
-              ))}
+              </Stack>
+              {/*
+                This tab's own holdings, byte-weighted. The peer rows count slots
+                because that is all a peer can answer for; here we know the sizes,
+                and "3 of 8 files" on a share that is one video and seven READMEs
+                would be a lie by arithmetic.
+              */}
+              <Stack direction="column" gap={0}>
+                <Stack direction="row" gap={1}>
+                  <ProgressBar
+                    value={progress.fraction}
+                    width={24}
+                    showValue
+                    tone={progress.fraction >= 1 ? "success" : "accent"}
+                    label="share held by this tab"
+                  />
+                  <Text>
+                    {humanBytes(progress.bytesHeld)} of{" "}
+                    {humanBytes(progress.bytesTotal)}
+                  </Text>
+                </Stack>
+                <Text color="fgMuted">
+                  {progress.filesComplete}/{totalSlots} slots held whole
+                </Text>
+              </Stack>
+            </div>
+          </Panel>
+
+          {/*
+            Two squares of the same fixed size, side by side — the pair a
+            BitTorrent client draws as Progress and Available. Fixed, because a
+            square per slot would make the panel's height a function of the
+            manifest, and a share of ten thousand files would push everything
+            below it off the page. See `availabilityGrid`.
+          */}
+          <Panel title="Availability">
+            <Stack direction="row" gap={4} wrap>
+              <Stack direction="column" gap={0}>
+                <SlotGrid
+                  columns={GRID_SIDE}
+                  states={resampleSlots(
+                    totalSlots,
+                    CELLS,
+                    (slot) => heldStates[slot] ?? "none",
+                  )}
+                />
+                <Text color="fgMuted">
+                  held · {progress.filesComplete}/{totalSlots}
+                </Text>
+              </Stack>
+              <Stack direction="column" gap={0}>
+                <SlotGrid
+                  columns={GRID_SIDE}
+                  states={resampleSlots(totalSlots, CELLS, (slot) =>
+                    (swarmCoverage[slot] ?? 0) > 0 ? "full" : "none",
+                  )}
+                />
+                {/*
+                  The one thing this view can tell you that a peer list cannot:
+                  which parts of the share nobody visible still holds. Once the
+                  origin is gone those slots are lost until somebody who has them
+                  reappears.
+                */}
+                <Text color={gaps.length === 0 ? "fgMuted" : "warning"}>
+                  available · {totalSlots - gaps.length}/{totalSlots}
+                </Text>
+              </Stack>
+              {isCoarse(totalSlots, CELLS) ? (
+                <Text color="fgMuted">one square is several files</Text>
+              ) : null}
             </Stack>
-          )}
+          </Panel>
 
-          <Text color="fgMuted" caps>
-            Transfer
-          </Text>
-          <Text color="fgMuted">
-            mode {dash(info?.transfer.mount_mode)} → path{' '}
-            {dash(info?.transfer.mount_path)} · paths{' '}
-            {(info?.transfer.mount_paths.length ?? 0) > 0
-              ? info!.transfer.mount_paths.join(', ')
-              : '—'}{' '}
-            · mounted {props.mounted ? 'yes' : 'no'}
-            {props.mountError ? ` · last error: ${props.mountError}` : ''} ·{' '}
-            {capabilitiesLine()}
-          </Text>
-          {/*
-            The one line that answers "why is this on the relay?". Without it
-            the fallback is a console warning nobody reading the pane can see.
-          */}
-          {info?.transfer.mount_fallback_reason ? (
-            <Text color="warning">fell back: {info.transfer.mount_fallback_reason}</Text>
-          ) : null}
-          {/*
-            The mount connection's own counters, which — unlike the per-peer
-            rows above — answer on the relay path too: they come from the QUIC
-            state machine rather than a candidate pair. On a relay mount the
-            peer rows can show a kilobyte of mesh chatter while megabytes of
-            share moved right here, so this line is the one that reconciles.
-
-            Wire bytes, and a smaller unit than the peer rows: QUIC sits below
-            DTLS/SCTP on the WebRTC lane and below the relay's framing on the
-            other. The two are not addable, which is why they are separate
-            lines rather than one total.
-          */}
-          {link ? (
-            <>
-              <Text color="fgMuted">
-                mount wire: down {formatRate(link.total.down_bps)} · up{' '}
-                {formatRate(link.total.up_bps)} · received{' '}
-                {humanBytes(link.total.received)} · sent {humanBytes(link.total.sent)}
+          <Panel title="Session">
+            <Stack direction="column" gap={0}>
+              <Text>
+                transport {dash(info?.general.transport)} · status{" "}
+                {props.status}
+                {info?.general.mesh_up ? " · mesh up" : " · mesh down"}
               </Text>
-              <Text color="fgSubtle">by path: {laneSummary(link.lanes)} received</Text>
-            </>
-          ) : null}
+              <Text>
+                {totalSlots} files · {humanBytes(progress.bytesTotal)}
+              </Text>
+              <Text>nickname {dash(info?.general.nickname)}</Text>
+              <Text>
+                fingerprint {dash(info?.general.identity_fingerprint)}
+              </Text>
+            </Stack>
+          </Panel>
+
+          <Panel title="Relays">
+            <Stack direction="column" gap={0}>
+              {relays.length === 0 ? (
+                <Text color="fgMuted">no relays configured</Text>
+              ) : (
+                /*
+                  The whole ladder, not just the rung in use. "Which relay am I
+                  on" is only half the question; the other half is what the
+                  alternatives were, and a list of one cannot answer it.
+                */
+                relays.map((relay) => (
+                  <Stack key={relay.url} direction="column" gap={0}>
+                    <Stack direction="row" gap={1}>
+                      {/*
+                        Green for the one carrying traffic, grey for every rung
+                        that is merely available. Two states rather than three:
+                        a rung iroh never homed on has nothing to report, and
+                        drawing that as an error would cry wolf on a ladder that
+                        is working exactly as designed.
+                      */}
+                      <StatusDot status={relay.connected ? "ready" : "queued"}>
+                        {relay.url}
+                      </StatusDot>
+                      {/*
+                        Only when the picked relay is *not* the connected one —
+                        the usual case is both at once, where the green dot has
+                        already said it and a badge would be noise.
+                      */}
+                      {relay.home && !relay.connected ? (
+                        <Badge tone="warning" variant="outline">
+                          home
+                        </Badge>
+                      ) : null}
+                    </Stack>
+                    {relay.last_error ? (
+                      <Text color="danger">{relay.last_error}</Text>
+                    ) : null}
+                  </Stack>
+                ))
+              )}
+              {/*
+                The ticket's declared reach, not a live measurement — these say
+                which lookups this share *permits*, which is why they are labelled
+                as the producer's rather than as this tab's.
+              */}
+              <Text color="fgMuted">producer reach {reachLine}</Text>
+            </Stack>
+          </Panel>
+
+          <Panel title="Transfer">
+            <Stack direction="column" gap={0}>
+              <Text>
+                mode {dash(info?.transfer.mount_mode)} → path{" "}
+                {dash(info?.transfer.mount_path)}
+              </Text>
+              <Text>
+                paths{" "}
+                {(info?.transfer.mount_paths.length ?? 0) > 0
+                  ? info!.transfer.mount_paths.join(", ")
+                  : "—"}{" "}
+                · mounted {props.mounted ? "yes" : "no"}
+              </Text>
+              <Text>{capabilitiesLine()}</Text>
+              {props.mountError ? (
+                <Text color="warning">last error: {props.mountError}</Text>
+              ) : null}
+              {/*
+                The one line that answers "why is this on the relay?". Without it
+                the fallback is a console warning nobody reading the pane can see.
+              */}
+              {info?.transfer.mount_fallback_reason ? (
+                <Text color="warning">
+                  fell back: {info.transfer.mount_fallback_reason}
+                </Text>
+              ) : null}
+              {/*
+                The mount connection's own counters, which — unlike the per-peer
+                rows above — answer on the relay path too: they come from the QUIC
+                state machine rather than a candidate pair. On a relay mount the
+                peer rows can show a kilobyte of mesh chatter while megabytes of
+                share moved right here, so this line is the one that reconciles.
+
+                Wire bytes, and a smaller unit than the peer rows: QUIC sits below
+                DTLS/SCTP on the WebRTC lane and below the relay's framing on the
+                other. The two are not addable, which is why they are separate
+                lines rather than one total.
+              */}
+              {link ? (
+                <>
+                  <Text>
+                    mount wire: received {humanBytes(link.total.received)} ·
+                    sent {humanBytes(link.total.sent)}
+                  </Text>
+                  <Text color="fgMuted">
+                    by path: {laneSummary(link.lanes)} received
+                  </Text>
+                </>
+              ) : null}
+            </Stack>
+          </Panel>
+
+          <Panel title="Peers" wide>
+            {peerRows.length === 0 ? (
+              <Text color="fgMuted">no peers</Text>
+            ) : (
+              <div>
+                {Style(PEER_TABLE)}
+                <Table
+                  rows={peerRows}
+                  /*
+                    A floor, because `Table` is `width: 100%` and its one
+                    flexible column absorbs whatever is left. Without this the
+                    client column is what a narrow window takes the space from,
+                    and it silently shrinks to nothing rather than the table
+                    scrolling — the column vanishes and nothing says so.
+                  */
+                  style={{ minWidth: "150ch" }}
+                  rowKey={(peer) => peer.id}
+                  /*
+                    Left-aligned columns first, right-aligned ones last, and the
+                    order is load-bearing rather than tidy: a right-aligned cell
+                    pins its content to its own right edge and a left-aligned one
+                    to its left, so the single cell of column gap between them
+                    disappears and two headers read as one word. Keeping the
+                    numeric block at the end leaves exactly one such boundary,
+                    where `id` is short enough to leave air.
+                  */
+                  columns={[
+                    { key: "ipLabel", header: "ip", width: 24 },
+                    {
+                      key: "clientLabel",
+                      header: "client",
+                      render: (peer) => (
+                        <Text truncate>{peer.clientLabel}</Text>
+                      ),
+                    },
+                    { key: "proto", header: "proto", width: 9 },
+                    {
+                      key: "flags",
+                      header: "flags",
+                      width: 6,
+                      // Empty flags mean gossip-only, which the dash says
+                      // without implying the field failed to load.
+                      render: (peer) => dash(peer.flags),
+                    },
+                    {
+                      key: "serving",
+                      header: "slots",
+                      width: 16,
+                      render: (peer) => (
+                        <PeerSlots
+                          peer={peer.availability}
+                          total={totalSlots}
+                          ourTree={ourTree}
+                        />
+                      ),
+                    },
+                    {
+                      key: "id",
+                      header: "id",
+                      width: 19,
+                      render: (peer) => (
+                        <Text color="fgMuted">{shortId(peer.id)}</Text>
+                      ),
+                    },
+                    {
+                      key: "rtt_ms",
+                      header: "ping",
+                      width: 8,
+                      align: "right",
+                      render: (peer) => pingLabel(peer.rtt_ms),
+                    },
+                    /*
+                      Rates and byte counts only for peers we hold a data channel
+                      with. A gossip-only row has no candidate pair, so a zero
+                      there would read as "sent nothing" rather than
+                      "not measured" — which is why `measured` gates all four
+                      columns rather than each formatter dashing on its own.
+                    */
+                    {
+                      key: "up_bps",
+                      header: "up",
+                      width: 10,
+                      align: "right",
+                      render: (peer) =>
+                        measured(peer) ? formatRate(peer.up_bps) : "—",
+                    },
+                    {
+                      key: "down_bps",
+                      header: "down",
+                      width: 10,
+                      align: "right",
+                      render: (peer) =>
+                        measured(peer) ? formatRate(peer.down_bps) : "—",
+                    },
+                    {
+                      key: "bytes_sent",
+                      header: "sent",
+                      width: 10,
+                      align: "right",
+                      render: (peer) =>
+                        measured(peer) ? humanBytes(peer.bytes_sent) : "—",
+                    },
+                    {
+                      key: "bytes_received",
+                      header: "received",
+                      width: 10,
+                      align: "right",
+                      render: (peer) =>
+                        measured(peer) ? humanBytes(peer.bytes_received) : "—",
+                    },
+                  ]}
+                />
+              </div>
+            )}
+          </Panel>
 
           {/*
             Behind `?dev=true`, and off for anyone handed a share link.
@@ -449,10 +889,7 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
             So clicking this looks like it does nothing, which is the point.
           */}
           {props.dev ? (
-            <>
-              <Text color="fgMuted" caps>
-                Dev
-              </Text>
+            <Panel title="Dev">
               <Stack direction="row" gap={1}>
                 <Button
                   variant="secondary"
@@ -462,15 +899,23 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
                   Kill connection
                 </Button>
               </Stack>
-              <Text color="fgSubtle">
+              <Text>
                 Closes the mount connection. Nothing visible happens until you
                 press Download or leave and return to this tab — that is what
                 triggers the reconnect.
               </Text>
-            </>
+            </Panel>
           ) : null}
-        </Stack>
+        </div>
       </div>
-    )
-  }
-})
+    );
+  };
+});
+
+/** Whether this peer has a candidate pair to read counters off at all. */
+function measured(peer: {
+  bytes_sent: number;
+  bytes_received: number;
+}): boolean {
+  return peer.bytes_sent > 0 || peer.bytes_received > 0;
+}

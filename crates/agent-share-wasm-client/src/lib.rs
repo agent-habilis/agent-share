@@ -66,7 +66,7 @@ use agent_share_proto::manifest::{ManifestDelta, MountManifest};
 use agent_share_proto::mesh_key::share_mesh_key;
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
 use fofoca::iroh::endpoint::{Connection, presets};
-use fofoca::iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
+use fofoca::iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr, Watcher as _};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -2325,6 +2325,7 @@ impl ShareClient {
         } else {
             self.rendezvous_relays.clone()
         };
+        let relays = self.relays_json(&relay_urls);
         let producer_reach = serde_json::json!({
             "mdns": self.lookups.mdns,
             "dht": self.lookups.dht,
@@ -2346,7 +2347,7 @@ impl ShareClient {
                 "connected_ms_ui": (now_ms() - self.connected_at_ms).max(0.0),
             },
             "trackers": {
-                "relay_urls": relay_urls,
+                "relays": relays,
                 "producer_reach": producer_reach,
             },
             "swarm": {
@@ -2363,6 +2364,56 @@ impl ShareClient {
                 "link": self.link_snapshot(),
             },
         })
+    }
+
+    /// Every relay this tab could use, each with its live connection state.
+    ///
+    /// The whole ladder rather than the one rung in use, because "which relay
+    /// am I on" is only half the question — the other half is what the
+    /// alternatives were, and a list of one cannot answer it. The rungs are
+    /// recomputed from the ticket's [`RelayChoice`] rather than read back off
+    /// the endpoint, which is the same expression the signal endpoint was bound
+    /// with, so the two cannot drift.
+    ///
+    /// `extra` carries the rendezvous addresses captured at connect, for the
+    /// case where the endpoint homed somewhere the ladder does not name.
+    ///
+    /// Status comes off the *signal* endpoint: the mount endpoint is
+    /// deliberately relay-free on the WebRTC path, so asking it would report
+    /// nothing on a tab that is gossiping over a relay right now.
+    fn relays_json(&self, extra: &[String]) -> Vec<serde_json::Value> {
+        let endpoint = self.signal_endpoint.as_ref().unwrap_or(&self._endpoint);
+        // A `Watcher::get` rather than a subscription: `info` is polled once a
+        // second by the pane that renders it, and a background task holding a
+        // stream would be a second clock over the same data.
+        let homes = endpoint.home_relay_status().get();
+        let describe = |url: &str| -> serde_json::Value {
+            let status = homes.iter().find(|home| home.url().as_str() == url);
+            serde_json::json!({
+                "url": url,
+                "home": status.is_some(),
+                "connected": status.is_some_and(|home| home.is_connected()),
+                "last_error": status
+                    .and_then(|home| home.last_error())
+                    .map(|error| format!("{error:#}")),
+            })
+        };
+        let mut urls: Vec<String> = relay_mode(&self.lookups.relay)
+            .relay_map()
+            .urls::<Vec<_>>()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let observed = extra
+            .iter()
+            .cloned()
+            .chain(homes.iter().map(|home| home.url().to_string()));
+        for url in observed {
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+        urls.iter().map(|url| describe(url)).collect()
     }
 
     /// The last [`Self::sample_link`] reading, **without taking a new one**.
