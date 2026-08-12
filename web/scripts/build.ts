@@ -6,11 +6,10 @@
  * a static host serving `dist/` can resolve it.
  *
  * The binary is written under a content-addressed name so a CDN or browser
- * cannot serve yesterday's build under today's URL. See
- * `scripts/wasm-asset.ts`.
+ * cannot serve yesterday's build under today's URL. See `wasm-asset.ts`.
  */
 
-import { brotli, syncGlue, wasmAsset, writeWasmPath } from './scripts/wasm-asset.ts'
+import { brotli, syncGlue, wasmAsset, writeWasmPath } from './wasm-asset.ts'
 
 await Bun.$`rm -rf dist`
 

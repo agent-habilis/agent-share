@@ -4,7 +4,7 @@
  * binary; callers pass the hashed path instead (see `src/wasm/index.ts`).
  *
  * The hash is what stops a rebuilt binary being shadowed by a cached one — see
- * `scripts/wasm-asset.ts`.
+ * `wasm-asset.ts`.
  *
  * # The binary is read per request, not captured at start
  *
@@ -33,20 +33,20 @@ import { stat } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import index from './src/index.html'
-import lab from './src/lab/index.html'
+import index from '../src/index.html'
+import lab from '../src/lab/index.html'
 import {
   syncGlue,
   tryWasmAsset,
   wasmResponse,
   withGzip,
   writeWasmPath,
-  WASM_SOURCE,
+  WASM_FILE,
   type WasmAsset,
-} from './scripts/wasm-asset.ts'
+} from './wasm-asset.ts'
 
-const WASM_FILE = fileURLToPath(new URL(WASM_SOURCE, import.meta.url))
-const WASM_NAME = basename(WASM_FILE)
+const WASM_PATH = fileURLToPath(WASM_FILE)
+const WASM_NAME = basename(WASM_PATH)
 
 /**
  * The binary as it is on disk *now*, re-hashed only when the file changes.
@@ -60,7 +60,7 @@ let cached: { key: string; asset: WasmAsset } | null = null
 async function currentAsset(): Promise<WasmAsset | null> {
   let key: string
   try {
-    const info = await stat(WASM_FILE)
+    const info = await stat(WASM_PATH)
     key = `${info.mtimeMs}:${info.size}`
   } catch {
     cached = null
@@ -179,7 +179,7 @@ const server = Bun.serve({
 // instantiate on a binding only one side knew about.
 try {
   let pending: ReturnType<typeof setTimeout> | null = null
-  watch(dirname(WASM_FILE), (_event, filename) => {
+  watch(dirname(WASM_PATH), (_event, filename) => {
     // `null` filename (some platforms report only that *something* changed) is
     // taken as a maybe and re-checked.
     if (filename && filename !== WASM_NAME && !filename.startsWith('agent_share_wasm_client.'))

@@ -4,9 +4,9 @@
   "type": "module",
   "workspaces": ["vendor/*"],
   "scripts": {
-    "dev": "bun --hot dev.ts",
-    "build": "bun build.ts",
-    "preview": "bun preview.ts",
+    "dev": "bun --hot scripts/dev.ts",
+    "build": "bun scripts/build.ts",
+    "preview": "bun scripts/preview.ts",
     "typecheck": "bun scripts/gen-wasm-path.ts && tsc --noEmit -p tsconfig.json && tsc --noEmit -p vendor/visage-dom && tsc --noEmit -p vendor/visage-style && tsc --noEmit -p vendor/visage-router && tsc --noEmit -p vendor/moonspace && tsc --noEmit -p vendor/moonspace-theme && tsc --noEmit -p vendor/moonspace-dom",
     "test": "bun scripts/gen-wasm-path.ts && bun test"
   },

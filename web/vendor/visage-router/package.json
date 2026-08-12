@@ -13,7 +13,6 @@
     "visage-dom": "workspace:*"
   },
   "scripts": {
-    "build": "bun run ../../scripts/build.ts visage-router",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   }

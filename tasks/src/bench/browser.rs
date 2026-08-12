@@ -120,7 +120,7 @@ pub(crate) fn cells(
 
 /// Start the dev server and land a headless window on `/lab`.
 ///
-/// `dev.ts` rather than `preview.ts`: it needs only the wasm dist, where
+/// `scripts/dev.ts` rather than `scripts/preview.ts`: it needs only the wasm dist, where
 /// preview would additionally need `bun run build`. The `.wasm` is byte-identical
 /// either way — only the JS glue's bundling differs, which matters for finding
 /// #4's load time but not for throughput.
@@ -151,9 +151,9 @@ fn prepare() -> Result<(Proc, Browser), String> {
 
     // Drop Chrome's HTTP cache, then reload.
     //
-    // `dev.ts:27` serves the `.wasm` at a fixed URL straight from the crate's
-    // dist, so a rebuilt binary keeps the same path and Chrome reuses its
-    // cached copy — while Bun re-bundles the JS glue fresh. A stale wasm
+    // `scripts/dev.ts` serves the `.wasm` straight from the crate's dist, so a
+    // rebuilt binary Chrome has already fetched can come back from its cache —
+    // while Bun re-bundles the JS glue fresh. A stale wasm
     // against new glue fails instantiation on a mismatched
     // `__wbindgen_cast_*` import, which is how the opt-level canary caught it.
     //
@@ -193,22 +193,22 @@ fn prepare() -> Result<(Proc, Browser), String> {
 
 /// Start a dev server on a port nobody else can be holding.
 ///
-/// `PORT=0` rather than `dev.ts`'s default 3000, and that is not a nicety. The
+/// `PORT=0` rather than `scripts/dev.ts`'s default 3000, and that is not a nicety. The
 /// default collided with a *sibling worktree's* dev server, which re-took the
 /// port within seconds of being freed — so the harness alternated between
 /// `EADDRINUSE` and, worse, adopting a server that was serving another
 /// checkout's build. A fixed port makes every concurrent checkout, and the
 /// human's own `bun run dev`, a contender for the same socket.
 ///
-/// `dev.ts` prints the URL it actually bound (`dev ${server.url}`), so the
+/// `scripts/dev.ts` prints the URL it actually bound (`dev ${server.url}`), so the
 /// ephemeral port costs nothing to discover.
 pub(crate) fn start_dev_server(root: &Path) -> Res<(Proc, String)> {
     let mut cmd = Command::new("bun");
-    cmd.arg("dev.ts")
+    cmd.arg("scripts/dev.ts")
         .current_dir(root.join("web"))
         .env("PORT", "0");
     let (server, mut lines) = spawn_piped_with_stderr(cmd, "bun dev server")?;
-    // `dev.ts:36` prints `dev http://localhost:3000/` once bound.
+    // `scripts/dev.ts` prints `dev http://localhost:3000/` once bound.
     let Some(line) = lines.wait_for("dev http", Duration::from_mins(1)) else {
         return Err(format!(
             "the dev server never reported a URL; output was:\n{}",
@@ -273,7 +273,7 @@ fn assert_wasm_is_fresh(root: &Path, url: &str) -> Res<()> {
 /// rather than re-deriving the hash, so there is one source of truth and no
 /// second implementation of the digest to drift.
 ///
-/// Safe to read at this point in the run: `dev.ts` regenerates it before it
+/// Safe to read at this point in the run: `scripts/dev.ts` regenerates it before it
 /// binds a port, and the caller has already seen the server's ready line.
 fn served_wasm_path(root: &Path) -> Res<String> {
     const GENERATED: &str = "web/src/wasm/path.ts";

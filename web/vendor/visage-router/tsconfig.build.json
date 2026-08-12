@@ -1,5 +1,6 @@
-// Declaration emit for the published artifact. `bun run build` drives this;
-// typechecking still uses tsconfig.json.
+// Declaration emit for the published artifact. Upstream's build script drives
+// this; it is not vendored, so nothing here runs it. Typechecking uses
+// tsconfig.json.
 //
 // `noEmit: false` is not redundant: the base config sets `noEmit: true`, which
 // otherwise wins over `emitDeclarationOnly` and makes tsc write nothing and

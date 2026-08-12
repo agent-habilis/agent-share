@@ -479,8 +479,9 @@ impl Page {
         reap::track_browser(ctx.folder);
         let browser = Browser::new(ctx.folder.to_owned());
 
-        // `dev.ts` serves the wasm at a fixed URL, so a copy cached before the
-        // last `cargo task web-wasm` would survive a plain reload. Clearing is
+        // `scripts/dev.ts` serves the wasm straight from the crate's dist, so a
+        // copy cached before the last `cargo task web-wasm` could survive a
+        // plain reload. Clearing is
         // a one-shot effect that outlives the short-lived CDP session asking
         // for it, which `setCacheDisabled` would not be.
         run_browse(&[

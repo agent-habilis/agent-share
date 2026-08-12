@@ -43,5 +43,9 @@ Re-apply these when re-vendoring:
   checkout instead. The `paths` blocks are removed here.
 - The `visage-*` tsconfigs extend `web/tsconfig.base.json` (same options as
   upstream's base minus `types`), adding `types: ["bun"]` per package.
-- Per-package `bunfig.toml` files preload `../../test-setup.ts`, which is
-  `web/test-setup.ts` (identical to upstream's).
+- Per-package `bunfig.toml` files preload `../../scripts/test-setup.ts`, which
+  is `web/scripts/test-setup.ts` (identical to upstream's).
+- The `visage-*` packages' `build` script is dropped. It ran upstream's
+  per-package library build, which was never vendored, and these packages are
+  consumed as source through their `exports`. Left in place it would have found
+  `web/scripts/build.ts` — this app's bundler — and run that instead.

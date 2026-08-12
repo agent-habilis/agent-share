@@ -18,7 +18,6 @@
     "./jsx-dev-runtime": "./src/jsx-dev-runtime/index.ts"
   },
   "scripts": {
-    "build": "bun run ../../scripts/build.ts visage-dom",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   }

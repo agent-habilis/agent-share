@@ -12,10 +12,10 @@
  * out is what makes it discoverable from here.
  */
 
-import { wasmAsset } from './scripts/wasm-asset.ts'
-import { STREAM_PREFIX } from './src/service-worker/protocol.ts'
+import { wasmAsset } from './wasm-asset.ts'
+import { STREAM_PREFIX } from '../src/service-worker/protocol.ts'
 
-const ROOT = new URL('./dist/', import.meta.url)
+const ROOT = new URL('../dist/', import.meta.url)
 
 function distFile(pathname: string) {
   return Bun.file(new URL(`.${pathname}`, ROOT))
