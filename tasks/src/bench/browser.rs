@@ -120,8 +120,8 @@ pub(crate) fn cells(
 
 /// Start the dev server and land a headless window on `/lab`.
 ///
-/// `scripts/dev.ts` rather than `scripts/preview.ts`: it needs only the wasm dist, where
-/// preview would additionally need `bun run build`. The `.wasm` is byte-identical
+/// `scripts/dev.ts` rather than `scripts/start.ts`: it needs only the wasm dist, where
+/// the prod server would additionally need `bun run build`. The `.wasm` is byte-identical
 /// either way — only the JS glue's bundling differs, which matters for finding
 /// #4's load time but not for throughput.
 fn prepare() -> Result<(Proc, Browser), String> {

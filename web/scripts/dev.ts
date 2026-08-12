@@ -23,7 +23,8 @@
  * as a wasm "expected magic word" error naming the wrong problem entirely.
  *
  * `PORT` picks the port, so two of these can run at once — one per checkout, or
- * one beside `bun run preview`. Bun reads `PORT` on its own when `port` is
+ * one beside `bun run start`; under `bun run dev` portless assigns it. Bun reads
+ * `PORT` on its own when `port` is
  * omitted, but only as an undocumented default; spelling it out is what makes it
  * discoverable from here.
  */

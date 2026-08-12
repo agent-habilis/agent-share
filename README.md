@@ -134,6 +134,11 @@ cd web && bun install && bun run dev
 `web/` is the browser app, `node/` the `npx agent-share <ticket>` receiver.
 Both consume the same `.wasm`; only the wasm-bindgen glue differs.
 
+`bun run dev` serves at `https://agent-share.localhost` — a name instead of a
+contended port, via [portless](https://github.com/vercel-labs/portless).
+`bun run build && bun run start` is the production pair: `start` serves the
+built `dist/` on `PORT`.
+
 Note `npx` needs a native WebRTC addon (`node-datachannel`), because Node has
 no `RTCPeerConnection` and the relay will not carry data. The native binary
 needs no addon and can mount the share as a filesystem.

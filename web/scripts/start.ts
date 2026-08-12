@@ -1,12 +1,12 @@
 /**
- * Serve a production `dist/` build. Run `bun run build` first.
+ * `bun run start`: serve a production `dist/` build. Run `bun run build` first.
  *
  * Bun's HTML multipage server rebundles source; this only hands out the
- * already-built files so preview matches a static host. Extensionless paths,
- * and share routes however they are spelled, fall back to the SPA
+ * already-built files so a local run matches a static host. Extensionless
+ * paths, and share routes however they are spelled, fall back to the SPA
  * `index.html` — see `looksLikeAsset`.
  *
- * `PORT` picks the port, so a preview can run alongside `bun run dev` instead of
+ * `PORT` picks the port, so this can run alongside `bun run dev` instead of
  * losing a coin flip for 3000 and exiting `EADDRINUSE`. Bun reads `PORT` on its
  * own when `port` is omitted, but only as an undocumented default — spelling it
  * out is what makes it discoverable from here.
@@ -113,4 +113,4 @@ const server = Bun.serve({
   },
 })
 
-console.log(`preview ${server.url}`)
+console.log(`start ${server.url}`)

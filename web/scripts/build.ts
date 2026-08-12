@@ -56,7 +56,7 @@ if (!sw.success) {
 // and `dist/` has to mirror it or a static host answers the app's fetch with
 // whatever its own not-found rule says — for an SPA, `index.html`.
 await Bun.write(`./dist${asset.path}`, asset.bytes)
-// Precompressed siblings for hosts (and `preview.ts`) that can serve them —
+// Precompressed siblings for hosts (and `start.ts`) that can serve them —
 // the binary is the connect path's largest download by an order of magnitude.
 await Bun.write(`./dist${asset.path}.br`, await brotli(asset.bytes))
 await Bun.write(`./dist${asset.path}.gz`, Bun.gzipSync(asset.bytes, { level: 9 }))
