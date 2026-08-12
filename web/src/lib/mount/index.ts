@@ -6,16 +6,15 @@
  * the browser picking a parent target and creating `agent-share-…/` under it.
  */
 
+import { keepChunks, type Keeper } from '../keep/index.ts'
 import { safeSplit, type FileNode, type ManifestDir } from '../tree.ts'
 import type { Progress } from '../download/index.ts'
 
 /** The protocol's per-request ceiling (`MAX_READ_LEN`). */
 const CHUNK = 256 * 1024
 
-interface Reader {
+interface Reader extends Keeper {
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
-  /** Keep what was read, so mirroring to a folder also seeds. */
-  keep?(index: number, offset: bigint, bytes: Uint8Array): Promise<void>
   /**
    * Whether the mount reaches the ticket's origin, or a seeder standing in
    * for it. Absent reads as `true` (origin semantics). Guard #2 hangs off
@@ -197,11 +196,9 @@ async function writeFile(
       }
       // Copy: wasm may hand back a view over SharedArrayBuffer-backed memory.
       await writable.write(new Uint8Array(chunk))
-      // Mirroring to a local folder seeds too. Same fire-and-forget contract as
-      // the download path: never awaited, never fatal.
-      void reader.keep?.(file.index, BigInt(offset), chunk).catch((error: unknown) => {
-        console.debug('[share] keeping a mirrored chunk failed', error)
-      })
+      // Mirroring to a local folder seeds too, on the same terms as every other
+      // path that pulls bytes.
+      keepChunks(reader, file.index, offset, chunk)
       offset += chunk.length
       onBytes(chunk.length)
     }

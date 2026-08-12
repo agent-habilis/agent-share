@@ -17,11 +17,48 @@ function reader(size: number) {
   return { read, asked }
 }
 
+/** A reader that stops short once, to exercise the re-alignment path. */
+function truncating(size: number, truncateFirstTo: number) {
+  const asked: Array<[number, number]> = []
+  const read = async (offset: number, len: number) => {
+    const want = asked.length === 0 ? Math.min(len, truncateFirstTo) : len
+    asked.push([offset, len])
+    const take = Math.max(0, Math.min(want, size - offset))
+    return new Uint8Array(take).map((_, index) => (offset + index) % 251)
+  }
+  return { read, asked }
+}
+
 function ranged(header: string | null, size = 1000): Request {
   void size
   return new Request('https://example.test/service-worker/abc/clip.mp4', {
     headers: header ? { Range: header } : {},
   })
+}
+
+/**
+ * `fofoca_chunks::CHUNK_BYTES`, mirrored here for the same reason `range.ts`
+ * mirrors it: these tests assert what the page will be able to *keep*.
+ */
+const CHUNK_BYTES = 64 * 1024
+
+/**
+ * Which chunks a log of reads would leave in the store.
+ *
+ * The predicate is `store_row_and_chunks`'s, verbatim: a chunk is kept only
+ * when it lies **wholly** inside a single read, because half a chunk has no
+ * address. This is what turns a read schedule into a coverage claim.
+ */
+function kept(asked: Array<[number, number]>, size: number): Set<number> {
+  const chunks = new Set<number>()
+  for (const [offset, len] of asked) {
+    const end = Math.min(offset + len, size)
+    for (let index = Math.floor(offset / CHUNK_BYTES); index * CHUNK_BYTES < end; index += 1) {
+      const start = index * CHUNK_BYTES
+      if (start >= offset && Math.min(start + CHUNK_BYTES, size) <= end) chunks.add(index)
+    }
+  }
+  return chunks
 }
 
 describe('parseRange', () => {
@@ -124,6 +161,87 @@ describe('respond', () => {
     expect(asked[0]).toEqual([0, 256 * 1024])
     // The tail is short, never a full chunk past the end.
     expect(asked[2][1]).toBe(700 * 1024 - 2 * 256 * 1024)
+  })
+
+  /**
+   * The one that pins the bug this alignment exists for.
+   *
+   * A media element seeks to an arbitrary byte, so the window it asks for is
+   * almost never chunk-aligned. Walked in flat 256 KiB steps, every fourth
+   * chunk straddles two reads and is dropped by both — coverage plateaus at
+   * 75 %, the file never completes, and the tab can never advertise it whole
+   * however long it plays.
+   */
+  test('an unaligned window still keeps every chunk it passed over', async () => {
+    const size = 4 * 1024 * 1024
+    const { read, asked } = reader(size)
+    const response = respond(ranged('bytes=100000-'), entry({ size }), read)
+    await response.arrayBuffer()
+
+    const chunks = kept(asked, size)
+    // Chunk 1 is cut through by the window's start, so it is genuinely
+    // unreachable here. Everything from chunk 2 on was fully transferred and
+    // must therefore be stored.
+    const reachable = Array.from({ length: size / CHUNK_BYTES - 2 }, (_, i) => i + 2)
+    expect(reachable.filter((index) => !chunks.has(index))).toEqual([])
+  })
+
+  test('every read but the first starts and ends on a chunk boundary', async () => {
+    const size = 4 * 1024 * 1024
+    const { read, asked } = reader(size)
+    await respond(ranged('bytes=100000-'), entry({ size }), read).arrayBuffer()
+
+    expect(asked[0][0]).toBe(100000)
+    for (const [offset] of asked.slice(1)) expect(offset % CHUNK_BYTES).toBe(0)
+    // The last read stops at the file's end, which is a boundary only by luck.
+    for (const [offset, len] of asked.slice(0, -1)) {
+      expect((offset + len) % CHUNK_BYTES).toBe(0)
+    }
+    const [offset, len] = asked[asked.length - 1]
+    expect(offset + len).toBe(size)
+  })
+
+  /** Alignment must not cost a round trip: the tail is already whole. */
+  test('aligning adds no extra read at the end of a window', async () => {
+    const size = 4 * 1024 * 1024
+    const { read, asked } = reader(size)
+    await respond(ranged('bytes=100000-'), entry({ size }), read).arrayBuffer()
+    expect(asked.length).toBe(Math.ceil((size - 100000) / (256 * 1024)))
+  })
+
+  /** Shaping the reads must not change a single byte of the answer. */
+  test('an unaligned window answers exactly what it was asked for', async () => {
+    const size = 4 * 1024 * 1024
+    const { read } = reader(size)
+    const response = respond(ranged('bytes=100000-200000'), entry({ size }), read)
+    expect(response.status).toBe(206)
+    expect(response.headers.get('Content-Range')).toBe(`bytes 100000-200000/${size}`)
+    expect(response.headers.get('Content-Length')).toBe('100001')
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    expect(bytes.length).toBe(100001)
+    expect(Array.from(bytes.slice(0, 3))).toEqual([100000 % 251, 100001 % 251, 100002 % 251])
+    expect(bytes[bytes.length - 1]).toBe(200000 % 251)
+  })
+
+  /** `want` must stay positive: a window smaller than a chunk has no boundary. */
+  test('a window shorter than one chunk is read in one go', async () => {
+    const size = 4 * 1024 * 1024
+    const { read, asked } = reader(size)
+    await respond(ranged('bytes=100000-100000'), entry({ size }), read).arrayBuffer()
+    expect(asked).toEqual([[100000, 1]])
+  })
+
+  /**
+   * The reason alignment is computed per pull rather than as a schedule up
+   * front: a read may legitimately answer with fewer bytes than it was asked
+   * for, and the next one has to align from where the bytes actually stopped.
+   */
+  test('a short read re-aligns the next one rather than staying off by it', async () => {
+    const size = 4 * 1024 * 1024
+    const { read, asked } = truncating(size, 1000)
+    await respond(ranged('bytes=100000-'), entry({ size }), read).arrayBuffer()
+    expect(asked[1][0]).toBe(101000)
+    expect((asked[1][0] + asked[1][1]) % CHUNK_BYTES).toBe(0)
   })
 
   /**

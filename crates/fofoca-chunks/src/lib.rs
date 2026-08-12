@@ -804,6 +804,35 @@ mod tests {
         assert_eq!(map.indices_for(CHUNK_BYTES * 3, CHUNK_BYTES * 99), 3..4);
     }
 
+    /// The invariant a caller narrowing a full-row scan down to this range is
+    /// relying on: nothing storable falls outside it.
+    ///
+    /// `agent-share`'s browser client walks these positions to decide which
+    /// chunks of a read it can keep, and it keeps a chunk only when the chunk
+    /// lies wholly inside the read. If this range ever missed one of those, the
+    /// symptom would be a file that transfers in full and still never becomes
+    /// seedable — silent, and only visible as coverage that stops short.
+    #[test]
+    fn byte_ranges_cover_every_chunk_a_read_could_hold_whole() {
+        let map = ChunkMap::build(&body(CHUNK_BYTES_USIZE * 8 + 17, 3));
+        for offset in [0, 1, 17, CHUNK_BYTES - 1, CHUNK_BYTES, CHUNK_BYTES * 3 + 5] {
+            for len in [1, 17, CHUNK_BYTES, CHUNK_BYTES * 4, CHUNK_BYTES * 99] {
+                let end = offset + len;
+                let narrowed = map.indices_for(offset, len);
+                let whole = (0..map.len()).filter(|position| {
+                    let range = map.range_of(*position);
+                    range.start >= offset && range.end <= end
+                });
+                for position in whole {
+                    assert!(
+                        narrowed.contains(&position),
+                        "chunk {position} fits wholly in {offset}..{end} but {narrowed:?} skips it"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn verifying_past_the_end_is_false_not_a_panic() {
         let map = ChunkMap::build(b"tiny");

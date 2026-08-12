@@ -10,12 +10,13 @@
 
 import { downloadZip } from 'client-zip'
 
+import { keepChunks, type Keeper } from '../keep/index.ts'
 import type { FileNode } from '../tree.ts'
 
 /** The protocol's per-request ceiling (`MAX_READ_LEN`). */
 const CHUNK = 256 * 1024
 
-interface Reader {
+interface Reader extends Keeper {
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
   /**
    * Whether the mount reaches the ticket's origin. Absent reads as `true`.
@@ -23,39 +24,6 @@ interface Reader {
    * `fileStream`.
    */
   readonly source_is_origin?: boolean
-  /**
-   * Hand bytes that just arrived back to the client, so this tab can seed them.
-   *
-   * The whole point of routing every path through `fileStream`: a download, a
-   * folder-as-ZIP and a preview all pull the same bytes, and without this they
-   * were thrown away — so pressing Seed afterwards pulled them a second time.
-   *
-   * Optional because a plain reader has nowhere to put them, and because the
-   * call must never be load-bearing: see `keepChunks` for why its failures are
-   * swallowed.
-   */
-  keep?(index: number, offset: bigint, bytes: Uint8Array): Promise<void>
-}
-
-/**
- * Feed fetched bytes to the client's chunk store, and never let it matter.
- *
- * Fire-and-forget on purpose, in both directions:
- *
- * - **Not awaited**, so storing never sits between two reads and slows a
- *   transfer down. The bytes are already in hand; keeping them is bookkeeping.
- * - **Never rethrown**, so a full quota or a private-mode refusal costs seeding
- *   and not the download. A user who asked for a file gets the file.
- *
- * The client keeps only chunks lying wholly inside what it is given, so the
- * sequential 256 KiB pieces this sends — exactly four aligned 64 KiB chunks —
- * are kept in full.
- */
-function keepChunks(reader: Reader, index: number, offset: number, bytes: Uint8Array): void {
-  if (!reader.keep) return
-  void reader.keep(index, BigInt(offset), bytes).catch((error: unknown) => {
-    console.debug('[share] keeping a chunk failed; not seeding these bytes', error)
-  })
 }
 
 export interface Progress {

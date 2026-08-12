@@ -16,6 +16,21 @@
 /** The protocol's per-request ceiling, matching `MAX_READ_LEN`. */
 const CHUNK = 256 * 1024
 
+/**
+ * The chunk store's addressing unit, mirroring `fofoca_chunks::CHUNK_BYTES`.
+ *
+ * A range module has no business knowing a storage constant, except that it
+ * decides the offsets somebody else has to store. The page keeps whatever this
+ * worker asks for, and only a chunk received *whole* has an address — so reads
+ * that ignore this boundary hand back bytes that cannot be kept, and a file
+ * streamed end to end still never becomes seedable. See [`body`].
+ *
+ * Drift is bounded rather than dangerous: a wrong value here costs seeding and
+ * nothing else, because every chunk is checked against the row's hash before it
+ * is stored.
+ */
+const CHUNK_BYTES = 64 * 1024
+
 /** One file this worker can answer for, as the page registered it. */
 export interface StreamEntry {
   /** Manifest index — what a `READ` addresses. */
@@ -95,7 +110,41 @@ export function parseRange(
  * read loop per scrub running against the peer for the life of the page. The
  * read already in flight cannot be aborted; what this does is stop issuing more,
  * which bounds an abandoned seek at one outstanding chunk.
+ *
+ * # Why the steps end on chunk boundaries
+ *
+ * A window starts wherever the element seeked to, which is almost never a
+ * multiple of [`CHUNK_BYTES`]. Walked in flat [`CHUNK`] steps, every read spans
+ * four chunks and holds three of them whole; the fourth is split across this
+ * read and the next, so the page — which keeps only whole chunks — drops it
+ * twice. Every fourth chunk is then never stored, coverage stops at 75 %, and
+ * the file never becomes servable no matter how long it plays.
+ *
+ * Ending each full step on a boundary costs one short read at the head of a
+ * window and nothing after it. Only the chunk the window's own start cuts
+ * through is lost, and a later `sync` refetches that one for the price of a
+ * chunk.
  */
+/**
+ * How many bytes to ask for at `offset`, capped and boundary-aligned.
+ *
+ * Asked per read from the live offset rather than worked out as a schedule up
+ * front, because a read may answer with fewer bytes than it was given — and the
+ * next one has to align from where the bytes actually stopped.
+ *
+ * The last read of a window is returned unaligned on purpose: its tail is the
+ * end of what was asked for, so trimming it to a boundary would only buy one
+ * more round trip.
+ */
+function step(offset: number, window: Window): number {
+  const remaining = window.end - offset + 1
+  if (remaining <= CHUNK) return remaining
+  const aligned = Math.floor((offset + CHUNK) / CHUNK_BYTES) * CHUNK_BYTES
+  // A full step always clears the next boundary, so this holds — it is here so
+  // that a smaller `CHUNK` can never make the walk stall on a zero-length read.
+  return aligned > offset ? aligned - offset : CHUNK
+}
+
 function body(entry: StreamEntry, window: Window, read: ReadAt, onCancel?: OnCancel) {
   let offset = window.start
   let cancelled = false
@@ -106,8 +155,7 @@ function body(entry: StreamEntry, window: Window, read: ReadAt, onCancel?: OnCan
         controller.close()
         return
       }
-      const want = Math.min(CHUNK, window.end - offset + 1)
-      const chunk = await read(offset, want)
+      const chunk = await read(offset, step(offset, window))
       if (cancelled) return
       if (chunk.length === 0) {
         if (!entry.sourceIsOrigin) {

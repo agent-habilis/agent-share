@@ -13,6 +13,7 @@ import { canGoBack, useShareNav } from '../nav.ts'
 import { Preview } from '../../components/Preview/index.tsx'
 import { SessionChrome } from '../../components/SessionChrome/index.tsx'
 import { useSession } from '../../components/Session/session.ts'
+import { keepsSettled } from '../../lib/keep/index.ts'
 import { previewSegments } from '../../lib/ticket/index.ts'
 import { nodeAtPath } from '../../lib/tree.ts'
 
@@ -20,6 +21,28 @@ export const PreviewPage = component(function* () {
   const session = useSession(this)
   const nav = useShareNav(this)
   const location = useLocation(this)
+
+  /*
+    A preview pulls the whole file through the same reader a download does, so
+    leaving one is the moment those chunks become servable. Abandoning it
+    part-way still leaves the chunks that landed, and those count.
+
+    Hung off unmount rather than off `close`, because `close` is only half the
+    exits: the browser's Back button is a `popstate`, which swaps this
+    component out without ever calling it — and a preview left that way used to
+    hold the whole file and advertise none of it.
+
+    On the page rather than on `Preview`, which remounts per file: publishing
+    recomputes what this tab serves across the whole store, so once on the way
+    out covers every file looked at on the way in.
+
+    Waiting on the keeps is what stops the publish from reading a store the
+    last chunks have not reached yet — they are stored beside the transfer, not
+    inside it.
+  */
+  this.aborted.addEventListener('abort', () => {
+    void keepsSettled().then(() => session.publishHoldings())
+  })
 
   /*
     Cancelling a preview goes *back*, rather than pushing the files view on
@@ -32,10 +55,6 @@ export const PreviewPage = component(function* () {
     only way out of a preview link is the root of the share.
   */
   const close = () => {
-    // A preview pulls the whole file through the same reader a download does,
-    // so leaving one is the moment those chunks become servable. Abandoning
-    // it part-way still leaves the chunks that landed, and those count.
-    session.publishHoldings()
     if (canGoBack()) {
       nav.back()
       return

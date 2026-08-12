@@ -240,6 +240,20 @@ pub struct ShareClient {
     /// scope what it answers for. Learned lazily — one `OP_CHUNK_MAP` per file
     /// somebody actually wants — and kept in the store so a reload re-arms.
     rows: RefCell<HashMap<u32, ChunkMap>>,
+    /// Store keys for the slots of the last manifest seen, by index.
+    ///
+    /// [`Self::keep`] needs one to write a bind, and it used to get it by
+    /// fetching the whole manifest — per call, so once per 256 `KiB`. A
+    /// streamed video issued thousands of those, concurrently and
+    /// fire-and-forget, against the same connection its reads were queued on;
+    /// the reads waited behind them and playback stalled. Refreshed on every
+    /// [`Self::fetch_manifest`], which is as current as anything else here.
+    file_ids: RefCell<HashMap<u32, FileId>>,
+    /// Binds already written, so the second keep for a file skips the store.
+    ///
+    /// The bind is one row per file version, not per chunk; without this every
+    /// keep rewrote the identical record.
+    bound: RefCell<HashMap<u32, Root>>,
     /// The serving half of seeding: the mount-protocol source registered on
     /// the mesh Router at connect, fed by [`Self::sync`] /
     /// [`Self::refresh_held`]. Empty until the first sync, and an empty
@@ -353,6 +367,8 @@ fn new_share_client(
         store: RefCell::new(None),
         card: Rc::new(RefCell::new(CardHoldings::default())),
         rows: RefCell::new(HashMap::new()),
+        file_ids: RefCell::new(HashMap::new()),
+        bound: RefCell::new(HashMap::new()),
         seeder: seed::SeederShared::new(),
         from_origin: true,
         pinned_tree: None,
@@ -1285,6 +1301,16 @@ impl ShareClient {
         // note on the `mesh` field.
         let fingerprint = agent_share_proto::manifest::manifest_fingerprint(&fetched.body);
         *self.last_tree.borrow_mut() = Some(fingerprint.clone());
+        // Recorded here because this is the one place holding a fresh manifest
+        // anyway. It is what lets `keep` write a bind without asking the
+        // network for a tree it has already been told about.
+        *self.file_ids.borrow_mut() = fetched
+            .manifest
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (index as u32, file_id(entry)))
+            .collect();
         if let Some(mesh) = self.mesh_peer() {
             mesh.set_tree(fingerprint).await;
         }
@@ -1502,12 +1528,14 @@ impl ShareClient {
     ///
     /// `offset` is where `bytes` sit in the file at `index`. Only chunks lying
     /// **wholly** inside the supplied range are kept — a partial chunk cannot
-    /// be addressed, so it is dropped rather than stored under a guess. Feeding
-    /// sequential 256 `KiB` pieces from the start therefore keeps every one of
-    /// them, since that is exactly four aligned chunks.
+    /// be addressed, so it is dropped rather than stored under a guess. Callers
+    /// are expected to read on chunk boundaries; the download path does so by
+    /// walking from zero, and the streaming worker arranges it in `step`.
     ///
     /// Cheap to call and safe to ignore: a failure here costs seeding, never
-    /// the transfer that produced the bytes.
+    /// the transfer that produced the bytes. Cheap is load-bearing — this runs
+    /// once per 256 `KiB`, fire-and-forget, so anything it touches lands
+    /// thousands deep and concurrently on the connection the reads share.
     ///
     /// # Errors
     /// Storage is unavailable. A verification mismatch is *not* an error — it
@@ -1522,11 +1550,20 @@ impl ShareClient {
         self.store_row_and_chunks(store.as_ref(), index, &row, offset, &bytes)
             .await?;
         // Bind the row to this file version, or a reload would find a store
-        // full of chunks and no way to tell which file they belong to.
-        if let Ok(FetchedManifest { manifest, .. }) = self.fetch_manifest().await
-            && let Some(entry) = manifest.files.get(index as usize)
+        // full of chunks and no way to tell which file they belong to. Read
+        // from the memo rather than a manifest fetch: the bind is one record
+        // per file, and paying a round trip per 256 `KiB` to rewrite it was
+        // costing more than the bytes it was bookkeeping for.
+        if self.bound.borrow().get(&index) == Some(&row.root()) {
+            return Ok(());
+        }
+        let known = self.file_ids.borrow().get(&index).cloned();
+        if let Some(id) = known
+            && store.set_bind(&id, row.root()).await.is_ok()
         {
-            let _ = store.set_bind(&file_id(entry), row.root()).await;
+            // Remembered only once it is written, so a refused store is retried
+            // by the next keep rather than assumed done.
+            self.bound.borrow_mut().insert(index, row.root());
         }
         Ok(())
     }
@@ -1629,7 +1666,10 @@ impl ShareClient {
         bytes: &[u8],
     ) -> Result<(), JsValue> {
         let end = offset.saturating_add(bytes.len() as u64);
-        for position in 0..row.len() {
+        // Only the positions this range can possibly touch. Walking the whole
+        // row meant every 256 `KiB` swept every chunk of the file — quadratic in
+        // the file's size, and this now runs once per read on a streamed video.
+        for position in row.indices_for(offset, bytes.len() as u64) {
             let range = row.range_of(position);
             // Wholly inside, or not at all: half a chunk has no address.
             if range.start < offset || range.end > end {

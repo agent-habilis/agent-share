@@ -16,14 +16,16 @@
 
 import {
   STREAM_PREFIX,
+  type ReadMessage,
   type ReadReply,
   type WhoOwnsMessage,
   type WorkerMessage,
 } from '../../service-worker/protocol.ts'
+import { keepChunks, type Keeper } from '../keep/index.ts'
 import type { StreamEntry } from './range.ts'
 
 /** What a caller needs to read one file. */
-export interface StreamReader {
+export interface StreamReader extends Keeper {
   read(index: number, offset: bigint, len: number): Promise<Uint8Array>
   readonly source_is_origin?: boolean
 }
@@ -32,6 +34,50 @@ export interface StreamReader {
 export interface Stream {
   readonly url: string
   release(): void
+}
+
+/** How a reply reaches the worker. A port's `postMessage`, in production. */
+export type Reply = (message: ReadReply, transfer?: Transferable[]) => void
+
+/**
+ * Answer one `read` from the worker: fetch the bytes, send them, keep them.
+ *
+ * Top-level rather than a closure inside [`openStream`] so it can be tested at
+ * all — everything in this file that touches a registration needs a
+ * `ServiceWorkerGlobalScope`, and the suite has none.
+ *
+ * # Keeping is what makes a preview seed
+ *
+ * A streamed preview pulls exactly the bytes a download does, over the same
+ * connection. Without this call it read the whole file and threw all of it
+ * away, so a tab that had just watched a video advertised none of it and
+ * pressing Seed fetched it a second time.
+ *
+ * The order is deliberate. The reply goes first, so storing never sits between
+ * the worker asking and the element receiving; and the keep is outside the
+ * `try`, so a full quota can never turn a good read into an `error` reply and
+ * break playback over bookkeeping.
+ */
+export async function answerRead(
+  reader: StreamReader,
+  message: ReadMessage,
+  reply: Reply,
+): Promise<void> {
+  let bytes: Uint8Array
+  try {
+    bytes = await reader.read(message.index, BigInt(message.offset), message.len)
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error)
+    reply({ type: 'error', reqId: message.reqId, message: text })
+    return
+  }
+  // Copied out of the wasm heap before transfer: a view onto wasm memory cannot
+  // be detached, and the copy is what makes the hand-off zero-cost on the
+  // receiving side. `bytes` is untouched by the transfer, which is what leaves
+  // it readable below.
+  const buffer = bytes.slice().buffer
+  reply({ type: 'bytes', reqId: message.reqId, bytes: buffer }, [buffer])
+  keepChunks(reader, message.index, message.offset, bytes)
 }
 
 /** Registration is attempted once per page; the promise is the memo. */
@@ -131,23 +177,11 @@ export async function openStream(
       cancelled.add(message.reqId)
       return
     }
-    void answer(message.reqId, message.index, message.offset, message.len)
-  }
-
-  async function answer(reqId: number, index: number, offset: number, len: number) {
-    const reply = (message: ReadReply, transfer: Transferable[] = []) => {
-      channel.port1.postMessage(message, transfer)
-    }
-    try {
-      const bytes = await reader.read(index, BigInt(offset), len)
-      // Copied out of the wasm heap before transfer: a view onto wasm memory
-      // cannot be detached, and the copy is what makes the hand-off zero-cost
-      // on the receiving side.
-      const buffer = bytes.slice().buffer
-      reply({ type: 'bytes', reqId, bytes: buffer }, [buffer])
-    } catch (error) {
-      reply({ type: 'error', reqId, message: error instanceof Error ? error.message : String(error) })
-    }
+    // Read through the live `channel`, not a captured one: recovery below
+    // swaps it for a fresh port when the worker restarts.
+    void answerRead(reader, message, (out, transfer = []) => {
+      channel.port1.postMessage(out, transfer)
+    })
   }
 
   active.postMessage({ type: 'register', id, entry: full }, [channel.port2])
