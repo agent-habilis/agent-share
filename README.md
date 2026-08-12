@@ -82,6 +82,13 @@ browser connects straight to the producer. Session info is at
 The ticket is a bearer capability in the path so those views are ordinary
 shareable URLs. The static host must fall back to `index.html` for deep links.
 
+### Driving it with an agent
+
+The page publishes its own actions — open a share, list it, read a file, seed
+it, publish one — as [WebMCP](https://webmachinelearning.github.io/webmcp/)
+tools, so an agent can use the browser as its runtime and install nothing. Needs
+Chrome 150+ and `chrome-devtools-mcp`; see [docs/webmcp.md](docs/webmcp.md).
+
 ### How a browser reaches a peer behind NAT
 
 Two connections, and the split is load-bearing:

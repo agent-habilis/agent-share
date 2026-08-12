@@ -5,6 +5,7 @@
 // First, before anything can build a Disposable. See the file for why.
 import '../compat.ts'
 
+import { createShareDirectory, removeShareDirectory, writeOpfsFile } from '../lib/opfs/index.ts'
 import { buildPeerCard } from '../lib/peerCard/index.ts'
 import { startProducer as startShareProducer, type ShareProducer } from '../lib/produce.ts'
 import { parseShareInput } from '../lib/ticket/index.ts'
@@ -93,16 +94,8 @@ async function stopProducer(
 }
 
 /**
- * A folder full of files, with no user gesture.
- *
- * `showDirectoryPicker()` is the app's way in and it requires a gesture, which
- * is why browser-side producing had no automated coverage at all. The origin
- * private file system is the same File System Access API without the picker:
- * `navigator.storage.getDirectory()` hands back a real
- * `FileSystemDirectoryHandle`, and `getFileHandle(…, {create: true})` real
- * `FileSystemFileHandle`s — which matters, because the wasm checks the type
- * (`parse_listing` does a `dyn_into::<FileSystemFileHandle>()`), so an object
- * that merely has `getFile()` is refused.
+ * A folder full of files, with no user gesture. See `lib/opfs` for why this
+ * works and what it costs.
  *
  * The tree deliberately includes a nested directory and a zero-byte file. Both
  * are shapes the manifest treats specially — a directory entry that has to
@@ -119,47 +112,21 @@ async function opfsShareRoot(
   handle: FileSystemDirectoryHandle
   name: string
 }> {
-  const storage = navigator.storage
-  if (typeof storage?.getDirectory !== 'function') {
-    throw new Error('this browser has no origin private file system')
-  }
   // Logged step by step: every one of these can hang or be denied depending on
   // the profile and the storage policy the browser was launched with, and a
   // silent stall here is indistinguishable from a slow producer.
   log('opening the origin private file system…')
-  const opfs = await storage.getDirectory()
-  log('opfs root acquired')
-  // Unique per run, and removed on stop. OPFS is per-origin and outlives a
-  // reload, so a fixed name would accumulate files across runs and quietly
-  // change what a later run serves.
-  const name = `lab-share-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const handle = await opfs.getDirectoryHandle(name, { create: true })
+  const { handle, name } = await createShareDirectory('lab-share')
   log(`directory ${name} created`)
 
-  await writeFile(handle, 'blob.bin', 'x'.repeat(64 * 1024))
+  await writeOpfsFile(handle, 'blob.bin', 'x'.repeat(64 * 1024))
   log('blob.bin written')
-  await writeFile(handle, 'empty.txt', '')
-  const nested = await handle.getDirectoryHandle('nested', { create: true })
-  await writeFile(nested, 'deep.txt', 'nested file\n')
+  await writeOpfsFile(handle, 'empty.txt', '')
+  await writeOpfsFile(handle, 'nested/deep.txt', 'nested file\n')
   for (let index = 0; index < count; index += 1) {
-    await writeFile(handle, `f${String(index).padStart(3, '0')}.txt`, `file ${index}\n`)
+    await writeOpfsFile(handle, `f${String(index).padStart(3, '0')}.txt`, `file ${index}\n`)
   }
   return { handle, name }
-}
-
-/** Write `text` to `name` under `dir`, creating it. */
-async function writeFile(
-  dir: FileSystemDirectoryHandle,
-  name: string,
-  text: string,
-): Promise<void> {
-  const file = await dir.getFileHandle(name, { create: true })
-  if (typeof file.createWritable !== 'function') {
-    throw new Error('this browser cannot write to the origin private file system')
-  }
-  const writable = await file.createWritable()
-  await writable.write(text)
-  await writable.close()
 }
 
 /**
@@ -213,13 +180,8 @@ async function stopShare(
   stopBtn.disabled = true
   copyBtn.disabled = true
   await current.producer.stop()
-  // Best effort: a directory left behind costs disk, not correctness, and
-  // failing the stop over it would be the worse trade.
-  try {
-    const opfs = await navigator.storage.getDirectory()
-    await opfs.removeEntry(current.root, { recursive: true })
-  } catch (error) {
-    log('could not remove the OPFS directory', jsError(error))
+  if (!(await removeShareDirectory(current.root))) {
+    log('could not remove the OPFS directory')
   }
   log('stopped')
 }

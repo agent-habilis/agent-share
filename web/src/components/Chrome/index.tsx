@@ -1,6 +1,8 @@
 import { Stack, Text, t } from 'moonspace-dom'
 import type { Child } from 'visage-dom'
 
+import { AgentBadge } from '../AgentBadge/index.tsx'
+
 /**
  * App chrome: top bar on the sunken page background + content surface on `bg`
  * (same split as the file browser). `belowBar` is optional status under the
@@ -79,6 +81,13 @@ export function Chrome({
                 <Text color="fgMuted">{crumb}</Text>
               </>
             ) : null}
+            {/*
+              Beside the brand rather than out with the actions: it says
+              something about the whole page, not about what you can do next,
+              and it must not move the action row when it appears. It renders
+              nothing until an agent has actually called a tool.
+            */}
+            <AgentBadge />
           </Stack>
           {center ? (
             // `overflow: hidden` so a window too narrow for everything clips

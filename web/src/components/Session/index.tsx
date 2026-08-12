@@ -14,7 +14,7 @@
  */
 
 import { Text } from 'moonspace-dom'
-import { component, computed, interval, signal } from 'visage-dom'
+import { component, computed, disposable, interval, signal } from 'visage-dom'
 import { Outlet, useLocation, useParams } from 'visage-router'
 
 import { jittered, revivalOriginCapMs } from './backoff/index.ts'
@@ -32,6 +32,7 @@ import { ColumnView } from '../ColumnView/index.tsx'
 import { FailedBody, type FailureKind } from '../FailedBody/index.tsx'
 import { LoadingBody } from '../LoadingBody/index.tsx'
 import { PasswordGate } from '../PasswordGate/index.tsx'
+import { publishAgentSession } from '../../lib/agentTools/index.ts'
 import { useShareNav } from '../../pages/nav.ts'
 import {
   clientKey,
@@ -59,7 +60,7 @@ import {
   type MountSession,
   type SyncedState,
 } from '../../lib/mount/index.ts'
-import { parseTransport, type TransportMode } from '../../lib/ticket/index.ts'
+import { parseRoute, parseTransport, type TransportMode } from '../../lib/ticket/index.ts'
 import type { TransferSnapshot } from '../../lib/transferStats/index.ts'
 import {
   buildTree,
@@ -117,6 +118,8 @@ const Session = component<{
   // Nested plain functions below capture `ctx`; `this` would not reach them.
   const ctx = this
   const nav = useShareNav(this)
+  // Read by the agent bridge below, to say which view is on screen.
+  const sessionLocation = useLocation(this)
   const state = signal<State>({ phase: 'connecting' })
   const path = signal<string[]>([])
   const transfer = signal<Transfer | null>(null)
@@ -871,6 +874,62 @@ const Session = component<{
   // Before the first yield: context only reaches children mounted after it,
   // and the outlet below is one of them.
   this.provide(SessionCtx, api)
+
+  /*
+    The same session, in the shape an agent is allowed to drive.
+
+    Published for as long as this component is mounted, and withdrawn when it
+    is not — which is what lets the interface tools answer "no share page is
+    open" honestly on `/` instead of opening one nobody asked for.
+
+    Deliberately a separate, narrower object rather than `api` itself. `api` is
+    the pages' full view of the session, signals and all; this names only the
+    handful of moves an agent may make, so widening what an agent can reach is
+    a decision taken here rather than a side effect of adding a field above.
+  */
+  using _agentBridge = disposable(
+    publishAgentSession({
+      ticket: props.ticket,
+      selection: () => [...path.peek()],
+      select: (next) => {
+        path.value = next
+      },
+      view: () => parseRoute(sessionLocation.peek().pathname, sessionLocation.peek().search)?.view ?? 'files',
+      openView: (view, file) => {
+        // Only `preview` takes a path. A trailing segment on `files` or `info`
+        // is not a route at all — `parseRoute` rejects it — so the router would
+        // fall through to home, unmounting this session and taking the bridge
+        // with it. An agent switching views while a file was selected did
+        // exactly that.
+        const carry = view === 'preview' && file && file.length > 0 ? { file } : undefined
+        nav.go(props.ticket, view, carry)
+      },
+      status: () => api.status.peek(),
+      mounted: () => mounted.peek(),
+      transfer: () => {
+        const active = transfer.peek()
+        return active
+          ? { kind: active.kind, done: active.progress.done, total: active.progress.total }
+          : null
+      },
+      errors: () => ({
+        download: downloadError.peek(),
+        mount: mountError.peek(),
+        seed: seedError.peek(),
+      }),
+      // An empty selection means the whole share, matching what the buttons do
+      // when nothing is picked.
+      download: () => {
+        if (path.peek().length > 0) void downloadSelected()
+        else void downloadAll()
+      },
+      mount: () => void mount(),
+      seed: () => {
+        if (path.peek().length > 0) void seedSelected()
+        else void seedShare()
+      },
+    }),
+  )
 
   yield () => {
     const current = state.value
