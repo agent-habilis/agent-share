@@ -18,6 +18,7 @@ mod release;
 mod run;
 mod test;
 mod util;
+mod web_image;
 mod web_wasm;
 
 /// Task result; any `Err` is printed and turns into a non-zero exit.
@@ -119,6 +120,30 @@ enum Task {
     Proptest,
     /// Build the browser/Node wasm client into its `dist/{web,nodejs}`.
     WebWasm,
+    /// Build `web/` into a container image — Bun serving the static `dist/` —
+    /// and push it to the self-hosted Gitea registry. Hermetic: the image
+    /// rebuilds the wasm from source, so nothing on this machine leaks into it
+    /// and no `web-wasm` run is needed first.
+    WebImage {
+        /// Image tag. Defaults to the short commit sha, marked `-dirty` when
+        /// the tree has uncommitted changes. `latest` is always tagged and
+        /// pushed alongside it.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Registry host.
+        #[arg(long, default_value = "srvc-gitea.tetra-ostrich.ts.net")]
+        registry: String,
+        /// Gitea user or org that owns the package.
+        #[arg(long, default_value = "caiogondim")]
+        owner: String,
+        /// Build only — skip both pushes.
+        #[arg(long)]
+        no_push: bool,
+        /// Target platform. The homelab and this Mac are both arm64, so nothing
+        /// here emulates; changing it pulls in qemu and gets slow.
+        #[arg(long, default_value = "linux/arm64")]
+        platform: String,
+    },
     /// Internal: cargo-zigbuild's `zig cc`/`c++`/`ar` shim. cargo-zigbuild's
     /// cross-link wrapper re-execs THIS binary as `<exe> zig …` (it resolves
     /// itself via `current_exe()`), so the cross build in `build` can only link
@@ -183,6 +208,22 @@ fn main() -> ExitCode {
         Task::Man => man::run(),
         Task::Proptest => proptest::run(&sh),
         Task::WebWasm => web_wasm::run(&sh),
+        Task::WebImage {
+            tag,
+            registry,
+            owner,
+            no_push,
+            platform,
+        } => web_image::run(
+            &sh,
+            &web_image::Options {
+                tag,
+                registry,
+                owner,
+                no_push,
+                platform,
+            },
+        ),
         Task::Zig(zig) => zig
             .execute()
             .map_err(|err| -> Box<dyn std::error::Error> { err.into() }),

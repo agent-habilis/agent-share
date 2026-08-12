@@ -9,9 +9,17 @@
  * cannot serve yesterday's build under today's URL. See `wasm-asset.ts`.
  */
 
+import { buildWasm } from './build-wasm.ts'
 import { brotli, syncGlue, wasmAsset, writeWasmPath } from './wasm-asset.ts'
 
 await Bun.$`rm -rf dist`
+
+// Every build, not only when the binary is missing: cargo is incremental and is
+// the only thing that knows whether the crate moved, so an up-to-date tree costs
+// about a second — while the alternative is bundling yesterday's wasm after a
+// Rust edit, which is the exact staleness the content-addressed name exists to
+// prevent.
+await buildWasm()
 
 // Before the bundle: `src/wasm/index.ts` imports the generated path and the
 // glue mirror, so both have to be correct on disk by the time Bun reads the

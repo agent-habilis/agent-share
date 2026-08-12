@@ -134,17 +134,34 @@ measure it — not as a transport to choose.
 ### Building
 
 ```
-cargo task web-wasm          # crates/agent-share-wasm-client/dist/{web,nodejs}
-cd web && bun install && bun run dev
+cd web && bun install && bun run build
 ```
 
 `web/` is the browser app, `node/` the `npx agent-share <ticket>` receiver.
 Both consume the same `.wasm`; only the wasm-bindgen glue differs.
 
+`bun run build` builds that wasm too, through `web/scripts/build-wasm.ts` — so
+it needs the `wasm32-unknown-unknown` target, the `wasm-bindgen` CLI, and a
+clang that can emit wasm32 (`brew install llvm` on macOS; Apple's has no wasm
+backend). It says which one is missing. `cargo task web-wasm` runs the same
+script when only the binary is wanted.
+
 `bun run dev` serves at `https://agent-share.localhost` — a name instead of a
-contended port, via [portless](https://github.com/vercel-labs/portless).
-`bun run build && bun run start` is the production pair: `start` serves the
-built `dist/` on `PORT`.
+contended port, via [portless](https://github.com/vercel-labs/portless) — and
+expects the wasm to exist already. `bun run build && bun run start` is the
+production pair: `start` serves the built `dist/` on `PORT`, with the same
+routing the deployed image uses (`web/scripts/serve.ts`).
+
+### Deploying
+
+```
+cargo task web-image         # build linux/arm64, push to the Gitea registry
+```
+
+The image is Bun serving `dist/`, and it rebuilds the wasm from source rather
+than copying a local `dist/`, so it cannot ship a stale binary. `deploy/compose.yaml`
+is what runs on the host — read its header first: the app needs a secure context
+(HTTPS or localhost) or media previews silently lose the ability to seek.
 
 Note `npx` needs a native WebRTC addon (`node-datachannel`), because Node has
 no `RTCPeerConnection` and the relay will not carry data. The native binary

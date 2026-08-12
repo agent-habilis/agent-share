@@ -1,0 +1,41 @@
+# The web app on the homelab. Copy this file to the host and
+# `docker compose up -d`, after `docker login srvc-gitea.tetra-ostrich.ts.net`.
+#
+# The image is built for linux/arm64 only — `cargo task web-image` on an Apple
+# Silicon machine, no emulation. An amd64 host will refuse it with "no matching
+# manifest".
+#
+# The port is bound to loopback deliberately. A service worker only exists in a
+# secure context, so a browser reaching this over plain http on a LAN address
+# gets `navigator.serviceWorker === undefined`, and the app's `openStream`
+# quietly returns null: no error, just no Range answering, so video cannot seek
+# and large files buffer whole or fail. Terminate TLS in front of it — on this
+# tailnet that is one command, and the cert is real:
+#
+#   sudo tailscale serve --bg --https=443 http://127.0.0.1:3000
+#
+# (`serve` keeps it tailnet-only; `funnel` would publish it to the internet.)
+
+services:
+  agent-share-web:
+    image: srvc-gitea.tetra-ostrich.ts.net/caiogondim/agent-share-web:latest
+    container_name: agent-share-web
+    restart: unless-stopped
+    pull_policy: always
+    environment:
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:3000:3000"
+    # Nothing is written at runtime: the server only reads `dist/`.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
