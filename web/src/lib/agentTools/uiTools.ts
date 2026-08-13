@@ -166,10 +166,13 @@ const shareOpenView: ModelContextTool = {
 /**
  * Run a fire-and-forget UI action and report what happened to it.
  *
- * The actions do not return anything — they set signals the bar renders — so
- * this triggers one, gives it a moment to fail, and reads the result back. A
- * refused picker lands in `errors()` well inside that window; a transfer that
- * started is visible in `transfer()`.
+ * The actions do not return anything — they set the signals `Session` keeps of
+ * what last went wrong — so this triggers one, gives it a moment to fail, and
+ * reads the result back. A refused picker lands in `errors()` well inside that
+ * window; a transfer that started is visible in `transfer()`.
+ *
+ * Deliberately not the toast on the top bar, which is the same failure said to
+ * the person and clears itself after a few seconds. These signals outlive it.
  */
 async function settle(
   session: AgentSession,

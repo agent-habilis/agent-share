@@ -78,15 +78,38 @@ pub(crate) fn run(sh: &Shell, opts: &Options) -> TaskOutcome {
     Ok(())
 }
 
+/// What ends up in the image. The `Dockerfile`'s `COPY` set, plus the two files
+/// that decide what those copies see.
+///
+/// `tasks/` is copied by the `Dockerfile` and still left out: it is there only so
+/// the root workspace's `members` list resolves, nothing in the image compiles
+/// it, and the runtime stage takes `dist/` and `serve.js` alone. Watching it
+/// would mark every push dirty while this very file was being edited, which is
+/// the false alarm the list exists to avoid.
+const BUILD_INPUTS: &[&str] = &[
+    "Dockerfile",
+    ".dockerignore",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo",
+    "rust-toolchain.toml",
+    "crates",
+    "web",
+];
+
 /// The commit this image was built from, marked `-dirty` when the working tree
 /// does not match it.
 ///
 /// A sha tag that does not identify a tree is worse than no tag at all: it is
 /// the one reached for during a rollback, and it would restore something that
-/// was never committed.
+/// was never committed. Asked of [`BUILD_INPUTS`] rather than the whole
+/// tree, because `git status` counts untracked files and most of the repo never
+/// reaches the image: an untracked note under `docs/` would mark the tag dirty
+/// while `.dockerignore` was busy dropping it, and a suffix that cries wolf is
+/// one a rollback learns to ignore.
 fn default_tag(sh: &Shell) -> Result<String, Box<dyn std::error::Error>> {
     let sha = cmd!(sh, "git rev-parse --short HEAD").quiet().read()?;
-    let dirty = !cmd!(sh, "git status --porcelain")
+    let dirty = !cmd!(sh, "git status --porcelain -- {BUILD_INPUTS...}")
         .quiet()
         .read()?
         .trim()

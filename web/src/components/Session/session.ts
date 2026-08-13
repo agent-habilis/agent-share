@@ -28,6 +28,19 @@ export interface RateSample {
   readonly down: number
 }
 
+export type ToastTone = 'error' | 'warning'
+
+/**
+ * Something gone wrong, on its way to the top bar.
+ *
+ * One at a time, and the newest wins: the bar has one row to give, and a queue
+ * of stale failures is not worth the rows it would cost.
+ */
+export interface ToastMessage {
+  readonly tone: ToastTone
+  readonly message: string
+}
+
 /** What the top bar says while `kind` is in flight. */
 export function transferLabel(kind: Transfer['kind']): string {
   return kind === 'download' ? 'downloading' : kind === 'mounting' ? 'mounting' : 'syncing'
@@ -79,6 +92,15 @@ export interface SessionApi {
   /** The session sampler's tick, for views that re-read the client each one. */
   readonly tick: ReadonlySignal<number>
   readonly seeding: ReadonlySignal<boolean>
+  /**
+   * The last failure or notice, for as long as it is worth showing.
+   *
+   * Separate from the three error signals below, and deliberately: those are
+   * the record of what went wrong last, read by the Info panel and by the agent
+   * bridge long after the person has waved the message away. This is only what
+   * is on screen.
+   */
+  readonly toast: ReadonlySignal<ToastMessage | null>
   readonly mountError: ReadonlySignal<string | null>
   readonly downloadError: ReadonlySignal<string | null>
   readonly seedError: ReadonlySignal<string | null>
@@ -101,6 +123,8 @@ export interface SessionApi {
    * exactly one — so it raises a flag the sampler reads.
    */
   readonly wantsPeerIps: Signal<boolean>
+  /** Take the message off the bar. Does not forget what went wrong. */
+  dismissToast(): void
   /** Take the whole share, to a file the user picks. */
   downloadAll(): void
   /** Fetch the whole share into local storage so this tab can seed it. */

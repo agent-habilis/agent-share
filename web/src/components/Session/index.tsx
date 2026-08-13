@@ -13,8 +13,8 @@
  * ticket change, which is exactly what must not happen.
  */
 
-import { Text } from 'moonspace-dom'
 import { component, computed, disposable, interval, signal } from 'visage-dom'
+import type { Signal } from 'visage-dom'
 import { Outlet, useLocation, useParams } from 'visage-router'
 
 import { jittered, revivalOriginCapMs } from './backoff/index.ts'
@@ -25,6 +25,8 @@ import {
   type RateSample,
   type SessionApi,
   type SessionReady,
+  type ToastMessage,
+  type ToastTone,
   type Transfer,
 } from './session.ts'
 import { Chrome } from '../Chrome/index.tsx'
@@ -32,7 +34,9 @@ import { ColumnView } from '../ColumnView/index.tsx'
 import { FailedBody, type FailureKind } from '../FailedBody/index.tsx'
 import { LoadingBody } from '../LoadingBody/index.tsx'
 import { PasswordGate } from '../PasswordGate/index.tsx'
+import { Toast } from '../Toast/index.tsx'
 import { publishAgentSession } from '../../lib/agentTools/index.ts'
+import { describe } from '../../lib/agentTools/result.ts'
 import { useShareNav } from '../../pages/nav.ts'
 import {
   clientKey,
@@ -53,7 +57,6 @@ import {
 import {
   disposeMount,
   emptySyncedState,
-  MountError,
   pickMountRoot,
   shareStamp,
   syncMount,
@@ -102,6 +105,16 @@ const HOLDINGS_REPAINT_MS = 1_000
  * notices.
  */
 const HISTORY_TICKS = 60
+
+/**
+ * How long a message holds the top bar before it gives it back.
+ *
+ * It is holding the action row hostage the whole time — that is the price of
+ * never adding a second row — so this is long enough to read a browser's own
+ * wording twice and no longer. The close button is there for the impatient, and
+ * the console keeps every message for anyone who looked away.
+ */
+const TOAST_MS = 8_000
 
 /** Fall back to the deepest prefix that still exists in the manifest. */
 function prunePath(current: string[], manifest: Manifest): string[] {
@@ -186,6 +199,94 @@ const Session = component<{
   /** Set by the Info page while it is mounted. See `SessionApi.wantsPeerIps`. */
   const wantsPeerIps = signal(false)
 
+  /**
+   * What the top bar is saying instead of itself. See `Toast`.
+   *
+   * It clears itself because it costs the action row to stay: the bar has one
+   * row, so a message nobody waves away hides `Download` for as long as the tab
+   * is open. Long enough to read a browser's own sentence, and no longer.
+   *
+   * Nothing on screen outlives it except `mountError`, which the Info panel
+   * shows as `last error`. The console is where all three are kept.
+   */
+  const toast = signal<ToastMessage | null>(null)
+  let hideTimer: ReturnType<typeof setTimeout> | undefined
+
+  /**
+   * Put a message on the bar, and the same message on the console.
+   *
+   * Both, always. The bar is for the person and clears itself after a few
+   * seconds; the console is the copy that is still there when someone comes to
+   * ask what happened. `cause` is the error object where there is one — the
+   * console is the only one of the two that can keep it, stack and all, and the
+   * stack is what names the action that failed.
+   */
+  function raiseToast(tone: ToastTone, message: string, cause?: unknown): void {
+    toast.value = { tone, message }
+    if (cause === undefined) console.warn(`[share] ${message}`)
+    else console.warn(`[share] ${message}`, cause)
+    clearTimeout(hideTimer)
+    hideTimer = setTimeout(() => (toast.value = null), TOAST_MS)
+  }
+
+  function dismissToast(): void {
+    clearTimeout(hideTimer)
+    toast.value = null
+  }
+
+  ctx.aborted.addEventListener('abort', () => clearTimeout(hideTimer))
+
+  /**
+   * An action failed: say so on the bar, on the console, and to the agent.
+   *
+   * The signal is the third of those and the one that lasts: the Info panel's
+   * `last error` and the WebMCP bridge's `errors()` both read it long after the
+   * toast has gone — which is how `shareDownload` can tell an agent the browser
+   * refused its picker.
+   */
+  function reportFailure(last: Signal<string | null>, error: unknown): void {
+    const message = describe(error)
+    last.value = message
+    raiseToast('error', message, error)
+  }
+
+  /**
+   * Say once that the peer's manifest named paths we refuse to write.
+   *
+   * Once, not once per manifest: `watch` re-delivers the listing whenever the
+   * producer touches a file, and a notice that reappears every time is a notice
+   * that gets dismissed without being read. Only a change in the count is new
+   * information.
+   */
+  let lastSkipped = 0
+  function noteSkipped(skipped: number): void {
+    if (skipped === lastSkipped) return
+    lastSkipped = skipped
+    if (skipped === 0) return
+    raiseToast('warning', `${skipped} entries hidden — unsafe paths in the peer's manifest`)
+  }
+
+  /**
+   * `buildTree`, but at most once per manifest.
+   *
+   * Three readers want the same tree — the `tree` computed the pages render,
+   * the offline one, and the mount sync — and a delivery replaces the manifest
+   * object wholesale, so its identity is a sound key. It also gives the callers
+   * that hold a manifest a way to read the tree *now*: a computed cannot serve
+   * them, because a write only marks its dependents stale on the next
+   * microtask, so `tree.peek()` on the line after `state.value = …` still
+   * answers for the manifest before it.
+   */
+  let treeFrom: Manifest | null = null
+  let treeBuilt: ReturnType<typeof buildTree> | null = null
+  function treeOf(manifest: Manifest): ReturnType<typeof buildTree> {
+    if (manifest !== treeFrom) {
+      treeFrom = manifest
+      treeBuilt = buildTree(manifest)
+    }
+    return treeBuilt!
+  }
+
   /*
     The app's single sampler.
 
@@ -261,7 +362,7 @@ const Session = component<{
         const latest = state.peek()
         if (latest.phase !== 'ready' || mountSession.peek() !== session) break
         if (abort.signal.aborted) break
-        const latestTree = buildTree(latest.manifest)
+        const latestTree = treeOf(latest.manifest)
         const latestFiles = filesUnder(latestTree.root)
         transfer.value = { kind: pass, progress: { done: 0, total: 0 }, abort }
         synced = await syncMount(
@@ -291,7 +392,7 @@ const Session = component<{
       if (error instanceof DOMException && error.name === 'AbortError') {
         if (label === 'mounting') await clearMount()
       } else if (!ctx.aborted.aborted) {
-        mountError.value = error instanceof MountError ? error.message : String(error)
+        reportFailure(mountError, error)
         await clearMount()
       }
     } finally {
@@ -328,6 +429,7 @@ const Session = component<{
       if (ctx.aborted.aborted || !manifest) return
       if (state.peek().phase === 'connecting') {
         offlineManifest.value = manifest as Manifest
+        noteSkipped(treeOf(manifest as Manifest).skipped)
       }
     })
     .catch(() => {
@@ -363,8 +465,15 @@ const Session = component<{
     if (ctx.aborted.aborted) return
     const manifest = await client.manifest()
     if (ctx.aborted.aborted) return
-    path.value = prunePath(path.peek(), manifest)
-    state.value = { phase: 'ready', client, manifest }
+
+    /** Put a delivered listing on screen — the first one and every later one. */
+    const show = (next: Manifest): void => {
+      path.value = prunePath(path.peek(), next)
+      state.value = { phase: 'ready', client, manifest: next }
+      noteSkipped(treeOf(next).skipped)
+    }
+
+    show(manifest)
     // The live tree owns the screen now; the peeked one has done its job.
     offlineManifest.value = null
     // What survived a previous visit. Reads storage without creating any, so
@@ -376,8 +485,7 @@ const Session = component<{
     })
     await client.watch((next) => {
       if (ctx.aborted.aborted) return
-      path.value = prunePath(path.peek(), next)
-      state.value = { phase: 'ready', client, manifest: next }
+      show(next)
       if (mountSession.peek()) void runSync('syncing')
     })
   }
@@ -583,7 +691,7 @@ const Session = component<{
 
   const tree = computed(() => {
     const current = state.value
-    return current.phase === 'ready' ? buildTree(current.manifest) : null
+    return current.phase === 'ready' ? treeOf(current.manifest) : null
   })
 
   async function downloadFiles(files: FileNode[], baseName: string): Promise<void> {
@@ -608,7 +716,7 @@ const Session = component<{
     } catch (error) {
       // User dismissed the picker — not an error worth surfacing.
       if (error instanceof DOMException && error.name === 'AbortError') return
-      downloadError.value = error instanceof Error ? error.message : String(error)
+      reportFailure(downloadError, error)
       return
     }
 
@@ -638,9 +746,7 @@ const Session = component<{
       // a connection expired while the tab was backgrounded) reached nobody.
       const cancelled =
         abort.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')
-      if (!cancelled) {
-        downloadError.value = error instanceof Error ? error.message : String(error)
-      }
+      if (!cancelled) reportFailure(downloadError, error)
     } finally {
       untrack()
       if (transfer.peek()?.kind === 'download') transfer.value = null
@@ -736,8 +842,7 @@ const Session = component<{
       // that must cost seeding rather than the share. Surfaced rather than
       // logged: a Seed button that silently does nothing is worse than one
       // that says why.
-      seedError.value = String(error)
-      console.warn('[share] sync failed', error)
+      reportFailure(seedError, error)
     } finally {
       untrack()
       seeding.value = false
@@ -801,7 +906,7 @@ const Session = component<{
     } catch (error) {
       // User dismissed the picker — not an error worth surfacing.
       if (error instanceof DOMException && error.name === 'AbortError') return
-      mountError.value = error instanceof MountError ? error.message : String(error)
+      reportFailure(mountError, error)
       await clearMount()
     }
   }
@@ -843,6 +948,7 @@ const Session = component<{
     lastActivityAt,
     tick,
     seeding,
+    toast,
     mountError,
     downloadError,
     seedError,
@@ -859,6 +965,7 @@ const Session = component<{
             : 'ready'
     }),
     wantsPeerIps,
+    dismissToast,
     downloadAll: () => void downloadAll(),
     seedShare: () => void seedShare(),
     mount: () => void mount(),
@@ -936,20 +1043,16 @@ const Session = component<{
     if (current.phase === 'connecting') {
       const offline = offlineManifest.value
       if (offline) {
+        const offlineBuilt = treeOf(offline)
         // The tab's own copy, browsable while the dial grinds. The two
         // actions that reach a peer stay disabled; everything else is local.
-        const offlineBuilt = buildTree(offline)
+        // The only message this phase can raise is the hidden-entries one, and
+        // it comes from the very manifest being drawn.
+        const message = toast.value
         return (
           <Chrome
             crumb="connecting"
-            belowBar={
-              offlineBuilt.skipped > 0 ? (
-                <Text color="warning" class="selectable">
-                  {offlineBuilt.skipped} entries hidden — unsafe paths in the peer&apos;s
-                  manifest
-                </Text>
-              ) : null
-            }
+            toast={message ? <Toast {...message} onClose={dismissToast} /> : null}
           >
             <ColumnView
               root={offlineBuilt.root}
