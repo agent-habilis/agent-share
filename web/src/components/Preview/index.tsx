@@ -119,8 +119,31 @@ function Centered({ children }: { children: Child }) {
         padding: '0 2ch',
       }}
     >
-      {children}
+      {/*
+        A definite width for everything below, which `MiddleTruncate` needs and
+        a centring flex parent will not give it. Left to shrink-wrap, the column
+        takes its width from the longest thing in it — so a long file name sizes
+        its own box, the measured width is the width of the string, and the name
+        overflows the pane instead of truncating. Measured at 1746px inside a
+        520px window before this.
+      */}
+      <div style={{ width: '100%', minWidth: 0 }}>{children}</div>
     </div>
+  )
+}
+
+/**
+ * A file name that truncates to the pane.
+ *
+ * Full width rather than shrink-wrapped, for the reason above; centred with
+ * `text-align` instead of by the column's `align`, which would size it to the
+ * text again.
+ */
+function PreviewName({ name }: { name: string }) {
+  return (
+    <Text weight="bold" style={{ width: '100%', minWidth: 0, textAlign: 'center' }}>
+      <MiddleTruncate value={name} />
+    </Text>
   )
 }
 
@@ -132,9 +155,7 @@ function Centered({ children }: { children: Child }) {
 function FileFacts({ node }: { node: FileNode }) {
   return (
     <>
-      <Text weight="bold">
-        <MiddleTruncate value={node.name} />
-      </Text>
+      <PreviewName name={node.name} />
       <Text color="fgMuted">{humanBytes(node.size)}</Text>
       {node.mtime > 0 ? (
         <Text color="fgSubtle">{new Date(node.mtime * 1000).toISOString().slice(0, 10)}</Text>
@@ -303,9 +324,7 @@ export const Preview = component<PreviewProps>(function* (props) {
         return (
           <Centered>
             <Stack direction="column" gap={1} align="center">
-              <Text weight="bold">
-                <MiddleTruncate value={node.name} />
-              </Text>
+              <PreviewName name={node.name} />
               <Stack direction="row" gap={1}>
                 <Spinner />
                 <Text color="fgMuted">
@@ -375,9 +394,7 @@ export const Preview = component<PreviewProps>(function* (props) {
       return (
         <Centered>
           <Stack direction="column" gap={1} align="center">
-            <Text weight="bold">
-              <MiddleTruncate value={node.name} />
-            </Text>
+            <PreviewName name={node.name} />
             <audio src={src} controls onerror={onerror} style={{ maxWidth: '100%' }} />
           </Stack>
         </Centered>
