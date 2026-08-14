@@ -15,9 +15,8 @@
 //! the origin killed mid-read.
 
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Instant;
@@ -41,30 +40,6 @@ impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
-    }
-}
-
-/// A throwaway directory under the OS temp dir, removed recursively on drop.
-struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    fn new(tag: &str) -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "agent-share-dead-origin-{}-{tag}-{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&path).expect("create temp dir");
-        Self { path }
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
@@ -130,8 +105,11 @@ fn spawn_producer(root: &Path) -> (ChildGuard, String) {
 
 #[test]
 fn a_share_survives_its_producer_when_a_mirror_serves() {
-    let src = TempDir::new("src");
-    let root = src.path.join("dataset");
+    let src = tempfile::Builder::new()
+        .prefix("agent-share-dead-origin-src-")
+        .tempdir()
+        .expect("temp dir");
+    let root = src.path().join("dataset");
     write_file(&root.join("readme.md"), b"# outlives its producer");
     write_file(&root.join("data/blob.bin"), &vec![9u8; 20_000]);
 
@@ -140,8 +118,11 @@ fn a_share_survives_its_producer_when_a_mirror_serves() {
     // Mirror the whole share — a one-shot copy that leaves the origin's
     // manifest and secret in a sidecar, so `serve` re-serves it as a second
     // source for the *same* share rather than minting a new one.
-    let copy = TempDir::new("copy");
-    let copy_root = copy.path.join("copy");
+    let copy = tempfile::Builder::new()
+        .prefix("agent-share-dead-origin-copy-")
+        .tempdir()
+        .expect("temp dir");
+    let copy_root = copy.path().join("copy");
     let status = test_cmd()
         .args([
             "mirror",
@@ -186,12 +167,15 @@ fn a_share_survives_its_producer_when_a_mirror_serves() {
     // A fresh consumer holding the ORIGINAL ticket: its address points at the
     // corpse. The short discovery deadline keeps the origin dial from eating
     // the test budget; the manifest must then come from the mirror.
-    let target = TempDir::new("mnt");
+    let target = tempfile::Builder::new()
+        .prefix("agent-share-dead-origin-mnt-")
+        .tempdir()
+        .expect("temp dir");
     let mut consumer_cmd = test_cmd();
     consumer_cmd
         .args([
             &ticket,
-            target.path.to_str().expect("utf-8 mount target"),
+            target.path().to_str().expect("utf-8 mount target"),
             "--no-mount",
             "--output",
             "json",

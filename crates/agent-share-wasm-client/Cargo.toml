@@ -44,7 +44,7 @@ futures = "0.3"
 # Lets a `!Send` value satisfy a `Send + Sync` bound, panicking if it is ever
 # touched from another thread. Sound here because wasm is single-threaded, and
 # necessary because iroh's `DynProtocolHandler` requires `Send + Sync` while the
-# producer's state holds `FileSystemFileHandle`s, which are JS values.
+# producer's state holds file handles and `File`s, which are JS values.
 send_wrapper = "0.6"
 web-sys = { version = "0.3", features = [
     "Window",

@@ -18,6 +18,12 @@ pub(crate) struct LiveState<T> {
     index_of: HashMap<String, u32>,
     /// Re-encoded once per change batch.
     encoded: Vec<u8>,
+    /// Bumped once per change batch, exactly as the native `LiveTree` does.
+    ///
+    /// Starts at 1, not 0, so "never published" and "published once" are
+    /// different numbers on the consumer's side — the same reason native gives.
+    /// It is inside the signature, so it is also what refuses a rollback.
+    version: u64,
 }
 
 impl<T> LiveState<T> {
@@ -42,6 +48,7 @@ impl<T> LiveState<T> {
             slots,
             index_of,
             encoded,
+            version: 1,
         }
     }
 
@@ -109,11 +116,17 @@ impl<T> LiveState<T> {
             files: self.files.clone(),
         }
         .encode();
+        self.version += 1;
         true
     }
 
     pub fn encoded(&self) -> &[u8] {
         &self.encoded
+    }
+
+    /// The version these bytes were published as.
+    pub const fn version(&self) -> u64 {
+        self.version
     }
 
     /// `None` for a tombstone or out-of-range index.
@@ -143,6 +156,7 @@ impl<T> LiveState<T> {
         self.slots = previous.slots;
         self.index_of = previous.index_of;
         self.encoded = previous.encoded;
+        self.version = previous.version;
     }
 
     pub fn snapshot(&self) -> LiveStateSnapshot<T>
@@ -155,6 +169,7 @@ impl<T> LiveState<T> {
             slots: self.slots.clone(),
             index_of: self.index_of.clone(),
             encoded: self.encoded.clone(),
+            version: self.version,
         }
     }
 }
@@ -166,6 +181,7 @@ pub(crate) struct LiveStateSnapshot<T> {
     slots: Vec<Option<T>>,
     index_of: HashMap<String, u32>,
     encoded: Vec<u8>,
+    version: u64,
 }
 
 fn dedupe_first_wins<T>(files: Vec<(FileEntry, T)>) -> Vec<(FileEntry, T)> {

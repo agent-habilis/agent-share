@@ -39,14 +39,14 @@ enum Task {
     /// Run unit tests.
     Test,
     /// Build the `agent-share` binary. Cross-compile with `--target <triple>` or the
-    /// `--arch <arch>` shorthand (static-musl Linux) through a project-pinned
+    /// `--arch <arch>` shorthand (glibc Linux) through a project-pinned
     /// zig + cargo-zigbuild toolchain — self-contained, never the global zig
     /// or a global `cargo install`.
     Build {
-        /// Full target triple, e.g. `aarch64-unknown-linux-musl`.
+        /// Full target triple, e.g. `aarch64-unknown-linux-gnu`.
         #[arg(long)]
         target: Option<String>,
-        /// Architecture shorthand ⇒ `<arch>-unknown-linux-musl` (e.g.
+        /// Architecture shorthand ⇒ `<arch>-unknown-linux-gnu` (e.g.
         /// `aarch64`, `x86_64`). Mutually exclusive with `--target`.
         #[arg(long)]
         arch: Option<String>,

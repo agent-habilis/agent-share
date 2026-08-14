@@ -118,27 +118,6 @@ mod tests {
     use fofoca_chunks::{CHUNK_BYTES_USIZE, chunk_hash};
     use std::sync::Arc;
 
-    /// A throwaway directory, as the rest of this crate's tests hand-roll one.
-    struct TempDir(std::path::PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            use rand::RngCore as _;
-            let path = std::env::temp_dir().join(format!(
-                "agent-share-chunks-{tag}-{}",
-                rand::rng().next_u64()
-            ));
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     fn tree_of(root: &std::path::Path) -> Arc<LiveTree> {
         let (manifest, paths) = crate::mount::scan::scan(root).expect("scan");
         Arc::new(LiveTree::new(root.to_path_buf(), manifest, paths))
@@ -146,9 +125,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_row_is_produced_on_demand_and_reused() {
-        let data = TempDir::new("data");
-        std::fs::write(data.0.join("a.bin"), vec![7u8; 300_000]).expect("write");
-        let tree = tree_of(&data.0);
+        let data = tempfile::Builder::new()
+            .prefix("agent-share-chunks-data-")
+            .tempdir()
+            .expect("temp dir");
+        std::fs::write(data.path().join("a.bin"), vec![7u8; 300_000]).expect("write");
+        let tree = tree_of(data.path());
         let cache = ChunkCache::new();
 
         let map = cache
@@ -166,10 +148,13 @@ mod tests {
     /// The bytes behind an address come back, and address what was asked for.
     #[tokio::test]
     async fn a_chunk_can_be_fetched_by_address_alone() {
-        let data = TempDir::new("chunk");
+        let data = tempfile::Builder::new()
+            .prefix("agent-share-chunks-chunk-")
+            .tempdir()
+            .expect("temp dir");
         let body = vec![3u8; CHUNK_BYTES_USIZE + 5];
-        std::fs::write(data.0.join("a.bin"), &body).expect("write");
-        let tree = tree_of(&data.0);
+        std::fs::write(data.path().join("a.bin"), &body).expect("write");
+        let tree = tree_of(data.path());
         let cache = ChunkCache::new();
 
         let map = cache.map_of_index(&tree, 0).await.expect("address");
@@ -193,14 +178,17 @@ mod tests {
     /// large tree from a `stat` walk into a full read of it.
     #[tokio::test]
     async fn opening_a_cache_addresses_nothing() {
-        let data = TempDir::new("lazy-data");
+        let data = tempfile::Builder::new()
+            .prefix("agent-share-chunks-lazy-data-")
+            .tempdir()
+            .expect("temp dir");
         let mut expected = Vec::new();
         for name in ["a.bin", "b.bin", "c.bin"] {
             let body = vec![1u8; 100_000];
-            std::fs::write(data.0.join(name), &body).expect("write");
+            std::fs::write(data.path().join(name), &body).expect("write");
             expected.push(chunk_hash(&body[..CHUNK_BYTES_USIZE]));
         }
-        let _tree = tree_of(&data.0);
+        let _tree = tree_of(data.path());
         let cache = ChunkCache::new();
 
         // Not one address is known, so not one file has been read.
@@ -214,9 +202,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_index_past_the_tree_has_no_row() {
-        let data = TempDir::new("oob-data");
-        std::fs::write(data.0.join("a.bin"), b"hi").expect("write");
-        let tree = tree_of(&data.0);
+        let data = tempfile::Builder::new()
+            .prefix("agent-share-chunks-oob-data-")
+            .tempdir()
+            .expect("temp dir");
+        std::fs::write(data.path().join("a.bin"), b"hi").expect("write");
+        let tree = tree_of(data.path());
         let cache = ChunkCache::new();
         assert!(cache.map_of_index(&tree, 424_242).await.is_none());
     }
@@ -225,17 +216,20 @@ mod tests {
     /// a row describing content that is gone.
     #[tokio::test]
     async fn an_edited_file_is_readdressed_rather_than_answered_stale() {
-        let data = TempDir::new("edit-data");
-        let path = data.0.join("a.bin");
+        let data = tempfile::Builder::new()
+            .prefix("agent-share-chunks-edit-data-")
+            .tempdir()
+            .expect("temp dir");
+        let path = data.path().join("a.bin");
         std::fs::write(&path, vec![1u8; 200_000]).expect("write");
-        let tree = tree_of(&data.0);
+        let tree = tree_of(data.path());
         let cache = ChunkCache::new();
         let before = cache.map_of_index(&tree, 0).await.expect("first");
 
         // Different content *and* a different size, so the version gate fires
         // on a filesystem whose mtime resolution is coarse.
         std::fs::write(&path, vec![2u8; 200_001]).expect("rewrite");
-        let rescanned = tree_of(&data.0);
+        let rescanned = tree_of(data.path());
         let after = cache.map_of_index(&rescanned, 0).await.expect("re-address");
 
         assert_ne!(
@@ -252,9 +246,12 @@ mod tests {
     /// available to anyone who knows its root.
     #[tokio::test]
     async fn an_empty_file_addresses_cleanly() {
-        let data = TempDir::new("empty");
-        std::fs::write(data.0.join("empty.bin"), b"").expect("write");
-        let tree = tree_of(&data.0);
+        let data = tempfile::Builder::new()
+            .prefix("agent-share-chunks-empty-")
+            .tempdir()
+            .expect("temp dir");
+        std::fs::write(data.path().join("empty.bin"), b"").expect("write");
+        let tree = tree_of(data.path());
         let cache = ChunkCache::new();
 
         let map = cache.map_of_index(&tree, 0).await.expect("address");

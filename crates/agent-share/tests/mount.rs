@@ -10,9 +10,8 @@
 //! actual OS mount and is `#[ignore]`d — run it by hand.
 
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Instant;
@@ -27,30 +26,6 @@ impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
-    }
-}
-
-/// A throwaway directory under the OS temp dir, removed recursively on drop.
-struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    fn new(tag: &str) -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "agent-share-it-{}-{tag}-{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&path).expect("create temp dir");
-        Self { path }
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
@@ -125,8 +100,11 @@ fn spawn_producer(root: &Path, swarm: &str) -> (ChildGuard, String) {
 fn serves_a_ticket_and_the_bridge_binds() {
     // A loopback swarm id — it carries loopback lookups (no mDNS/DHT/relay),
     // so everything stays on this host.
-    let src = TempDir::new("src");
-    let root = src.path.join("dataset");
+    let src = tempfile::Builder::new()
+        .prefix("agent-share-it-src-")
+        .tempdir()
+        .expect("temp dir");
+    let root = src.path().join("dataset");
     write_file(&root.join("readme.md"), b"# mounted");
     write_file(&root.join("data/blob.bin"), &vec![7u8; 10_000]);
 
@@ -140,11 +118,14 @@ fn serves_a_ticket_and_the_bridge_binds() {
     // builds the tree, binds the NFS bridge, and prints the OS mount command
     // (json mode: the bare command) — everything except the privileged step.
     // The CLI arg is the parent target; the real mount dir is agent-share-…/.
-    let target = TempDir::new("mnt");
+    let target = tempfile::Builder::new()
+        .prefix("agent-share-it-mnt-")
+        .tempdir()
+        .expect("temp dir");
     let mut consumer_cmd = test_cmd();
     consumer_cmd.args([
         &ticket,
-        target.path.to_str().expect("utf-8 mount target"),
+        target.path().to_str().expect("utf-8 mount target"),
         "--no-mount",
         "--output",
         "json",
@@ -157,7 +138,7 @@ fn serves_a_ticket_and_the_bridge_binds() {
         "expected an NFS mount command, got: {command_line}"
     );
     assert!(
-        command_line.contains(target.path.to_str().unwrap())
+        command_line.contains(target.path().to_str().unwrap())
             && command_line.contains("agent-share-"),
         "mount command names the agent-share child under the target, got: {command_line}"
     );
@@ -170,19 +151,25 @@ fn serves_a_ticket_and_the_bridge_binds() {
 #[test]
 #[ignore = "performs a real OS mount; run manually"]
 fn real_mount_round_trip() {
-    let src = TempDir::new("src");
-    let root = src.path.join("dataset");
+    let src = tempfile::Builder::new()
+        .prefix("agent-share-it-src-")
+        .tempdir()
+        .expect("temp dir");
+    let root = src.path().join("dataset");
     write_file(&root.join("hello.txt"), b"hello from the other side");
 
     let (_producer, ticket) = spawn_producer(&root, LOOPBACK_SWARM_ID);
 
-    let target = TempDir::new("mnt");
+    let target = tempfile::Builder::new()
+        .prefix("agent-share-it-mnt-")
+        .tempdir()
+        .expect("temp dir");
     let mut consumer_cmd = test_cmd();
-    consumer_cmd.args([&ticket, target.path.to_str().expect("utf-8 mount target")]);
+    consumer_cmd.args([&ticket, target.path().to_str().expect("utf-8 mount target")]);
     let (_consumer, consumer_rx) = spawn_piped(consumer_cmd);
     recv_line_containing(&consumer_rx, "Mounted").expect("consumer never reported Mounted");
 
-    let mountpoint = std::fs::read_dir(&target.path)
+    let mountpoint = std::fs::read_dir(target.path())
         .expect("read target")
         .map(|entry| entry.expect("dir entry").path())
         .find(|path| {

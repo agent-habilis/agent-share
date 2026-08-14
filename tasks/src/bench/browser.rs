@@ -58,7 +58,7 @@ impl Drop for Browser {
         let _ = Command::new("agent-browse")
             .args(["quit", &self.folder])
             .output();
-        super::reap::untrack_browser();
+        super::reap::untrack_browser(&self.folder);
     }
 }
 
@@ -429,14 +429,31 @@ fn parse_report(log: &str) -> Option<Res<BenchReport>> {
 }
 
 /// Evaluate an expression in the page and return its string result.
+///
+/// Drives whichever window `agent-browse` finds for the *current directory*,
+/// which is the repo root and so the one window a single-peer cell opened. A
+/// cell that opens two must say which one it means — see [`evaluate_in`].
 pub(crate) fn evaluate(expression: &str) -> Res<String> {
+    evaluate_at(expression, None)
+}
+
+/// [`evaluate`], against the window keyed to `folder`.
+pub(crate) fn evaluate_in(folder: &str, expression: &str) -> Res<String> {
+    evaluate_at(expression, Some(folder))
+}
+
+fn evaluate_at(expression: &str, folder: Option<&str>) -> Res<String> {
     let params = serde_json::json!({
         "expression": expression,
         "returnByValue": true,
         "awaitPromise": true,
     })
     .to_string();
-    let raw = run_browse(&["cdp", "Runtime.evaluate", &params])?;
+    let mut args = vec!["cdp", "Runtime.evaluate", &params];
+    if let Some(folder) = folder {
+        args.extend_from_slice(&["--folder", folder]);
+    }
+    let raw = run_browse(&args)?;
     let parsed: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|error| format!("agent-browse returned non-JSON ({error}): {raw}"))?;
     if let Some(details) = parsed.get("exceptionDetails") {

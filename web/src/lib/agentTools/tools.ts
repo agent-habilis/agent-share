@@ -20,7 +20,7 @@
  */
 
 import { canUseOpfs, createShareDirectory, writeOpfsFile } from '../opfs/index.ts'
-import { startProducer, type ShareProducer } from '../produce.ts'
+import { directorySource, startProducer, type ShareProducer } from '../produce.ts'
 import { shareUrl, type TransportMode } from '../ticket/index.ts'
 import { filesUnder, type FileNode } from '../tree.ts'
 import { clampWindow, DEFAULT_READ_LEN, describeWindow, looksBinary, MAX_READ_LEN } from './bytes.ts'
@@ -544,7 +544,7 @@ const sharePublish: ModelContextTool = {
         await writeOpfsFile(handle, path, decodeContent(content, optionalString(record, 'encoding')))
       }
 
-      const producer = await startProducer(handle, optionalString(input, 'password'))
+      const producer = await startProducer(directorySource(handle), optionalString(input, 'password'))
       published.push(producer)
       return ok({
         ticket: producer.ticket,

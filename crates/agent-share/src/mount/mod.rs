@@ -140,30 +140,8 @@ mod tests {
     use crate::lookup::{add_peer_addr, build_endpoint};
     use crate::protocol::swarm::LookupOpts;
     use agent_share_proto::auth::{ShareAuth, share_token};
-    use rand::RngCore;
-    use std::path::PathBuf;
+    use rand::RngCore as _;
     use std::sync::Arc;
-
-    /// A throwaway directory under the OS temp dir (the repo has no `tempfile`
-    /// dep); dropped recursively at the end of each test.
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new() -> Self {
-            let path =
-                std::env::temp_dir().join(format!("agent-share-test-{}", rand::rng().next_u64()));
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            Self { path }
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
 
     /// Stand up a loopback producer serving `root` and a client connected to
     /// it. The producer task accepts connections until its endpoint closes.
@@ -348,11 +326,11 @@ mod tests {
     async fn a_consumer_learns_a_row_and_every_chunk_verifies_against_it() {
         let tree = fixture_tree();
         let contents = vec![9u8; 200_000];
-        std::fs::write(tree.path.join("big.bin"), &contents).expect("write");
+        std::fs::write(tree.path().join("big.bin"), &contents).expect("write");
 
         let cache = Arc::new(super::hash::ChunkCache::new());
         let (endpoint, client, producer) =
-            producer_with_hashes(&tree.path, Some(Arc::clone(&cache))).await;
+            producer_with_hashes(tree.path(), Some(Arc::clone(&cache))).await;
 
         let manifest = client.fetch_manifest().await.expect("manifest");
         let index = manifest
@@ -413,7 +391,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_producer_without_a_cache_says_it_cannot_vouch() {
         let tree = fixture_tree();
-        let (endpoint, client, producer) = producer_with_hashes(&tree.path, None).await;
+        let (endpoint, client, producer) = producer_with_hashes(tree.path(), None).await;
 
         assert!(
             client
@@ -455,13 +433,13 @@ mod tests {
 
         let origin_tree = fixture_tree();
         let (origin_endpoint, origin_ticket, origin_task) =
-            producer_under_secret(&origin_tree.path, secret, None).await;
+            producer_under_secret(origin_tree.path(), secret, None).await;
 
         // A second host with its own endpoint and its own copy of the bytes,
         // serving under the origin's secret. A mirror, in other words.
         let mirror_tree = fixture_tree();
         let (mirror_endpoint, mirror_ticket, mirror_task) =
-            producer_under_secret(&mirror_tree.path, secret, None).await;
+            producer_under_secret(mirror_tree.path(), secret, None).await;
         assert_ne!(
             mirror_ticket.addr, origin_ticket.addr,
             "the mirror must be a genuinely different endpoint"
@@ -500,7 +478,7 @@ mod tests {
 
         let tree = fixture_tree();
         let (endpoint, ticket, task) =
-            producer_under_secret(&tree.path, secret, Some("hunter2")).await;
+            producer_under_secret(tree.path(), secret, Some("hunter2")).await;
         assert!(
             ticket.password_protected(),
             "the ticket must advertise that it needs a password"
@@ -551,7 +529,7 @@ mod tests {
 
         let tree = fixture_tree();
         let (endpoint, ticket, task) =
-            producer_under_secret(&tree.path, secret, Some("hunter2")).await;
+            producer_under_secret(tree.path(), secret, Some("hunter2")).await;
 
         let wrong = client_for(ticket, Some("hunter3")).await;
         assert!(wrong.fetch_manifest().await.is_err());
@@ -572,7 +550,7 @@ mod tests {
         rand::rng().fill_bytes(&mut secret);
 
         let tree = fixture_tree();
-        let (endpoint, ticket, task) = producer_under_secret(&tree.path, secret, None).await;
+        let (endpoint, ticket, task) = producer_under_secret(tree.path(), secret, None).await;
 
         let impostor =
             client_presenting(ticket, ShareAuth::from_token([0xAAu8; SECRET_LEN], true)).await;
@@ -718,17 +696,17 @@ mod tests {
 
         let origin_tree = fixture_tree();
         let (origin_endpoint, origin_ticket, origin_task) =
-            producer_under_secret(&origin_tree.path, secret, None).await;
+            producer_under_secret(origin_tree.path(), secret, None).await;
         let origin_client = client_for(origin_ticket, None).await;
 
         // Same shape, different contents — a stale mirror.
-        let stale = TempDir::new();
-        std::fs::create_dir_all(stale.path.join("docs")).unwrap();
-        std::fs::write(stale.path.join("hello.txt"), b"WRONG WORLD").unwrap();
-        std::fs::write(stale.path.join("docs/guide.md"), b"stale bytes").unwrap();
+        let stale = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(stale.path().join("docs")).unwrap();
+        std::fs::write(stale.path().join("hello.txt"), b"WRONG WORLD").unwrap();
+        std::fs::write(stale.path().join("docs/guide.md"), b"stale bytes").unwrap();
 
         let (stale_endpoint, stale_ticket, stale_task) =
-            producer_under_secret(&stale.path, secret, None).await;
+            producer_under_secret(stale.path(), secret, None).await;
         let stale_client = client_for(stale_ticket, None).await;
 
         let origin_manifest = origin_client
@@ -770,18 +748,18 @@ mod tests {
         stale_task.abort();
     }
 
-    fn fixture_tree() -> TempDir {
-        let tmp = TempDir::new();
-        std::fs::create_dir_all(tmp.path.join("docs")).unwrap();
-        std::fs::write(tmp.path.join("hello.txt"), b"hello world").unwrap();
-        std::fs::write(tmp.path.join("docs/guide.md"), b"lazy bytes").unwrap();
+    fn fixture_tree() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::write(tmp.path().join("hello.txt"), b"hello world").unwrap();
+        std::fs::write(tmp.path().join("docs/guide.md"), b"lazy bytes").unwrap();
         tmp
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn manifest_and_ranged_reads_round_trip() {
         let tree = fixture_tree();
-        let (endpoint, client, producer) = producer_and_client(&tree.path).await;
+        let (endpoint, client, producer) = producer_and_client(tree.path()).await;
 
         let manifest = client.fetch_manifest().await.expect("manifest");
         assert_eq!(manifest.files.len(), 2);
@@ -807,7 +785,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bad_index_and_oversize_len_error_without_killing_the_connection() {
         let tree = fixture_tree();
-        let (endpoint, client, producer) = producer_and_client(&tree.path).await;
+        let (endpoint, client, producer) = producer_and_client(tree.path()).await;
 
         assert!(client.read_range(424_242, 0, 4).await.is_err(), "bad index");
         assert!(
@@ -825,7 +803,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bad_secret_is_rejected() {
         let tree = fixture_tree();
-        let (endpoint, client, producer) = producer_and_client(&tree.path).await;
+        let (endpoint, client, producer) = producer_and_client(tree.path()).await;
 
         // A ticket with a corrupted bearer secret: the producer closes the
         // connection, so the request fails rather than answering.

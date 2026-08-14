@@ -62,7 +62,7 @@ use agent_share_proto::framing::{
     WEBRTC_SIGNAL_ALPN,
 };
 use agent_share_proto::lookup::{LookupOpts, RelayChoice};
-use agent_share_proto::manifest::{ManifestDelta, MountManifest};
+use agent_share_proto::manifest::MountManifest;
 use agent_share_proto::mesh_key::share_mesh_key;
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
 use fofoca::iroh::endpoint::{Connection, presets};
@@ -72,6 +72,8 @@ use wasm_bindgen_futures::JsFuture;
 
 mod link;
 mod live_state;
+#[macro_use]
+mod log;
 mod mesh;
 mod produce;
 mod seed;
@@ -248,7 +250,18 @@ pub struct ShareClient {
     /// fire-and-forget, against the same connection its reads were queued on;
     /// the reads waited behind them and playback stalled. Refreshed on every
     /// [`Self::fetch_manifest`], which is as current as anything else here.
-    file_ids: RefCell<HashMap<u32, FileId>>,
+    /// `Rc` so the watch task can refresh it too: a live update renumbers
+    /// nothing, but it does add slots, and `read` is index-addressed — a tab
+    /// left on the open-time bindings reads the wrong file after a change.
+    file_ids: Rc<RefCell<HashMap<u32, FileId>>>,
+    /// The manifest this client currently believes, and the anchor every later
+    /// one is judged against.
+    ///
+    /// One cell rather than a version counter beside a fingerprint: the version
+    /// is what refuses a rollback, and a baseline of 0 would accept any signed
+    /// version a peer felt like replaying. Seeded by `fetch_manifest`, advanced
+    /// by the watch stream, read by `info()`.
+    believed: Rc<RefCell<SignedManifest>>,
     /// Binds already written, so the second keep for a file skips the store.
     ///
     /// The bind is one row per file version, not per chunk; without this every
@@ -367,7 +380,12 @@ fn new_share_client(
         store: RefCell::new(None),
         card: Rc::new(RefCell::new(CardHoldings::default())),
         rows: RefCell::new(HashMap::new()),
-        file_ids: RefCell::new(HashMap::new()),
+        file_ids: Rc::new(RefCell::new(HashMap::new())),
+        believed: Rc::new(RefCell::new(SignedManifest {
+            version: 0,
+            signature: [0u8; agent_share_proto::authorship::SIGNATURE_LEN],
+            manifest: Vec::new(),
+        })),
         bound: RefCell::new(HashMap::new()),
         seeder: seed::SeederShared::new(),
         from_origin: true,
@@ -1224,9 +1242,9 @@ impl ShareClient {
         let answer = fetch_manifest_since_on(&self.connection, &self.token, held.version)
             .await
             .ok()??;
-        let author = self.author.and_then(|bytes| {
-            agent_share_proto::authorship::PublicKey::from_bytes(&bytes).ok()
-        });
+        let author = self
+            .author
+            .and_then(|bytes| agent_share_proto::authorship::PublicKey::from_bytes(&bytes).ok());
         let caught_up =
             match agent_share_proto::manifest::apply_since(&held, &answer, author.as_ref()) {
                 Ok(caught_up) => caught_up,
@@ -1301,6 +1319,13 @@ impl ShareClient {
         // note on the `mesh` field.
         let fingerprint = agent_share_proto::manifest::manifest_fingerprint(&fetched.body);
         *self.last_tree.borrow_mut() = Some(fingerprint.clone());
+        // The anchor the watch stream judges later versions against. Seeded
+        // here rather than at `watch()` because this is where a verified
+        // envelope exists: starting the subscription from version 0 would let a
+        // peer replay any older version the creator really did sign.
+        if let Ok(signed) = SignedManifest::decode(&fetched.envelope) {
+            *self.believed.borrow_mut() = signed;
+        }
         // Recorded here because this is the one place holding a fresh manifest
         // anyway. It is what lets `keep` write a bind without asking the
         // network for a tree it has already been told about.
@@ -1332,19 +1357,63 @@ impl ShareClient {
     /// every 3s while the connection is alive; a clean zero-frame end means
     /// the producer does not support live watch and the loop stops.
     pub async fn watch(&self, on_manifest: js_sys::Function) -> Result<(), JsValue> {
-        // `OP_WATCH` is only ever followed against the origin. A seeder serves
-        // a frozen snapshot — it has no right to move the tree, and a watch
-        // stream is exactly the channel a hostile one would use to try. The
-        // manifest this client already fetched (vetted against the pinned
-        // tree) is the share, unchanged for as long as the origin stays gone.
-        if !self.from_origin {
-            return Ok(());
-        }
+        // Followed against **any** peer, origin or seeder. A seeder still has
+        // no right to move the tree, but that is enforced by the signature
+        // inside each frame rather than by refusing to listen to it: only the
+        // creator can author a version, and `apply_watch_frame` refuses one
+        // that goes backwards. Listening is what lets a share outlive its
+        // producer, which is the whole point of signing it.
         let conn = self.connection.clone();
         let token = self.token;
+        // The signature is what lets a seeder carry a change. A share that
+        // names no creator has no such proof, so for those the old rule still
+        // holds: only the origin may move the tree. Narrowed rather than
+        // deleted — `fetch_manifest` pins the same case at its own call site.
+        if self.author.is_none() && !self.from_origin {
+            log!(
+                info,
+                "unsigned share read from a seeder; not following updates"
+            );
+            return Ok(());
+        }
+        let author = self
+            .author
+            .and_then(|bytes| agent_share_proto::authorship::PublicKey::from_bytes(&bytes).ok());
+        let file_ids = Rc::clone(&self.file_ids);
+        let last_tree = Rc::clone(&self.last_tree);
+        let believed = Rc::clone(&self.believed);
+        let prefetched = Rc::clone(&self.prefetched_manifest);
+        log!(
+            info,
+            "following updates from {} (frames are {})",
+            if self.from_origin {
+                "the origin"
+            } else {
+                "a seeder"
+            },
+            if author.is_some() {
+                "checked against the ticket's creator"
+            } else {
+                "unsigned — this share names no creator"
+            }
+        );
         wasm_bindgen_futures::spawn_local(async move {
             loop {
-                match follow_watch(&conn, &token, &on_manifest).await {
+                match follow_watch(
+                    &conn,
+                    &token,
+                    &on_manifest,
+                    author.as_ref(),
+                    &file_ids,
+                    &last_tree,
+                    &believed,
+                    &prefetched,
+                )
+                .await
+                {
+                    // The producer answered nothing at all, so it does not know
+                    // the op. Retrying that forever would be a busy loop against
+                    // a peer that will never answer.
                     WatchEnd::Unsupported => return,
                     WatchEnd::Retryable => {
                         if conn.close_reason().is_some() {
@@ -1488,7 +1557,9 @@ impl ShareClient {
             // them. Pressing Seed after a preview therefore costs the
             // difference, which is often nothing at all.
             let missing: Vec<usize> = before.missing().collect();
-            total += self.fetch_missing(&row, index, &missing, store.as_ref()).await?;
+            total += self
+                .fetch_missing(&row, index, &missing, store.as_ref())
+                .await?;
             store
                 .put_map(&row)
                 .await
@@ -2055,8 +2126,7 @@ impl ShareClient {
         let rows = self.rows.borrow().clone();
         // Serving before advertising: the seeder must answer for a chunk by the
         // time the card claims it, or a reader lands on `BadIndex`.
-        self.seeder
-            .update(Arc::new(envelope.to_vec()), rows, store);
+        self.seeder.update(Arc::new(envelope.to_vec()), rows, store);
         // Asked of the seeder rather than walked here, so this and the
         // retraction below cannot disagree about what "fully held" means — two
         // rules would flap, each undoing the other's card.
@@ -2401,6 +2471,11 @@ impl ShareClient {
                 "mount_path": live_path,
                 "mount_paths": path_labels(&self.connection),
                 "mount_fallback_reason": self.fallback_reason.borrow().clone(),
+                // The two facts that make a stale tab legible without a
+                // console: which version it is on, and whether it is being fed
+                // by the creator or by a peer relaying for it.
+                "manifest_version": self.believed.borrow().version,
+                "source": if self.from_origin { "origin" } else { "seeder" },
                 "link": self.link_snapshot(),
             },
         })
@@ -2989,7 +3064,9 @@ async fn fetch_have_on(
     if status[0] != agent_share_proto::manifest::ReadStatus::Ok.to_byte() {
         return None;
     }
-    let len = read_len(&mut recv, framing::MAX_CHUNK_MAP_BYTES).await.ok()?;
+    let len = read_len(&mut recv, framing::MAX_CHUNK_MAP_BYTES)
+        .await
+        .ok()?;
     let mut body = vec![0u8; len as usize];
     recv.read_exact(&mut body).await.ok()?;
     let (claimed, bitmap) = framing::decode_have(&body).ok()?;
@@ -3346,7 +3423,6 @@ const SEEDER_CARDS_DEADLINE_MS: f64 = 12_000.0;
 fn store_name_for(token: &[u8; SECRET_LEN]) -> String {
     format!("agent-share/{}", &share_mesh_key(token)[..16])
 }
-
 
 /// Where the manifest *locator* lives: `localStorage`, beside the store.
 ///
@@ -4735,7 +4811,13 @@ async fn adopt_vetted(
     client.lookups = lookups;
     client.connected_at_ms = now_ms();
     client.from_origin = false;
-    client.pinned_tree = Some(majority.to_owned());
+    // Pinned only when there is nothing better to go on. Agreement among peer
+    // cards was the fallback for a share with no offline authority, and it
+    // costs something real: a tree that cannot move is a share that cannot
+    // change once the origin is gone. A signed share has an authority that
+    // outlives the origin, so it is verified rather than frozen — which is what
+    // lets a change reach a peer through a seeder.
+    client.pinned_tree = client.author.is_none().then(|| majority.to_owned());
     *client.fallback_reason.borrow_mut() = Some(if vetted.demoted {
         format!(
             "origin unreachable ({}); reading from seeder {short} over the relay (data channel failed the bulk probe)",
@@ -5033,9 +5115,7 @@ async fn vet_seeder_candidate(
         // Signed: the fetch already checked the creator's signature, so the
         // card's claim adds nothing and is deliberately not consulted.
         Ok(fetched) if author.is_some() => fetched,
-        Ok(fetched)
-            if agent_share_proto::manifest::manifest_fingerprint(&fetched.body) == tree =>
-        {
+        Ok(fetched) if agent_share_proto::manifest::manifest_fingerprint(&fetched.body) == tree => {
             fetched
         }
         Ok(_) => {
@@ -5341,6 +5421,11 @@ async fn follow_watch(
     conn: &Connection,
     token: &[u8; SECRET_LEN],
     on_manifest: &js_sys::Function,
+    author: Option<&agent_share_proto::authorship::PublicKey>,
+    file_ids: &Rc<RefCell<HashMap<u32, FileId>>>,
+    last_tree: &Rc<RefCell<Option<String>>>,
+    believed: &Rc<RefCell<SignedManifest>>,
+    prefetched: &PrefetchedManifest,
 ) -> WatchEnd {
     let Ok((mut send, mut recv)) = conn.open_bi().await else {
         return WatchEnd::Retryable;
@@ -5356,7 +5441,6 @@ async fn follow_watch(
         return WatchEnd::Retryable;
     }
 
-    let mut manifest = MountManifest::default();
     let mut saw_frame = false;
     loop {
         let Ok(len) = read_header(&mut recv, MAX_MANIFEST_BYTES).await else {
@@ -5373,26 +5457,56 @@ async fn follow_watch(
         let Some((kind, payload)) = body.split_first() else {
             return WatchEnd::Retryable;
         };
-        let applied = match *kind {
-            framing::WATCH_FRAME_MANIFEST => {
-                MountManifest::decode(payload).map(|fresh| manifest = fresh)
-            }
-            framing::WATCH_FRAME_DELTA => {
-                ManifestDelta::decode(payload).map(|delta| manifest.apply(&delta))
-            }
-            _ => return WatchEnd::Retryable,
-        };
-        if applied.is_err() {
-            return WatchEnd::Retryable;
-        }
+        // Verified against the baseline this client already believes — so a
+        // seeder cannot replay an older version the creator really did sign.
+        let mut held = believed.borrow().clone();
+        let manifest =
+            match agent_share_proto::manifest::apply_watch_frame(&mut held, *kind, payload, author)
+            {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    log!(warn, "refusing a watch frame: {error}");
+                    // A refused frame is not a broken stream: the next one may
+                    // verify, and dropping the subscription would strand this
+                    // tab on a tree it can no longer be moved off.
+                    saw_frame = true;
+                    continue;
+                }
+            };
         saw_frame = true;
+        // `read` is index-addressed, so the bindings have to move with the
+        // tree. Without this a tab that took an update reads the file that
+        // used to be at that slot — an `Ok` answer with the wrong bytes.
+        *file_ids.borrow_mut() = manifest
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (index as u32, file_id(entry)))
+            .collect();
+        *last_tree.borrow_mut() = Some(agent_share_proto::manifest::manifest_fingerprint(
+            &held.manifest,
+        ));
+        let version = held.version;
+        // Left where `fetch_manifest` looks first, so a caller that re-arms
+        // this tab as a seeder after an update — `Session`'s watch callback —
+        // republishes the version just verified instead of paying a round trip
+        // to re-fetch it, and cannot advertise a tree it never rendered.
+        *prefetched.borrow_mut() = Some(FetchedManifest {
+            envelope: held.encode(),
+            body: held.manifest.clone(),
+            manifest: manifest.clone(),
+        });
+        *believed.borrow_mut() = held;
+        log!(
+            debug,
+            "applied a tree change: v{version}, {} files",
+            manifest.files.len()
+        );
         let Ok(value) = serde_wasm(&manifest) else {
             return WatchEnd::Retryable;
         };
         if on_manifest.call1(&JsValue::NULL, &value).is_err() {
-            web_sys::console::warn_1(&JsValue::from_str(
-                "[share] watch callback threw; continuing subscription",
-            ));
+            log!(warn, "watch callback threw; continuing subscription");
             continue;
         }
     }
@@ -5754,10 +5868,7 @@ fn js_stage(context: &str, error: JsValue) -> JsValue {
 /// a non-`Ok` status there is "I cannot answer for that", which is ordinary
 /// traffic rather than a protocol failure, and folding the two together would
 /// turn every polite refusal into an error.
-async fn read_len(
-    recv: &mut fofoca::iroh::endpoint::RecvStream,
-    cap: u32,
-) -> Result<u32, JsValue> {
+async fn read_len(recv: &mut fofoca::iroh::endpoint::RecvStream, cap: u32) -> Result<u32, JsValue> {
     let mut raw = [0u8; 4];
     recv.read_exact(&mut raw)
         .await

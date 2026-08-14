@@ -24,6 +24,15 @@ agent-share = { path = "../crates/agent-share" }
 # here — a second copy would drift, and the drift would read as a passing test.
 # Already in Cargo.lock: `agent-share` depends on it.
 agent-share-proto = { path = "../crates/agent-share-proto" }
+# Hashing a fixture in-process rather than shelling out to `shasum`. Already in
+# Cargo.lock — `agent-share-proto` uses it for the tree fingerprint — so this
+# adds a line here and nothing to the lockfile, and it drops both a process
+# spawn per e2e cell and a prerequisite that could skip the whole suite.
+sha2 = "0.10"
+# One temp directory helper instead of the hand-rolled copy each test file
+# used to carry. They all did the same thing — unique name, `create_dir_all`,
+# remove-on-drop — and each was a chance to get cleanup subtly wrong.
+tempfile = "3"
 clap_mangen = "0.2"
 # Cargo-style status output, shared with the binary by `include!`ing its
 # canonical source (`../src/util/output.rs`) — see `src/util/output.rs`.

@@ -31,7 +31,7 @@ import {
 } from './session.ts'
 import { Chrome } from '../Chrome/index.tsx'
 import { ColumnView } from '../ColumnView/index.tsx'
-import { FailedBody, type FailureKind } from '../FailedBody/index.tsx'
+import { FailedBody } from '../FailedBody/index.tsx'
 import { LoadingBody } from '../LoadingBody/index.tsx'
 import { PasswordGate } from '../PasswordGate/index.tsx'
 import { Toast } from '../Toast/index.tsx'
@@ -87,7 +87,7 @@ type State =
    * and refused.
    */
   | { phase: 'needs-password'; error?: string }
-  | { phase: 'failed'; reason: string; kind?: FailureKind }
+  | { phase: 'failed'; reason: string }
 
 /**
  * How often the availability grid repaints while bytes are arriving.
@@ -486,6 +486,12 @@ const Session = component<{
     await client.watch((next) => {
       if (ctx.aborted.aborted) return
       show(next)
+      // Re-arm as a seeder for the version we just took. Without this a tab
+      // that verified v2 keeps answering other peers with v1's envelope, and a
+      // change stops at the first hop — the share propagates one peer deep and
+      // no further. It also pushes the new version on to anyone watching *this*
+      // tab, which is what makes propagation transitive.
+      publishHoldings(client)
       if (mountSession.peek()) void runSync('syncing')
     })
   }
@@ -1086,7 +1092,7 @@ const Session = component<{
     if (current.phase === 'failed') {
       return (
         <Chrome crumb="failed">
-          <FailedBody reason={current.reason} kind={current.kind} />
+          <FailedBody reason={current.reason} />
         </Chrome>
       )
     }

@@ -12,9 +12,8 @@
 //! producer holding a port or a mount holding a filesystem.
 
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -365,30 +364,25 @@ pub(crate) fn parse_ps_time(text: &str) -> Option<f64> {
 /// The repo has no `tempfile` dependency and deliberately so — `tests/mount.rs`
 /// hand-rolls the same thing.
 #[derive(Debug)]
-pub(crate) struct TempDir {
-    path: PathBuf,
-}
+/// A temp directory that removes itself, named so a stray one is traceable.
+///
+/// A thin wrapper over `tempfile` rather than another hand-rolled copy: every
+/// crate here used to carry its own, all doing unique-name + `create_dir_all` +
+/// remove-on-drop, and each was a chance to get cleanup subtly wrong. What is
+/// kept is the `tag`, because a leftover directory should say which run made
+/// it.
+pub(crate) struct TempDir(tempfile::TempDir);
 
 impl TempDir {
     pub(crate) fn new(tag: &str) -> Res<Self> {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "agent-share-bench-{}-{tag}-{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&path)
-            .map_err(|error| format!("create temp dir {}: {error}", path.display()))?;
-        Ok(Self { path })
+        tempfile::Builder::new()
+            .prefix(&format!("agent-share-bench-{tag}-"))
+            .tempdir()
+            .map(Self)
+            .map_err(|error| format!("create temp dir for {tag}: {error}").into())
     }
 
     pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        self.0.path()
     }
 }

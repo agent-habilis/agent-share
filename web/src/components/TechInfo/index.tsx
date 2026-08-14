@@ -164,6 +164,10 @@ interface SessionInfo {
     mount_paths: string[];
     /** Why `dynamic` ended up on the relay. Null on a clean WebRTC connect. */
     mount_fallback_reason: string | null;
+    /** The manifest version this tab is on; 0 before the first watch frame. */
+    manifest_version: number;
+    /** Whether the tree is coming from the creator or from a peer relaying it. */
+    source: string;
     /**
      * Wire bytes on the mount connection, per path and in total — the last
      * reading the session sampler took, never a fresh one. See `link.rs`.
@@ -361,8 +365,11 @@ function ratioLabel(link: LinkSample | null): string {
 
 function capabilitiesLine(): string {
   const parts: string[] = [];
+  // Not a can/cannot any more: every browser can share through a file input.
+  // What the picker decides is whether a share follows the folder or is pinned
+  // to what was picked, and whether a mount can write back to disk.
   parts.push(
-    typeof window.showDirectoryPicker === "function" ? "FSA" : "no FSA",
+    typeof window.showDirectoryPicker === "function" ? "FSA" : "snapshot-only",
   );
   parts.push(typeof RTCPeerConnection === "function" ? "WebRTC" : "no WebRTC");
   parts.push(window.isSecureContext ? "secure" : "insecure");
@@ -731,6 +738,16 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
               {info?.transfer.mount_fallback_reason ? (
                 <Text color="warning">
                   fell back: {info.transfer.mount_fallback_reason}
+                </Text>
+              ) : null}
+              {/*
+                A stale tab looks exactly like a slow one until you can compare
+                versions, and "who is feeding this" is the other half of it — a
+                tree relayed by a seeder moves only when that seeder's does.
+              */}
+              {info ? (
+                <Text color="fgMuted">
+                  tree v{info.transfer.manifest_version} via {info.transfer.source}
                 </Text>
               ) : null}
               {/*

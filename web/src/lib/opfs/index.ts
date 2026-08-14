@@ -6,13 +6,15 @@
  * The origin private file system is the same File System Access API without the
  * picker: `navigator.storage.getDirectory()` returns a real
  * `FileSystemDirectoryHandle` and `getFileHandle(…, {create: true})` a real
- * `FileSystemFileHandle`. That matters beyond convenience, because the wasm
- * side checks the type — `parse_listing` does a
- * `dyn_into::<FileSystemFileHandle>()` — so an object that merely has
- * `getFile()` is refused.
+ * `FileSystemFileHandle`. Realness matters, because the wasm side classifies
+ * what it is given — `parse_listing` accepts a `FileSystemFileHandle` or a
+ * `File` and refuses anything else, so an object that merely has `getFile()`
+ * gets nowhere.
  *
  * What comes out is an ordinary handle, so `startProducer` serves it exactly as
- * it serves a picked folder. Only the origin of the handle differs.
+ * it serves a picked folder — including the rescan loop, which a share built
+ * from `<input type="file">` does not get. Only the origin of the handle
+ * differs.
  *
  * The bytes live in the browser's per-origin storage. They are subject to the
  * origin's quota and to eviction under pressure, and callers should not promise

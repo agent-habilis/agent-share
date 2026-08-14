@@ -134,11 +134,7 @@ mod tests {
     /// it backwards would be invisible in every other test.
     #[test]
     fn the_rarest_chunk_is_asked_for_first() {
-        let holders = [
-            peer(3, &[0, 1, 2]),
-            peer(3, &[0, 1]),
-            peer(3, &[0]),
-        ];
+        let holders = [peer(3, &[0, 1, 2]), peer(3, &[0, 1]), peer(3, &[0])];
         let out = plan(&[0, 1, 2], &holders);
         let first = out
             .peers

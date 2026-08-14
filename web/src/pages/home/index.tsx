@@ -7,10 +7,19 @@ import { component, signal } from 'visage-dom'
 
 import { Centered } from '../../components/Centered/index.tsx'
 import { Chrome } from '../../components/Chrome/index.tsx'
-import { FailedBody, type FailureKind } from '../../components/FailedBody/index.tsx'
+import { FailedBody } from '../../components/FailedBody/index.tsx'
 import { LoadingBody } from '../../components/LoadingBody/index.tsx'
 import { useShareNav } from '../nav.ts'
-import { canProduce, pickShareRoot, startProducer, type ShareProducer } from '../../lib/produce.ts'
+import { pickShareFiles, type PickMode } from '../../lib/pickShareFiles/index.ts'
+import {
+  canProduceLive,
+  directorySource,
+  pickShareRoot,
+  snapshotSource,
+  startProducer,
+  type ShareProducer,
+  type ShareSource,
+} from '../../lib/produce.ts'
 import { parseShareInput, shareUrl } from '../../lib/ticket/index.ts'
 import { humanBytes } from '../../lib/tree.ts'
 
@@ -18,7 +27,7 @@ type HomeState =
   | { phase: 'landing' }
   | { phase: 'creating' }
   | { phase: 'serving'; producer: ShareProducer }
-  | { phase: 'failed'; reason: string; kind?: FailureKind }
+  | { phase: 'failed'; reason: string }
 
 export const HomePage = component(function* (_props) {
   // Nested plain functions below capture `ctx`; `this` would not reach them.
@@ -32,23 +41,28 @@ export const HomePage = component(function* (_props) {
    */
   let newSharePassword = ''
 
-  async function createShare(): Promise<void> {
-    if (!canProduce()) {
-      state.value = {
-        phase: 'failed',
-        kind: 'unsupported',
-        reason: 'This browser cannot share folders (File System Access API required)',
-      }
-      return
-    }
+  /**
+   * Open a picker and serve what comes back.
+   *
+   * The picker call is the first thing that happens, before any `await`. Both
+   * `showDirectoryPicker()` and `input.click()` spend the transient user
+   * activation from the click that got us here, and an await hoisted above
+   * either one breaks the pick — in Safari silently, with a `NotAllowedError`
+   * no Chromium test run would ever see.
+   */
+  async function createShare(mode: PickMode): Promise<void> {
+    const pick: Promise<ShareSource> =
+      mode === 'folder' && canProduceLive()
+        ? pickShareRoot().then(directorySource)
+        : pickShareFiles(mode).then(snapshotSource)
     try {
-      const root = await pickShareRoot()
+      const source = await pick
       if (ctx.aborted.aborted) return
       state.value = { phase: 'creating' }
       // Empty means unprotected. An empty string is not a password, and
       // passing one would protect the share with something nobody can type.
       const producer = await startProducer(
-        root,
+        source,
         newSharePassword.length > 0 ? newSharePassword : undefined,
       )
       if (ctx.aborted.aborted) {
@@ -114,7 +128,7 @@ export const HomePage = component(function* (_props) {
             </Button>
           }
         >
-          <FailedBody reason={current.reason} kind={current.kind} />
+          <FailedBody reason={current.reason} />
         </Chrome>
       )
     }
@@ -158,6 +172,28 @@ export const HomePage = component(function* (_props) {
                       will not open it.
                     </Text>
                   ) : null}
+                  {/*
+                    A snapshot share cannot be rescanned, so say it here rather
+                    than let the sender discover it as a read error on the far
+                    end after they edit a file.
+                  */}
+                  {current.producer.live ? null : (
+                    <Text color="fgMuted">
+                      Snapshot — these files as they were when you picked them. Edits
+                      will not reach peers, and empty folders were not included. Stop
+                      and pick again to publish changes.
+                    </Text>
+                  )}
+                  {current.producer.skipped + current.producer.renamed > 0 ? (
+                    <Text color="warning">
+                      {current.producer.skipped > 0
+                        ? `${current.producer.skipped} file(s) left out: unsafe path. `
+                        : ''}
+                      {current.producer.renamed > 0
+                        ? `${current.producer.renamed} renamed to avoid a clash.`
+                        : ''}
+                    </Text>
+                  ) : null}
                   <Button
                     variant="primary"
                     onclick={() => {
@@ -178,8 +214,17 @@ export const HomePage = component(function* (_props) {
       <Chrome>
         <Centered>
           <Stack direction="column" gap={1}>
-            <Button variant="primary" onclick={() => void createShare()}>
-              Add files/folder
+            <Button variant="primary" onclick={() => void createShare('folder')}>
+              Share a folder
+            </Button>
+            {/*
+              Both buttons everywhere. Loose files are not a Safari consolation
+              prize — the directory picker cannot share a hand-picked set at
+              all — and on iOS, where no browser offers folder selection, this
+              is the only way in.
+            */}
+            <Button variant="secondary" onclick={() => void createShare('files')}>
+              Share files
             </Button>
             {/*
               Above the picker rather than after it: the folder picker needs a

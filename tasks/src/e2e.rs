@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 use xshell::{Shell, cmd};
 
 use crate::TaskOutcome;
-use crate::bench::browser::{Browser, evaluate, js_string, run_browse, start_dev_server};
+use crate::bench::browser::{
+    Browser, evaluate, evaluate_in, js_string, run_browse, start_dev_server,
+};
 use crate::bench::proc::{Proc, Res, TempDir, run_capture, spawn_piped};
 use crate::bench::reap;
 use crate::util::{self, output};
@@ -116,6 +118,26 @@ const CELLS: &[Cell] = &[
         precheck: None,
     },
     Cell {
+        name: "web-live-update",
+        run: cell_live_update,
+        precheck: None,
+    },
+    Cell {
+        name: "web-live-delete",
+        run: cell_live_delete,
+        precheck: None,
+    },
+    Cell {
+        name: "web-seeder-propagation",
+        run: cell_seeder_propagation,
+        precheck: None,
+    },
+    Cell {
+        name: "web-seeder-propagation-two-tabs",
+        run: cell_seeder_propagation_two_tabs,
+        precheck: None,
+    },
+    Cell {
         name: "web-transport-webrtc",
         run: cell_transport_webrtc,
         precheck: None,
@@ -193,6 +215,11 @@ const CELLS: &[Cell] = &[
     Cell {
         name: "password-web-producer",
         run: cell_password_web_producer,
+        precheck: None,
+    },
+    Cell {
+        name: "password-web-producer-snapshot",
+        run: cell_password_web_producer_snapshot,
         precheck: None,
     },
 ];
@@ -311,9 +338,6 @@ fn missing_prerequisite(root: &Path) -> Option<String> {
     if !root.join(crate::bench::WASM_ARTIFACT).exists() {
         return Some("the wasm client is missing — run `cargo task web-wasm`".to_owned());
     }
-    if sha256_tool().is_none() {
-        return Some("neither `shasum` nor `sha256sum` is on PATH".to_owned());
-    }
     if !has_network() {
         return Some(
             "no network — a browser reaches a native producer by brokering \
@@ -406,35 +430,23 @@ fn make_share(count: usize) -> Res<(TempDir, String)> {
     Ok((dir, digest))
 }
 
-/// `(program, args)` for whichever SHA-256 tool this host has.
+/// The fixture's digest, hashed here rather than by a child process.
 ///
-/// Shelling out rather than adding a `sha2` dependency: this crate exists to
-/// drive other processes, and one hash of one fixture per cell is not worth a
-/// new entry in `Cargo.lock`.
-fn sha256_tool() -> Option<(&'static str, &'static [&'static str])> {
-    for (program, args) in [
-        ("shasum", &["-a", "256"] as &[&str]),
-        ("sha256sum", &[] as &[&str]),
-    ] {
-        if Command::new(program).arg("--version").output().is_ok() {
-            return Some((program, args));
-        }
-    }
-    None
-}
-
+/// This used to shell out to `shasum`/`sha256sum`, which cost a spawn per cell
+/// and made "neither is on PATH" a reason to skip the entire suite. `sha2` was
+/// already in the lockfile through `agent-share-proto`, so the dependency it
+/// was avoiding did not exist.
 fn sha256_file(path: &Path) -> Res<String> {
-    let (program, args) = sha256_tool().ok_or("no SHA-256 tool on PATH")?;
-    let output = Command::new(program)
-        .args(args)
-        .arg(path)
-        .output()
-        .map_err(|error| format!("hashing {}: {error}", path.display()))?;
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .next()
-        .map(str::to_owned)
-        .ok_or_else(|| format!("{program} printed no digest for {}", path.display()).into())
+    use sha2::{Digest as _, Sha256};
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("hashing {}: {error}", path.display()))?;
+    let digest = Sha256::digest(&bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -449,7 +461,10 @@ fn sha256_file(path: &Path) -> Res<String> {
 struct Page {
     _browser: Browser,
     producer: Proc,
-    _dir: TempDir,
+    /// The directory being served. Named rather than `_dir` so a cell can
+    /// change the share while a tab is connected to it — which is the only way
+    /// to test a live update at all.
+    dir: TempDir,
     /// SHA-256 of the fixture's `blob.bin`, for the cells that compare bytes.
     blob_sha256: String,
 }
@@ -515,7 +530,7 @@ impl Page {
         let page = Self {
             _browser: browser,
             producer,
-            _dir: dir,
+            dir,
             blob_sha256,
         };
         arm()?;
@@ -737,8 +752,34 @@ impl Attempt {
 /// every consumer path goes through.
 fn mirror_attempt(ctx: &Ctx<'_>, ticket: &str, password: Option<&str>) -> Res<(Attempt, TempDir)> {
     let dest = TempDir::new("e2e-mirror")?;
+    let attempt = mirror_run(ctx, ticket, dest.path(), password)?;
+    Ok((attempt, dest))
+}
+
+/// Mirror into a directory the caller owns, so a copy can be taken twice.
+///
+/// [`mirror_attempt`] makes its own `TempDir`, which is right for the rows that
+/// only care whether one mirror succeeded. Catching a copy *up* needs the same
+/// destination twice — the second run reads the sidecar and asks for the
+/// difference.
+fn mirror_into(ctx: &Ctx<'_>, ticket: &str, dest: &Path) -> Res<()> {
+    let attempt = mirror_run(ctx, ticket, dest, None)?;
+    if !attempt.ok {
+        return Err(format!(
+            "mirroring into {} failed:\n{}",
+            dest.display(),
+            attempt.output
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// The one place a `mirror` is spawned. Both callers differ only in who owns
+/// the destination and whether a failure is fatal.
+fn mirror_run(ctx: &Ctx<'_>, ticket: &str, dest: &Path, password: Option<&str>) -> Res<Attempt> {
     let mut cmd = Command::new(ctx.binary);
-    cmd.arg("mirror").arg(ticket).arg(dest.path());
+    cmd.arg("mirror").arg(ticket).arg(dest);
     if let Some(password) = password {
         cmd.args(["--password", password]);
     }
@@ -747,15 +788,11 @@ fn mirror_attempt(ctx: &Ctx<'_>, ticket: &str, password: Option<&str>) -> Res<(A
     cmd.env("AGENT_SHARE_DISCOVERY_DEADLINE_SECS", DISCOVERY_SECS);
     let started = Instant::now();
     let captured = run_capture(cmd, "e2e mirror", NATIVE_TIMEOUT)?;
-    let took = started.elapsed();
-    Ok((
-        Attempt {
-            output: format!("{}{}", captured.stdout, captured.stderr),
-            ok: captured.status.success(),
-            took,
-        },
-        dest,
-    ))
+    Ok(Attempt {
+        output: format!("{}{}", captured.stdout, captured.stderr),
+        ok: captured.status.success(),
+        took: started.elapsed(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1108,32 +1145,52 @@ fn node_datachannel_missing() -> Option<String> {
 /// against what the native side derives from the same ticket — and they have to
 /// agree byte for byte or the two ends land on different meshes.
 ///
-/// Producing in the app needs `showDirectoryPicker()`, which needs a user
-/// gesture and cannot be driven headlessly, which is why this row did not exist.
-/// `/lab` seeds the **origin private file system** instead: real
-/// `FileSystemFileHandle`s with no gesture and no prompt, handed to the same
-/// `startProducer` the app calls. Only the origin of the folder differs.
+/// Producing in the app needs a picker, which needs a user gesture and cannot
+/// be driven headlessly, which is why this row did not exist. `/lab` stands the
+/// same `startProducer` up from a source that needs no gesture.
 fn cell_password_web_producer(ctx: &Ctx<'_>) -> Res<()> {
-    let _browser = open_window(ctx, &format!("{}lab", ctx.url))?;
-
     // Stated, not inferred: a Chrome without OPFS must fail this row with the
     // reason, never pass it. The `precheck` hook cannot help — it runs before
     // any browser exists.
-    let opfs = evaluate("String(typeof navigator.storage?.getDirectory === 'function')")?;
-    if opfs.trim() != "true" {
-        return Err(
-            "this browser has no origin private file system, so a tab cannot \
-                    produce a share without the directory picker"
-                .into(),
-        );
-    }
+    web_producer_over(ctx, "opfs", |_| {
+        let opfs = evaluate("String(typeof navigator.storage?.getDirectory === 'function')")?;
+        if opfs.trim() != "true" {
+            return Err(
+                "this browser has no origin private file system, so a tab cannot \
+                        produce a share without the directory picker"
+                    .into(),
+            );
+        }
+        Ok(())
+    })
+}
+
+/// **The same, from `File`s instead of handles — the Safari and Firefox path.**
+///
+/// Those browsers have no directory picker, so they share through
+/// `<input type="file">` and the producer serves `File`s: same lazy ranged
+/// reads, but pinned to what was picked. The branch is a different arm of
+/// `FileSource` all the way down, and nothing else exercises it.
+///
+/// Runs in headless Chrome like every other row, so it proves the *branch*, not
+/// Safari. It needs no OPFS, which is why it carries no precheck of its own.
+fn cell_password_web_producer_snapshot(ctx: &Ctx<'_>) -> Res<()> {
+    web_producer_over(ctx, "snapshot", |_| Ok(()))
+}
+
+/// Drive `/lab`'s share panel in `mode`, then open what it serves from the CLI.
+fn web_producer_over(ctx: &Ctx<'_>, mode: &str, ready: impl Fn(&Browser) -> Res<()>) -> Res<()> {
+    let browser = open_window(ctx, &format!("{}lab", ctx.url))?;
+    ready(&browser)?;
 
     let started = format!(
         "(() => {{ \
            document.getElementById('share-files').value = '2'; \
+           document.getElementById('share-mode').value = {}; \
            document.getElementById('share-password').value = {}; \
            document.getElementById('share-start').click(); \
            return true }})()",
+        js_string(mode),
         js_string(PASSWORD)
     );
     wait_for_true(&started, Duration::from_secs(30), "the lab share panel")?;
@@ -1185,20 +1242,75 @@ fn cell_password_web_producer(ctx: &Ctx<'_>) -> Res<()> {
         }
     }
 
-    // Stop the share so the lab removes its OPFS directory rather than leaving
+    // Stop the share so the lab removes any OPFS directory rather than leaving
     // it for the next run.
     let _ = evaluate("(() => { document.getElementById('share-stop').click(); return true })()");
+    drop(browser);
     Ok(())
 }
 
-/// Launch a headless window on `target` and wait for it to be drivable.
+/// A second window's folder key.
 ///
-/// The part of [`Page::open`] that does not need a producer of its own, for the
-/// rows that stand one up themselves — or kill it first.
-fn open_window(ctx: &Ctx<'_>, target: &str) -> Res<Browser> {
-    run_browse(&["launch", "--headless", ctx.folder, target])?;
-    reap::track_browser(ctx.folder);
-    let browser = Browser::new(ctx.folder.to_owned());
+/// `agent-browse` gives one window per folder and keys its profile by that
+/// path, so a second peer needs a second real directory — and the separate
+/// profile is the point, not a side effect: one shared `IndexedDB` would let
+/// the "fresh" consumer serve itself from its own chunk store and pass a
+/// propagation test while proving nothing.
+///
+/// `target/` rather than a source directory, because the bare `evaluate` drives
+/// whatever window matches the *current* directory: pick somewhere a person
+/// might plausibly run `cargo task e2e` from and the two windows trade places.
+fn second_folder() -> String {
+    util::repo_root().join("target").display().to_string()
+}
+
+/// [`wait_for_true`], against the window keyed to `folder`.
+fn wait_for_true_in(folder: &str, expression: &str, timeout: Duration, what: &str) -> Res<()> {
+    wait_for_true_at(Some(folder), expression, timeout, what)
+}
+
+/// Poll `expression` until it is truthy, in the window `folder` names — or in
+/// the one the current directory resolves to when it is `None`.
+///
+/// The shape `bench::browser`'s `evaluate_at` already uses: two public names,
+/// one deadline loop, so a change to the poll interval or the failure message
+/// cannot reach one caller and miss the other.
+fn wait_for_true_at(
+    folder: Option<&str>,
+    expression: &str,
+    timeout: Duration,
+    what: &str,
+) -> Res<()> {
+    let deadline = Instant::now() + timeout;
+    let wrapped = format!("String(!!({expression}))");
+    loop {
+        let seen = match folder {
+            Some(folder) => evaluate_in(folder, &wrapped)?,
+            None => evaluate(&wrapped)?,
+        };
+        if seen == "true" {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out after {}s waiting for {what}; the page reads:\n{}",
+                timeout.as_secs(),
+                match folder {
+                    Some(folder) => page_text_in(folder),
+                    None => page_text(),
+                }
+            )
+            .into());
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// [`open_window`], against an explicit folder, for a cell that runs two peers.
+fn open_window_in(folder: &str, target: &str) -> Res<Browser> {
+    run_browse(&["launch", "--headless", folder, target])?;
+    reap::track_browser(folder);
+    let browser = Browser::new(folder.to_owned());
     run_browse(&[
         "wait",
         "--selector",
@@ -1206,9 +1318,17 @@ fn open_window(ctx: &Ctx<'_>, target: &str) -> Res<Browser> {
         "--timeout",
         "60000",
         "--folder",
-        ctx.folder,
+        folder,
     ])?;
     Ok(browser)
+}
+
+/// Launch a headless window on `target` and wait for it to be drivable.
+///
+/// The part of [`Page::open`] that does not need a producer of its own, for the
+/// rows that stand one up themselves — or kill it first.
+fn open_window(ctx: &Ctx<'_>, target: &str) -> Res<Browser> {
+    open_window_in(ctx.folder, target)
 }
 
 /// Serve `dir` and return the producer plus the ticket it printed.
@@ -1253,27 +1373,25 @@ fn serve(binary: &str, dir: &Path, password: Option<&str>) -> Res<(Proc, String)
 /// failure is just a stopwatch: "connecting…", "Could not connect: <reason>"
 /// and a blank body are three different bugs and read identically.
 fn wait_for_true(expression: &str, timeout: Duration, what: &str) -> Res<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if evaluate(&format!("String(!!({expression}))"))? == "true" {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "timed out after {}s waiting for {what}; the page reads:\n{}",
-                timeout.as_secs(),
-                page_text()
-            )
-            .into());
-        }
-        std::thread::sleep(POLL);
-    }
+    wait_for_true_at(None, expression, timeout, what)
 }
 
 /// What the page currently says, trimmed to something readable in a log.
 fn page_text() -> String {
-    evaluate("(document.body.innerText || '').slice(0, 600)")
-        .unwrap_or_else(|error| format!("<could not read the page: {error}>"))
+    read_page(evaluate(PAGE_TEXT))
+}
+
+/// [`page_text`], from the window keyed to `folder`.
+fn page_text_in(folder: &str) -> String {
+    read_page(evaluate_in(folder, PAGE_TEXT))
+}
+
+/// Truncated on purpose: a failure message carrying a whole page body is a
+/// failure message nobody reads.
+const PAGE_TEXT: &str = "(document.body.innerText || '').slice(0, 600)";
+
+fn read_page(result: Res<String>) -> String {
+    result.unwrap_or_else(|error| format!("<could not read the page: {error}>"))
 }
 
 /// Click a button by its label, waiting for it to exist and be enabled.
@@ -1339,6 +1457,169 @@ fn cell_list(ctx: &Ctx<'_>) -> Res<()> {
         return Err(format!("expected 3 files in the tree, the page shows {count}").into());
     }
     page.finish()
+}
+
+/// **A file added while a tab is connected reaches it, with no reload.**
+///
+/// The path the whole watch stack exists for, and nothing covered it: every
+/// other cell writes its fixture before the producer starts, so a producer that
+/// never published a change would have passed all of them.
+fn cell_live_update(ctx: &Ctx<'_>) -> Res<()> {
+    let page = Page::open(ctx, 3, "")?;
+    wait_for_listing()?;
+
+    std::fs::write(page.dir.path().join("added-live.txt"), "added while live\n")
+        .map_err(|error| format!("adding a file to the served share: {error}"))?;
+
+    wait_for_true(
+        "/added-live\\.txt/.test(document.body.innerText)",
+        CONNECT_TIMEOUT,
+        "a file added while connected to reach the tab",
+    )?;
+    page.finish()
+}
+
+/// **And a file removed while connected leaves it.**
+///
+/// The other direction, which goes through the tombstone path — a removed slot
+/// is kept so indices never shift, so "gone from the tree" and "gone from the
+/// manifest" are deliberately not the same thing.
+fn cell_live_delete(ctx: &Ctx<'_>) -> Res<()> {
+    let page = Page::open(ctx, 3, "")?;
+    wait_for_listing()?;
+    wait_for_true(
+        "/f001\\.txt/.test(document.body.innerText)",
+        CONNECT_TIMEOUT,
+        "the fixture file the test is about to remove",
+    )?;
+
+    std::fs::remove_file(page.dir.path().join("f001.txt"))
+        .map_err(|error| format!("removing a file from the served share: {error}"))?;
+
+    wait_for_true(
+        "String(!/f001\\.txt/.test(document.body.innerText))",
+        CONNECT_TIMEOUT,
+        "a file removed while connected to leave the tab",
+    )?;
+    page.finish()
+}
+
+/// **A change reaches a peer that never met the producer.**
+///
+/// The other half of the invariant. Everything else asserts that only the
+/// creator can *author* a version; this asserts that anybody may *carry* one —
+/// which is what makes a share outlive the process that made it.
+///
+/// The origin publishes a second version, a copy catches up to it, and only then
+/// does the origin die. A tab opened afterwards holds the **original** ticket,
+/// whose address points at a process that is gone, so the tree it renders can
+/// only have come from the copy — and the copy holds no signing key
+/// (`mount::produce::authorship_for`), so the signature on it is still the
+/// creator's or the tab would have refused it.
+fn cell_seeder_propagation(ctx: &Ctx<'_>) -> Res<()> {
+    let (dir, _sha) = make_share(3)?;
+    let (mut origin, ticket) = serve(ctx.binary, dir.path(), None)?;
+
+    // A copy taken at v1, before the change exists.
+    let copy = TempDir::new("e2e-seeder")?;
+    mirror_into(ctx, &ticket, copy.path())?;
+    if copy.path().join("added-live.txt").exists() {
+        return Err("the fixture already had the file this row adds".into());
+    }
+
+    // v2.
+    std::fs::write(dir.path().join("added-live.txt"), "added while live\n")
+        .map_err(|error| format!("adding a file to the served share: {error}"))?;
+    // The copy catches up, re-serving the creator's signature verbatim.
+    //
+    // Retried rather than slept on. The producer debounces a rescan for 300 ms
+    // and publishes once it settles, so the honest wait is "until the copy has
+    // it" — and a mirror's own connect usually outlasts the debounce, so this
+    // costs one attempt and no fixed delay.
+    let deadline = Instant::now() + NATIVE_TIMEOUT;
+    loop {
+        mirror_into(ctx, &ticket, copy.path())?;
+        if copy.path().join("added-live.txt").exists() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("the copy never caught up to the producer's change".into());
+        }
+        std::thread::sleep(POLL);
+    }
+
+    // From here the copy is the only source of the share.
+    let (mut seeder, _seeder_ticket) = serve(ctx.binary, copy.path(), None)?;
+    origin.interrupt();
+
+    let _browser = open_window(ctx, &format!("{}files/{ticket}", ctx.url))?;
+    let found = wait_for_true(
+        "/added-live\\.txt/.test(document.body.innerText)",
+        CONNECT_TIMEOUT,
+        "a change made before the origin died to reach a tab served by a seeder",
+    );
+    seeder.interrupt();
+    found
+}
+
+/// **A browser tab carries a change to another browser tab.**
+///
+/// The shape the requirement is actually about, and the one
+/// [`cell_seeder_propagation`] cannot reach: there the seeder is a native
+/// process, here it is a tab. Two windows, so two Chrome profiles and two
+/// `IndexedDB`s — a shared one would let the second tab serve itself and pass
+/// while proving nothing.
+///
+/// Tab A reads the share, so it holds bytes and can answer for them. The origin
+/// then publishes a change and dies. Tab B — a different profile, holding
+/// nothing — opens the **original** ticket and must still see the change, which
+/// by then exists nowhere but in tab A.
+///
+/// Default transport on the consumer, not a pinned one. Reaching a *browser*
+/// seeder means forming a data channel to it, and only the dynamic lane both
+/// falls back to a seeder and can negotiate one: `webrtc` pins the lane and has
+/// no seeder fallback at all, while `relay` has the fallback but no way to dial
+/// a peer that lives in a tab.
+fn cell_seeder_propagation_two_tabs(ctx: &Ctx<'_>) -> Res<()> {
+    let (dir, _sha) = make_share(3)?;
+    let (mut origin, ticket) = serve(ctx.binary, dir.path(), None)?;
+
+    // Tab A takes the whole share, which is what arms it as a seeder: `Seed`
+    // fetches every slot and republishes what landed. `Seeding` is the label the
+    // button takes once it holds everything, so waiting for it is waiting for
+    // the bytes rather than for the click.
+    let _a = open_window(ctx, &format!("{}files/{ticket}", ctx.url))?;
+    wait_for_listing()?;
+    click("Seed")?;
+    wait_for_true(
+        "[...document.querySelectorAll('button')]\
+         .some((b)=>(b.innerText||'').trim().toLowerCase()==='seeding')",
+        ACTION_TIMEOUT,
+        "tab A to hold the whole share, so it has something to seed",
+    )?;
+
+    // The origin publishes a change. Tab A verifies it and re-arms as a seeder
+    // for the new version; without that the change would stop here.
+    std::fs::write(dir.path().join("added-live.txt"), "added while live\n")
+        .map_err(|error| format!("adding a file to the served share: {error}"))?;
+    wait_for_true(
+        "/added-live\\.txt/.test(document.body.innerText)",
+        CONNECT_TIMEOUT,
+        "tab A to take the change before it becomes the only copy of it",
+    )?;
+
+    // From here the change exists only in tab A. `interrupt` waits for the
+    // process to actually go, so there is nothing left to sleep for.
+    origin.interrupt();
+
+    let folder_b = second_folder();
+    let _b = open_window_in(&folder_b, &format!("{}files/{ticket}", ctx.url))?;
+    wait_for_true_in(
+        &folder_b,
+        "/added-live\\.txt/.test(document.body.innerText)",
+        ACTION_TIMEOUT,
+        "a second tab to receive a change that only another tab still holds",
+    )
 }
 
 /// Bytes arrive **identical to source**. Nothing else in this repo checks that.

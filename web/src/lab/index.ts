@@ -7,7 +7,12 @@ import '../compat.ts'
 
 import { createShareDirectory, removeShareDirectory, writeOpfsFile } from '../lib/opfs/index.ts'
 import { buildPeerCard } from '../lib/peerCard/index.ts'
-import { startProducer as startShareProducer, type ShareProducer } from '../lib/produce.ts'
+import {
+  directorySource,
+  snapshotSource,
+  startProducer as startShareProducer,
+  type ShareProducer,
+} from '../lib/produce.ts'
 import { parseShareInput } from '../lib/ticket/index.ts'
 import { loadWasm, type WasmModule } from '../wasm/index.ts'
 
@@ -15,8 +20,11 @@ type BenchProducer = Awaited<ReturnType<WasmModule['BenchProducer']['start']>>
 
 let producer: BenchProducer | null = null
 
-/** The file share this tab is serving, and the OPFS directory behind it. */
-let share: { producer: ShareProducer; root: string } | null = null
+/**
+ * The file share this tab is serving, and the OPFS directory behind it — `null`
+ * for a snapshot share, which owns no directory to clean up.
+ */
+let share: { producer: ShareProducer; root: string | null; added: number } | null = null
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id)
@@ -130,14 +138,41 @@ async function opfsShareRoot(
 }
 
 /**
- * Serve a real file share from OPFS.
+ * The same tree as [`opfsShareRoot`], built as `File`s instead of handles.
  *
- * Everything after the root comes from the app: `startProducer` scans the
- * directory and drives the wasm `ShareProducer` exactly as **Add files/folder**
- * does. Only the origin of the handle differs, which is the point — a test that
- * built its own producer would prove nothing about the one users get.
+ * This is what Safari and Firefox produce from `<input type="file">`, and the
+ * only way to drive that branch headlessly: the input needs a real click, but
+ * a `File` can be constructed, and `webkitRelativePath` — a read-only getter —
+ * takes an own property that shadows it.
+ */
+function snapshotShareFiles(count: number): File[] {
+  const at = (relPath: string, contents: string): File => {
+    const name = relPath.slice(relPath.lastIndexOf('/') + 1)
+    const file = new File([contents], name)
+    Object.defineProperty(file, 'webkitRelativePath', { value: `lab-share/${relPath}` })
+    return file
+  }
+  const files = [
+    at('blob.bin', 'x'.repeat(64 * 1024)),
+    at('empty.txt', ''),
+    at('nested/deep.txt', 'nested file\n'),
+  ]
+  for (let index = 0; index < count; index += 1) {
+    files.push(at(`f${String(index).padStart(3, '0')}.txt`, `file ${index}\n`))
+  }
+  return files
+}
+
+/**
+ * Serve a real file share, from OPFS handles or from picked-file snapshots.
+ *
+ * Everything after the source comes from the app: `startProducer` drives the
+ * wasm `ShareProducer` exactly as the share buttons do. Only where the files
+ * came from differs, which is the point — a test that built its own producer
+ * would prove nothing about the one users get.
  */
 async function startShare(
+  mode: 'opfs' | 'snapshot',
   count: number,
   password: string,
   log: (...parts: unknown[]) => void,
@@ -149,22 +184,60 @@ async function startShare(
     log('already sharing — stop first')
     return
   }
-  log(`seeding ${count} files into the origin private file system…`)
-  const { handle, name } = await opfsShareRoot(count, log)
-  log('seeded')
+  let source
+  let root: string | null = null
+  if (mode === 'snapshot') {
+    log(`building ${count} files as a picked-file snapshot…`)
+    source = snapshotSource(snapshotShareFiles(count))
+    log('built')
+  } else {
+    log(`seeding ${count} files into the origin private file system…`)
+    const seeded = await opfsShareRoot(count, log)
+    root = seeded.name
+    source = directorySource(seeded.handle)
+    log('seeded')
+  }
   log(`ShareProducer.start(${password ? 'with password' : 'no password'})…`)
-  const started = await startShareProducer(handle, password || undefined)
-  share = { producer: started, root: name }
+  const started = await startShareProducer(source, password || undefined)
+  share = { producer: started, root, added: 0 }
   ticketBox.value = started.ticket
   stopBtn.disabled = false
   copyBtn.disabled = false
+  // Only a directory share rescans, so only that one can gain a file later.
+  el<HTMLButtonElement>('share-add').disabled = root === null
   log(
     `file share ready — ${started.files} files, ${started.bytes} bytes`,
     started.passwordProtected ? '(password required)' : '',
   )
 }
 
-/** Stop the file share and remove the OPFS directory behind it. */
+/**
+ * Add a file to the share that is already running.
+ *
+ * The only way to exercise a browser producer's *live* path: `startProducer`
+ * rescans its directory on a timer, so writing into that directory is what
+ * makes it publish a new version and push a watch frame. A snapshot share has
+ * no directory to write into and no rescan, which is the point of saying so
+ * rather than failing quietly.
+ */
+async function addToShare(log: (...parts: unknown[]) => void): Promise<void> {
+  if (!share) {
+    log('not sharing')
+    return
+  }
+  if (share.root === null) {
+    log('a snapshot share cannot change — stop and start again to republish')
+    return
+  }
+  const opfs = await navigator.storage.getDirectory()
+  const dir = await opfs.getDirectoryHandle(share.root)
+  const name = `added-${share.added}.txt`
+  share.added += 1
+  await writeOpfsFile(dir, name, `added while the share was running\n`)
+  log(`wrote ${name} — the rescan should publish it within ~2s`)
+}
+
+/** Stop the file share and remove the OPFS directory, if it had one. */
 async function stopShare(
   log: (...parts: unknown[]) => void,
   stopBtn: HTMLButtonElement,
@@ -179,8 +252,9 @@ async function stopShare(
   share = null
   stopBtn.disabled = true
   copyBtn.disabled = true
+  el<HTMLButtonElement>('share-add').disabled = true
   await current.producer.stop()
-  if (!(await removeShareDirectory(current.root))) {
+  if (current.root !== null && !(await removeShareDirectory(current.root))) {
     log('could not remove the OPFS directory')
   }
   log('stopped')
@@ -320,14 +394,17 @@ function main() {
   const shareLog = logger(el('share-log'))
   const shareTicket = el<HTMLTextAreaElement>('share-ticket')
   const shareFiles = el<HTMLInputElement>('share-files')
+  const shareMode = el<HTMLSelectElement>('share-mode')
   const sharePassword = el<HTMLInputElement>('share-password')
   const shareStart = el<HTMLButtonElement>('share-start')
+  const shareAdd = el<HTMLButtonElement>('share-add')
   const shareStop = el<HTMLButtonElement>('share-stop')
   const shareCopy = el<HTMLButtonElement>('share-copy')
 
   shareStart.onclick = () => {
     const count = Number.parseInt(shareFiles.value, 10) || 1
     void startShare(
+      shareMode.value === 'snapshot' ? 'snapshot' : 'opfs',
       count,
       sharePassword.value,
       shareLog,
@@ -335,6 +412,11 @@ function main() {
       shareStop,
       shareCopy,
     ).catch((error) => {
+      shareLog('FAILED', jsError(error))
+    })
+  }
+  shareAdd.onclick = () => {
+    void addToShare(shareLog).catch((error) => {
       shareLog('FAILED', jsError(error))
     })
   }

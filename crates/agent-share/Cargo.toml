@@ -85,6 +85,10 @@ notify = "8"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
+# One temp directory helper instead of the hand-rolled copy each test file
+# used to carry. They all did the same thing — unique name, `create_dir_all`,
+# remove-on-drop — and each was a chance to get cleanup subtly wrong.
+tempfile = "3"
 # `test-utils` brings `iroh::test_utils::run_relay_server`, which the path
 # selection regression test needs: reproducing "the warm relay wins the mount
 # dial and is pinned forever" requires a real relay path in the address book,

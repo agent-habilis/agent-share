@@ -37,7 +37,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-use agent_share_proto::authorship::SignedManifest;
 use agent_share_proto::framing::WATCH_FRAME_MANIFEST;
 use agent_share_proto::manifest::ReadStatus;
 use fofoca_chunks::{ChunkHash, ChunkMap, ChunkSource, Coverage, Root};
@@ -144,7 +143,7 @@ impl<S> Seeder<S> {
             .state
             .as_ref()
             .is_none_or(|state| *state.envelope != *envelope);
-        let frame_body = watch_body(&envelope);
+        let frame_body = envelope.as_ref().clone();
         inner.state = Some(State {
             envelope,
             rows,
@@ -365,15 +364,6 @@ async fn complete<S: ChunkSource>(store: &S, root: Root, chunks: usize) -> bool 
 
 /// The manifest inside an `OP_MANIFEST` envelope, for a watch frame.
 ///
-/// Watch frames carry the bare manifest on every producer — see
-/// `LiveTree::opening_frame` for why — so a seeder unwraps rather than passing
-/// its envelope through. An envelope that does not decode yields nothing rather
-/// than a torn frame; the caller has already accepted it, so this is a shape
-/// guard and not a trust decision.
-fn watch_body(envelope: &[u8]) -> Vec<u8> {
-    SignedManifest::decode(envelope).map_or_else(|_| Vec::new(), |signed| signed.manifest)
-}
-
 /// A seeder's watch feed.
 #[derive(Debug)]
 pub struct Feed(mpsc::UnboundedReceiver<Arc<Vec<u8>>>);
@@ -400,7 +390,9 @@ impl<S: ChunkSource + 'static> ServeSource for Seeder<S> {
 
     fn subscribe(&self) -> Option<(Vec<u8>, Self::Watcher)> {
         let mut inner = self.0.write().expect("the seeder lock is poisoned");
-        let body = watch_body(&inner.state.as_ref()?.envelope);
+        // Passed through exactly as handed over: a seeder carries a version the
+        // creator signed and can mint none of its own.
+        let body = inner.state.as_ref()?.envelope.as_ref().clone();
         let (tx, rx) = mpsc::unbounded();
         inner.watchers.push(tx);
         let mut frame = Vec::with_capacity(1 + body.len());
@@ -506,8 +498,8 @@ impl<S: ChunkSource + 'static> ServeSource for Seeder<S> {
 mod tests {
     use super::Seeder;
     use crate::ServeSource as _;
-    use std::sync::Arc;
     use fofoca_chunks::{ChunkMap, MemStore, Root, chunk_hash};
+    use std::sync::Arc;
 
     /// Typed once so every case names the same store. `MemStore` rather than a
     /// real backend on purpose: these are about what a seeder *refuses*, which
@@ -718,7 +710,11 @@ mod tests {
                 "a held chunk must be served, whole file or not"
             );
             let coverage = seeder.answer_have(row.root()).await.expect("in scope");
-            assert_eq!(coverage.count(), 1, "OP_HAVE must report the one held chunk");
+            assert_eq!(
+                coverage.count(),
+                1,
+                "OP_HAVE must report the one held chunk"
+            );
             assert!(
                 seeder.complete_slots().await.is_empty(),
                 "the card must not claim a slot that cannot be read whole"

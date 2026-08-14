@@ -4,7 +4,16 @@
 //! `target/tooling/` on first use (never the dev's global/brew zig);
 //! cargo-zigbuild is a regular crate dependency driven as a *library*, not a
 //! global `cargo install`. So the cross build is self-contained and
-//! reproducible. `--arch` is sugar for a static-musl Linux target.
+//! reproducible. `--arch` is sugar for a glibc Linux target.
+//!
+//! glibc rather than musl, though static linking is the nicer thing to ship.
+//! `noq-udp` asserts `align_of::<T>() <= align_of::<libc::cmsghdr>()` before
+//! reading a control message, and musl declares `cmsg_len` as `socklen_t` where
+//! glibc uses `size_t` — so the header's alignment reads as 4 instead of 8 and
+//! every UDP receive aborts. The buffer it guards is `#[repr(align(8))]`
+//! regardless, so the read was always aligned and the assert is measuring the
+//! wrong thing; but it is in a crates.io dependency, so this is not ours to fix.
+//! A musl target stays reachable through `--target` for anyone who wants to try.
 
 use std::path::PathBuf;
 
@@ -27,8 +36,10 @@ pub(crate) fn run(
     let triple = match (target, arch) {
         (Some(_), Some(_)) => return Err("pass only one of --target / --arch".into()),
         (Some(triple), None) => Some(triple.to_owned()),
-        // `--arch aarch64` ⇒ `aarch64-unknown-linux-musl` (static, no glibc).
-        (None, Some(arch)) => Some(format!("{arch}-unknown-linux-musl")),
+        // `--arch aarch64` ⇒ `aarch64-unknown-linux-gnu`. See the module doc for
+        // why not musl. zig links against an old glibc (2.30 and below at the
+        // pinned version), so the result still runs on anything current.
+        (None, Some(arch)) => Some(format!("{arch}-unknown-linux-gnu")),
         (None, None) => None,
     };
 
@@ -77,7 +88,9 @@ pub(crate) fn run(
         args.push("--release".to_owned());
     }
     let mut build = cargo_zigbuild::Build::parse_from(args);
-    build.enable_zig_ar = true; // mirrors cargo-zigbuild's own bin; needed for musl ar
+    // Mirrors cargo-zigbuild's own bin, which sets this unconditionally. Kept on
+    // for glibc too: harmless there, and `--target …-musl` still needs it.
+    build.enable_zig_ar = true;
     build
         .execute()
         .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;

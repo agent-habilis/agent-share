@@ -245,7 +245,12 @@ impl ShareMeshDriver {
                     .ok()
                     .and_then(|advertised| advertised.serving.clone()),
             )
-            .with_holding(self.serving.lock().ok().map(|advertised| advertised.holding));
+            .with_holding(
+                self.serving
+                    .lock()
+                    .ok()
+                    .map(|advertised| advertised.holding),
+            );
         let merge = serde_json::json!({
             "peers": {
                 ctx.author.as_str(): {

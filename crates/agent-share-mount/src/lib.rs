@@ -23,9 +23,9 @@
 //!
 //! A peer is whatever can answer [`ServeSource`]. There are three of them and
 //! they have nothing in common but the trait: the CLI's producer reads through
-//! to files on disk, the browser's producer reads through to
-//! `FileSystemFileHandle`s, and a seeder of either kind reads from a chunk
-//! store. One dispatch loop drives all three.
+//! to files on disk, the browser's producer reads through to whatever the
+//! browser gave it for a picked file, and a seeder of either kind reads from a
+//! chunk store. One dispatch loop drives all three.
 //!
 //! Futures here are `?Send`, for the reason [`fofoca_chunks`] gives: the same
 //! code runs under tokio and in a browser, where the state is `Rc`-flavoured.

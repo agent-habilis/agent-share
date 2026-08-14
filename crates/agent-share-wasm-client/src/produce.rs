@@ -1,4 +1,8 @@
-//! In-browser share producer: serve a File System Access tree over WebRTC.
+//! In-browser share producer: serve a tree of picked files over WebRTC.
+//!
+//! Each slot reads through a [`FileSource`] — a File System Access handle where
+//! the browser has a directory picker, a plain `File` where it does not. That
+//! is the one difference between a Chromium share and a Safari one.
 //!
 //! Live: JS rescans and calls [`ShareProducer::update`]; `OP_WATCH` pushes
 //! full-manifest frames. The accept loop answers the signal ALPN (JSEP
@@ -8,6 +12,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use agent_share_mount::{ServeSource, Watcher, serve_stream};
 use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::framing::{
     BENCH_KIND_ECHO, BENCH_KIND_FILL, MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES,
@@ -15,8 +20,6 @@ use agent_share_proto::framing::{
     REQUEST_HEADER_LEN, SECRET_LEN, WATCH_FRAME_MANIFEST, WEBRTC_SIGNAL_ALPN,
     decode_bench_request_prefix,
 };
-use agent_share_mount::{ServeSource, Watcher, serve_stream};
-use agent_share_proto::authorship::{SIGNATURE_LEN, SignedManifest};
 use agent_share_proto::lookup::LookupOpts;
 use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
@@ -33,7 +36,7 @@ use js_sys::{Array, Reflect, Uint8Array};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::FileSystemFileHandle;
+use web_sys::{File, FileSystemFileHandle};
 
 use fofoca_chunks::{
     CHUNK_BYTES, ChunkHash, ChunkMap, ChunkMapBuilder, Coverage, Root, chunk_hash,
@@ -66,7 +69,11 @@ impl ChunkTable {
                 // Only drop an address that still points at this slot: two
                 // files sharing a chunk both registered it, and whichever
                 // claimed it first is still able to answer.
-                if self.slot_of_address.get(leaf).is_some_and(|(slot, _)| *slot == index) {
+                if self
+                    .slot_of_address
+                    .get(leaf)
+                    .is_some_and(|(slot, _)| *slot == index)
+                {
                     self.slot_of_address.remove(leaf);
                 }
             }
@@ -77,16 +84,99 @@ impl ChunkTable {
         self.forget(index);
         self.slot_of_root.insert(row.root(), index);
         for (position, leaf) in row.leaves().iter().enumerate() {
-            self.slot_of_address.entry(*leaf).or_insert((index, position));
+            self.slot_of_address
+                .entry(*leaf)
+                .or_insert((index, position));
         }
         self.rows.insert(index, row);
     }
 }
 
+/// What one slot reads through to.
+///
+/// Two origins, one contract. `showDirectoryPicker()` hands out
+/// `FileSystemFileHandle`s, which re-open the file on every read and so follow
+/// it as the user edits it — that is what makes a Chromium share *live*. Safari
+/// and Firefox have no such picker, so a share there is built from
+/// `<input type="file">`, which hands out `File`s: a snapshot, pinned to the
+/// bytes as they were when the folder was picked. Reading one after the file on
+/// disk moved fails rather than returning the new bytes, which is the honest
+/// outcome — the manifest describes the old ones.
+#[derive(Clone)]
+enum FileSource {
+    Handle(FileSystemFileHandle),
+    Snapshot(File),
+}
+
+impl FileSource {
+    /// Classify what JS put in `file.source`.
+    fn from_js(value: JsValue) -> Result<Self, JsValue> {
+        if value.has_type::<FileSystemFileHandle>() {
+            return Ok(Self::Handle(value.unchecked_into()));
+        }
+        if value.has_type::<File>() {
+            return Ok(Self::Snapshot(value.unchecked_into()));
+        }
+        Err(JsValue::from_str(
+            "file.source must be a FileSystemFileHandle or a File",
+        ))
+    }
+
+    /// The file behind this source, now.
+    ///
+    /// A handle re-opens; a snapshot already is the file. That one line is the
+    /// whole difference between a live share and a pinned one.
+    async fn file(&self) -> Result<File, ()> {
+        match self {
+            Self::Handle(handle) => JsFuture::from(handle.get_file())
+                .await
+                .map_err(|_| ())?
+                .dyn_into()
+                .map_err(|_| ()),
+            Self::Snapshot(file) => Ok(file.clone()),
+        }
+    }
+
+    /// Whether a failed read is worth a second attempt. Only a handle can be
+    /// replaced under us by [`ShareProducer::update`]; retrying a snapshot
+    /// re-reads the identical `File` and fails identically.
+    const fn is_live(&self) -> bool {
+        matches!(self, Self::Handle(_))
+    }
+}
+
 pub(crate) struct ProducerShared {
-    state: LiveState<FileSystemFileHandle>,
+    state: LiveState<FileSource>,
     watchers: Vec<mpsc::UnboundedSender<Rc<Vec<u8>>>>,
     chunks: ChunkTable,
+    /// This share's creator. Minted per share and never stored — the same
+    /// lifetime the native side gives it in `authorship_for`.
+    author: SecretKey,
+    /// `version ‖ signature ‖ manifest`, sealed once per change.
+    ///
+    /// Cached for the reason `live.rs` gives for caching its own: `OP_MANIFEST`
+    /// is answered per connecting consumer, and signing there would put an
+    /// ed25519 pass over the whole manifest on every one of those paths.
+    envelope: Rc<Vec<u8>>,
+}
+
+impl ProducerShared {
+    /// Re-seal after the tree moved. The one place a version is signed.
+    fn reseal(&mut self) {
+        self.envelope = Rc::new(agent_share_proto::authorship::seal(
+            Some(&self.author),
+            self.state.version(),
+            self.state.encoded(),
+        ));
+    }
+
+    /// The `WATCH_FRAME_MANIFEST` frame for the current envelope.
+    fn manifest_frame(&self) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(1 + self.envelope.len());
+        frame.push(WATCH_FRAME_MANIFEST);
+        frame.extend_from_slice(&self.envelope);
+        frame
+    }
 }
 
 type Shared = Rc<RefCell<ProducerShared>>;
@@ -128,29 +218,24 @@ impl ProducerSource {
 impl ServeSource for ProducerSource {
     type Watcher = FrameFeed;
 
-    /// A browser-produced share is **unsigned**: there is no key here to sign
-    /// with and nowhere durable to keep one, so the envelope carries a zero
-    /// signature and the ticket this producer hands out names no author. A
-    /// reader therefore never checks, which is the honest outcome — the
-    /// alternative would be a signature nobody could attribute to anyone.
+    /// A browser-produced share is signed, exactly as a native one is.
+    ///
+    /// The key is minted per share and never stored, which is what the native
+    /// side already does — `authorship_for` fills 32 random bytes on every
+    /// `serve` and says so: a restarted origin is a new creator handing out a
+    /// new ticket. A tab has the same lifetime as that process, so it needs no
+    /// answer to the storage question either. What it buys is the same thing
+    /// native gets: a peer holding the link can check a manifest that reached
+    /// it through a seeder, with no live origin and no quorum.
     fn manifest_envelope(&self) -> Option<Vec<u8>> {
-        Some(
-            SignedManifest {
-                version: 0,
-                signature: [0u8; SIGNATURE_LEN],
-                manifest: self.0.borrow().state.encoded().to_vec(),
-            }
-            .encode(),
-        )
+        Some(self.0.borrow().envelope.as_ref().clone())
     }
 
     fn subscribe(&self) -> Option<WatchFeed> {
         let (tx, rx) = mpsc::unbounded::<Rc<Vec<u8>>>();
         let mut borrowed = self.0.borrow_mut();
         borrowed.watchers.push(tx);
-        let mut frame = Vec::with_capacity(1 + borrowed.state.encoded().len());
-        frame.push(WATCH_FRAME_MANIFEST);
-        frame.extend_from_slice(borrowed.state.encoded());
+        let frame = borrowed.manifest_frame();
         Some((frame, FrameFeed(rx)))
     }
 
@@ -184,14 +269,19 @@ impl ServeSource for ProducerSource {
 /// Streamed in chunk-sized pieces rather than slurped: a tab sharing a 4 GB
 /// video must not be asked to hold it in memory to describe it.
 async fn producer_chunk_map(shared: &Shared, index: u32) -> Option<ChunkMap> {
-    let handle = {
+    let source = {
         let borrowed = shared.borrow();
         borrowed.state.slot(index)?.clone()
     };
     // The live size is the version gate. A cached row describing a different
     // length is a file that moved, and answering from it would hand out
     // addresses whose bytes are gone.
-    let live = live_size(&handle).await?;
+    //
+    // A snapshot's size never moves, so the gate always passes there and the
+    // row is served for the life of the tab. That is still safe: a file that
+    // changed underneath fails the read outright, and `producer_chunk`
+    // re-verifies every chunk against its address before answering.
+    let live = live_size(&source).await?;
     if let Some(row) = shared.borrow().chunks.rows.get(&index)
         && row.size() == live
     {
@@ -202,7 +292,7 @@ async fn producer_chunk_map(shared: &Shared, index: u32) -> Option<ChunkMap> {
     let mut offset = 0u64;
     while offset < live {
         let want = u32::try_from((live - offset).min(CHUNK_BYTES)).ok()?;
-        let piece = read_from_handle(&handle, offset, want).await.ok()?;
+        let piece = read_from_source(&source, offset, want).await.ok()?;
         if piece.is_empty() {
             // The file shrank while being read; the row would describe neither
             // version, so there is nothing honest to answer with.
@@ -221,8 +311,15 @@ async fn producer_chunk_map(shared: &Shared, index: u32) -> Option<ChunkMap> {
 
 /// The bytes at one address, read back out of the file they came from.
 async fn producer_chunk(shared: &Shared, address: ChunkHash) -> Option<Vec<u8>> {
-    let (index, position) = { shared.borrow().chunks.slot_of_address.get(&address).copied()? };
-    let handle = {
+    let (index, position) = {
+        shared
+            .borrow()
+            .chunks
+            .slot_of_address
+            .get(&address)
+            .copied()?
+    };
+    let source = {
         let borrowed = shared.borrow();
         borrowed.state.slot(index)?.clone()
     };
@@ -231,7 +328,7 @@ async fn producer_chunk(shared: &Shared, address: ChunkHash) -> Option<Vec<u8>> 
         borrowed.chunks.rows.get(&index)?.range_of(position)
     };
     let want = u32::try_from(range.end - range.start).ok()?;
-    let bytes = read_from_handle(&handle, range.start, want).await.ok()?;
+    let bytes = read_from_source(&source, range.start, want).await.ok()?;
     // Re-verify before answering. The file is the user's and can change between
     // the row being built and this read; serving unverified bytes is how a tab
     // becomes the peer everyone else has to defend against.
@@ -242,11 +339,9 @@ async fn producer_chunk(shared: &Shared, address: ChunkHash) -> Option<Vec<u8>> 
     Some(bytes)
 }
 
-/// The file's size right now, straight from the handle.
-async fn live_size(handle: &FileSystemFileHandle) -> Option<u64> {
-    let file = JsFuture::from(handle.get_file()).await.ok()?;
-    let file: web_sys::File = file.dyn_into().ok()?;
-    Some(file.size() as u64)
+/// The file's size right now — live from a handle, pinned from a snapshot.
+async fn live_size(source: &FileSource) -> Option<u64> {
+    Some(source.file().await.ok()?.size() as u64)
 }
 
 /// An in-browser share, serving until [`ShareProducer::stop`].
@@ -270,7 +365,9 @@ pub struct ShareProducer {
 #[wasm_bindgen]
 impl ShareProducer {
     /// Start serving a pre-scanned listing from JS:
-    /// `{ dirs: string[], files: { rel_path, size, mtime, handle }[] }`.
+    /// `{ dirs: string[], files: { rel_path, size, mtime, source }[] }`.
+    ///
+    /// `source` is a `FileSystemFileHandle` or a `File`; see [`FileSource`].
     ///
     /// Pass a `password` to protect the share: the ticket then addresses it
     /// without opening it, so the link is safe to post somewhere the password
@@ -294,11 +391,22 @@ impl ShareProducer {
             return Err(JsValue::from_str("tree too large to serve"));
         }
 
+        // The share's creator, minted here and never stored. Separate from the
+        // endpoint key below on purpose: that one answers "who is on the other
+        // end of this connection", which is not the question a manifest
+        // signature asks. See `agent_share_proto::authorship`.
+        let author = SecretKey::generate();
+        let named_author = Some(*author.public().as_bytes());
+
         let shared: Shared = Rc::new(RefCell::new(ProducerShared {
             state,
             watchers: Vec::new(),
             chunks: ChunkTable::default(),
+            author,
+            // Sealed once here; `reseal` is the only other writer.
+            envelope: Rc::new(Vec::new()),
         }));
+        shared.borrow_mut().reseal();
 
         let key = SecretKey::generate();
         let local = key.public();
@@ -335,7 +443,10 @@ impl ShareProducer {
         let protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> = vec![
             (
                 MOUNT_ALPN.to_vec(),
-                Box::new(MountHandler::new(ProducerSource::new(Rc::clone(&shared)), auth)),
+                Box::new(MountHandler::new(
+                    ProducerSource::new(Rc::clone(&shared)),
+                    auth,
+                )),
             ),
             (
                 WEBRTC_SIGNAL_ALPN.to_vec(),
@@ -386,7 +497,7 @@ impl ShareProducer {
             // Only on a protected share: an ordinary one needs no id in its
             // ticket, because every peer derives the same mesh from the secret.
             mesh_id: auth.password_protected().then(|| mesh_id.clone()),
-            author: None,
+            author: named_author,
         };
         let ticket_str = ticket.encode();
 
@@ -405,6 +516,10 @@ impl ShareProducer {
     /// Sync on purpose: no awaits ⇒ atomic with respect to reads and watch
     /// registration. Oversized encodings are refused; the previous tree stays.
     ///
+    /// Only a share built from a directory handle calls this. A snapshot share
+    /// cannot be rescanned — re-reading the folder needs a fresh user gesture —
+    /// so it is published once and never updated.
+    ///
     /// # Errors
     /// Bad listing shape.
     pub fn update(&self, listing: JsValue) -> Result<(), JsValue> {
@@ -421,10 +536,8 @@ impl ShareProducer {
             shared.state.restore(previous);
             return Ok(());
         }
-        let mut frame = Vec::with_capacity(1 + shared.state.encoded().len());
-        frame.push(WATCH_FRAME_MANIFEST);
-        frame.extend_from_slice(shared.state.encoded());
-        let frame = Rc::new(frame);
+        shared.reseal();
+        let frame = Rc::new(shared.manifest_frame());
         shared
             .watchers
             .retain(|tx| tx.unbounded_send(Rc::clone(&frame)).is_ok());
@@ -524,7 +637,7 @@ impl ShareProducer {
 /// race for one queue.
 ///
 /// Both handlers must be `Send + Sync + 'static` to live in the Router, while
-/// the producer's state holds `FileSystemFileHandle`s and the JSEP path holds
+/// the producer's state holds [`FileSource`]s and the JSEP path holds
 /// web-sys closures — all `!Send`. `SendWrapper` bridges that: it is sound
 /// because wasm is single-threaded, and it panics loudly rather than silently
 /// if that ever stops being true. The actual work is then spawned with
@@ -866,7 +979,7 @@ async fn serve_bench_stream(
 
 struct Scanned {
     dirs: Vec<DirEntry>,
-    files: Vec<(FileEntry, FileSystemFileHandle)>,
+    files: Vec<(FileEntry, FileSource)>,
 }
 
 fn parse_listing(listing: &JsValue) -> Result<Scanned, JsValue> {
@@ -915,11 +1028,9 @@ fn parse_listing(listing: &JsValue) -> Result<Scanned, JsValue> {
             .ok()
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as i64;
-        let handle_val = Reflect::get(&entry, &JsValue::from_str("handle"))
-            .map_err(|error| js_err("file.handle", error))?;
-        let handle: FileSystemFileHandle = handle_val
-            .dyn_into()
-            .map_err(|_| JsValue::from_str("file.handle must be a FileSystemFileHandle"))?;
+        let source_val = Reflect::get(&entry, &JsValue::from_str("source"))
+            .map_err(|error| js_err("file.source", error))?;
+        let source = FileSource::from_js(source_val)?;
         files.push((
             FileEntry {
                 rel_path,
@@ -927,7 +1038,7 @@ fn parse_listing(listing: &JsValue) -> Result<Scanned, JsValue> {
                 mode: 0o644,
                 mtime,
             },
-            handle,
+            source,
         ));
     }
     Ok(Scanned { dirs, files })
@@ -1016,40 +1127,39 @@ async fn answer_read(shared: &Shared, index: u32, offset: u64, len: u32) -> (Rea
         return (ReadStatus::LenOverCap, Vec::new());
     }
 
-    let handle = {
+    let source = {
         let borrowed = shared.borrow();
         match borrowed.state.slot(index) {
-            Some(handle) => handle.clone(),
+            Some(source) => source.clone(),
             None => return (ReadStatus::BadIndex, Vec::new()),
         }
     };
 
-    match read_from_handle(&handle, offset, len).await {
+    match read_from_source(&source, offset, len).await {
         Ok(bytes) => (ReadStatus::Ok, bytes),
-        Err(()) => {
+        // Only a handle can have been replaced under us by an `update`. A
+        // snapshot is the same `File` on the second look, so retrying it buys
+        // one more rejected read and nothing else.
+        Err(()) if source.is_live() => {
             // An update may have installed a fresh handle; retry once.
-            let handle = {
+            let source = {
                 let borrowed = shared.borrow();
                 match borrowed.state.slot(index) {
-                    Some(handle) => handle.clone(),
+                    Some(source) => source.clone(),
                     None => return (ReadStatus::BadIndex, Vec::new()),
                 }
             };
-            match read_from_handle(&handle, offset, len).await {
+            match read_from_source(&source, offset, len).await {
                 Ok(bytes) => (ReadStatus::Ok, bytes),
                 Err(()) => (ReadStatus::Io, Vec::new()),
             }
         }
+        Err(()) => (ReadStatus::Io, Vec::new()),
     }
 }
 
-async fn read_from_handle(
-    handle: &FileSystemFileHandle,
-    offset: u64,
-    len: u32,
-) -> Result<Vec<u8>, ()> {
-    let file = JsFuture::from(handle.get_file()).await.map_err(|_| ())?;
-    let file: web_sys::File = file.dyn_into().map_err(|_| ())?;
+async fn read_from_source(source: &FileSource, offset: u64, len: u32) -> Result<Vec<u8>, ()> {
+    let file = source.file().await?;
     let live = file.size() as u64;
     let want = (len as u64).min(live.saturating_sub(offset));
     if want == 0 {

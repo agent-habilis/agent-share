@@ -165,6 +165,56 @@ pub fn apply_since(
     Ok(signed)
 }
 
+/// Fold one `OP_WATCH` frame into the manifest a consumer holds.
+///
+/// The single place a watch frame is believed, shared by the native consumer and
+/// the browser one so neither can drift into trusting more than the other.
+///
+/// Both frame kinds carry the creator's signature — a whole envelope, or a
+/// [`crate::framing::ManifestSince`] whose deltas rebuild one. So **who relayed
+/// the frame does not matter**: only the holder of the authorship key can author
+/// a version, and [`crate::authorship::SignedManifest::accept`] refuses one that
+/// goes backwards. That is what lets a peer follow a share through a seeder
+/// while still being unable to be lied to by it.
+///
+/// `held` is advanced in place on success and left untouched on failure, so a
+/// rejected frame leaves the consumer on the last tree it did believe.
+///
+/// # Errors
+/// The frame does not decode, its kind is unknown, the signature is not the
+/// creator's, or the version goes backwards.
+pub fn apply_watch_frame(
+    held: &mut crate::authorship::SignedManifest,
+    kind: u8,
+    payload: &[u8],
+    author: Option<&crate::authorship::PublicKey>,
+) -> Result<MountManifest> {
+    let next = match kind {
+        crate::framing::WATCH_FRAME_MANIFEST => {
+            let offered = crate::authorship::SignedManifest::decode(payload)?;
+            if let Some(author) = author {
+                offered.accept(author, held.version)?;
+            } else if offered.version < held.version {
+                bail!(
+                    "a peer offered version {} after version {}; refusing to roll back",
+                    offered.version,
+                    held.version
+                );
+            }
+            offered
+        }
+        crate::framing::WATCH_FRAME_DELTA => apply_since(
+            held,
+            &crate::framing::ManifestSince::decode(payload)?,
+            author,
+        )?,
+        other => bail!("unknown watch frame kind: {other}"),
+    };
+    let manifest = MountManifest::decode(&next.manifest)?;
+    *held = next;
+    Ok(manifest)
+}
+
 impl MountManifest {
     /// This tree's fingerprint, as published on [`crate::PeerCard`]'s `tree`.
     ///
@@ -555,8 +605,229 @@ impl Cursor<'_> {
 mod tests {
     use super::{
         DirEntry, FileEntry, ManifestDelta, MountManifest, ReadStatus, apply_since,
-        manifest_fingerprint,
+        apply_watch_frame, manifest_fingerprint,
     };
+    use crate::authorship::{SIGNATURE_LEN, SignedManifest, sign_manifest};
+    use crate::framing::{ManifestSince, WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
+    use fofoca_protocol::iroh_base::SecretKey;
+
+    /// The share's creator, and somebody who wishes they were.
+    fn creator() -> SecretKey {
+        SecretKey::from_bytes(&[7u8; 32])
+    }
+    fn impostor() -> SecretKey {
+        SecretKey::from_bytes(&[9u8; 32])
+    }
+
+    fn tree(paths: &[&str]) -> MountManifest {
+        MountManifest {
+            dirs: Vec::new(),
+            files: paths
+                .iter()
+                .map(|path| FileEntry {
+                    rel_path: (*path).to_owned(),
+                    size: 1,
+                    mode: 0o644,
+                    mtime: 0,
+                })
+                .collect(),
+        }
+    }
+
+    /// A `WATCH_FRAME_MANIFEST` payload as a producer emits it.
+    fn envelope(key: &SecretKey, version: u64, manifest: &MountManifest) -> Vec<u8> {
+        let bytes = manifest.encode();
+        SignedManifest {
+            version,
+            signature: sign_manifest(key, version, &bytes),
+            manifest: bytes,
+        }
+        .encode()
+    }
+
+    fn held_at(version: u64, manifest: &MountManifest) -> SignedManifest {
+        let bytes = manifest.encode();
+        SignedManifest {
+            version,
+            signature: sign_manifest(&creator(), version, &bytes),
+            manifest: bytes,
+        }
+    }
+
+    /// Distribution, not authorship: a frame the creator signed is taken no
+    /// matter who relayed it. This is what lets a share outlive its producer.
+    #[test]
+    fn a_frame_the_creator_signed_is_accepted() {
+        let mut held = held_at(1, &tree(&["a"]));
+        let next = tree(&["a", "b"]);
+        let applied = apply_watch_frame(
+            &mut held,
+            WATCH_FRAME_MANIFEST,
+            &envelope(&creator(), 2, &next),
+            Some(&creator().public()),
+        )
+        .expect("the creator's own frame");
+        assert_eq!(applied.files.len(), 2);
+        assert_eq!(held.version, 2, "the held version moves with it");
+    }
+
+    /// The other half of the invariant: relaying is allowed, authoring is not.
+    #[test]
+    fn a_frame_signed_by_anyone_else_is_refused() {
+        let start = tree(&["a"]);
+        let mut held = held_at(1, &start);
+        let forged = tree(&["a", "evil"]);
+        assert!(
+            apply_watch_frame(
+                &mut held,
+                WATCH_FRAME_MANIFEST,
+                &envelope(&impostor(), 2, &forged),
+                Some(&creator().public()),
+            )
+            .is_err(),
+            "a seeder must not be able to author a version"
+        );
+        assert_eq!(
+            held.version, 1,
+            "a refused frame leaves the held tree alone"
+        );
+        assert_eq!(held.manifest, start.encode());
+    }
+
+    /// A real, creator-signed *older* manifest is still refused — otherwise a
+    /// peer could replay one forever and pin everybody to a stale tree.
+    #[test]
+    fn a_replayed_older_version_is_refused() {
+        let mut held = held_at(5, &tree(&["a", "b"]));
+        assert!(
+            apply_watch_frame(
+                &mut held,
+                WATCH_FRAME_MANIFEST,
+                &envelope(&creator(), 4, &tree(&["a"])),
+                Some(&creator().public()),
+            )
+            .is_err()
+        );
+        assert_eq!(held.version, 5);
+    }
+
+    /// The same manifest arriving twice is ordinary, not an attack.
+    #[test]
+    fn the_same_version_may_arrive_twice() {
+        let same = tree(&["a"]);
+        let mut held = held_at(3, &same);
+        assert!(
+            apply_watch_frame(
+                &mut held,
+                WATCH_FRAME_MANIFEST,
+                &envelope(&creator(), 3, &same),
+                Some(&creator().public()),
+            )
+            .is_ok()
+        );
+    }
+
+    /// Deltas carry the signature too, so the cheap frame is as safe as the
+    /// whole-tree one — the gap the bare-delta format used to leave open.
+    #[test]
+    fn a_signed_delta_frame_is_verified_against_its_result() {
+        let start = tree(&["a"]);
+        let mut held = held_at(1, &start);
+
+        let mut rebuilt = start.clone();
+        let delta = ManifestDelta {
+            dirs_upserted: Vec::new(),
+            dirs_removed: Vec::new(),
+            files_upserted: vec![(
+                1,
+                FileEntry {
+                    rel_path: "b".to_owned(),
+                    size: 1,
+                    mode: 0o644,
+                    mtime: 0,
+                },
+            )],
+            files_removed: Vec::new(),
+        };
+        rebuilt.apply(&delta);
+
+        let since = ManifestSince {
+            target_version: 2,
+            signature: sign_manifest(&creator(), 2, &rebuilt.encode()),
+            deltas: vec![delta.encode()],
+        };
+        let applied = apply_watch_frame(
+            &mut held,
+            WATCH_FRAME_DELTA,
+            &since.encode(),
+            Some(&creator().public()),
+        )
+        .expect("a delta the creator vouched for");
+        assert_eq!(applied.files.len(), 2);
+        assert_eq!(held.version, 2);
+    }
+
+    /// A delta whose signature does not match what it rebuilds is refused —
+    /// the reconstruction is checked, not just the arithmetic.
+    #[test]
+    fn a_delta_that_rebuilds_something_unsigned_is_refused() {
+        let mut held = held_at(1, &tree(&["a"]));
+        let since = ManifestSince {
+            target_version: 2,
+            signature: sign_manifest(&creator(), 2, &tree(&["a", "different"]).encode()),
+            deltas: vec![
+                ManifestDelta {
+                    dirs_upserted: Vec::new(),
+                    dirs_removed: Vec::new(),
+                    files_upserted: vec![(
+                        1,
+                        FileEntry {
+                            rel_path: "b".to_owned(),
+                            size: 1,
+                            mode: 0o644,
+                            mtime: 0,
+                        },
+                    )],
+                    files_removed: Vec::new(),
+                }
+                .encode(),
+            ],
+        };
+        assert!(
+            apply_watch_frame(
+                &mut held,
+                WATCH_FRAME_DELTA,
+                &since.encode(),
+                Some(&creator().public()),
+            )
+            .is_err()
+        );
+        assert_eq!(held.version, 1);
+    }
+
+    /// An unsigned share has no creator to check against, so only the version
+    /// rule applies. Stated as a test so the weaker guarantee is deliberate.
+    #[test]
+    fn an_unsigned_share_still_refuses_a_rollback() {
+        let mut held = SignedManifest {
+            version: 4,
+            signature: [0u8; SIGNATURE_LEN],
+            manifest: tree(&["a"]).encode(),
+        };
+        let older = SignedManifest {
+            version: 3,
+            signature: [0u8; SIGNATURE_LEN],
+            manifest: tree(&["b"]).encode(),
+        }
+        .encode();
+        assert!(apply_watch_frame(&mut held, WATCH_FRAME_MANIFEST, &older, None).is_err());
+    }
+
+    #[test]
+    fn an_unknown_frame_kind_is_refused() {
+        let mut held = held_at(1, &tree(&["a"]));
+        assert!(apply_watch_frame(&mut held, 99, b"whatever", Some(&creator().public())).is_err());
+    }
 
     fn sample_delta() -> ManifestDelta {
         ManifestDelta {
@@ -847,9 +1118,9 @@ mod tests {
     #[test]
     fn the_envelope_is_not_the_fingerprint_domain() {
         let manifest = sample().encode();
-        let envelope = crate::authorship::SignedManifest {
+        let envelope = SignedManifest {
             version: 7,
-            signature: [0xab; crate::authorship::SIGNATURE_LEN],
+            signature: [0xab; SIGNATURE_LEN],
             manifest: manifest.clone(),
         }
         .encode();

@@ -87,6 +87,36 @@ pub fn sign_manifest(author: &SecretKey, version: u64, manifest: &[u8]) -> [u8; 
     author.sign(&signed_payload(version, manifest)).to_bytes()
 }
 
+/// Wrap `manifest` in the envelope a producer serves, signed if it can sign.
+///
+/// Shared by every producer — native, browser, and the mirror that re-serves
+/// what it was handed — so an unsigned share and a signed one differ in exactly
+/// one field and nowhere else.
+///
+/// An unsigned share sends a zero signature rather than a shorter body: one wire
+/// shape means a reader decides whether to verify from the *ticket*, which it
+/// trusts, instead of from the answer, which it does not.
+#[must_use]
+pub fn seal(author: Option<&SecretKey>, version: u64, manifest: &[u8]) -> Vec<u8> {
+    sealed(author, version, manifest).encode()
+}
+
+/// [`seal`], before encoding.
+///
+/// For a producer that keeps the signature beside the envelope: reaching it by
+/// decoding the envelope again copies the whole manifest to read sixty-four
+/// bytes, and the signature was right here when it was made.
+#[must_use]
+pub fn sealed(author: Option<&SecretKey>, version: u64, manifest: &[u8]) -> SignedManifest {
+    SignedManifest {
+        version,
+        signature: author.map_or([0u8; SIGNATURE_LEN], |key| {
+            sign_manifest(key, version, manifest)
+        }),
+        manifest: manifest.to_vec(),
+    }
+}
+
 /// Check a manifest against the creator's public key.
 ///
 /// # Errors

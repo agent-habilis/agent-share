@@ -94,29 +94,6 @@ fn unix_mtime(meta: &fs::Metadata) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::scan;
-    use rand::RngCore;
-    use std::path::PathBuf;
-
-    /// A throwaway directory under the OS temp dir (the repo has no `tempfile`
-    /// dep); dropped recursively at the end of each test.
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new() -> Self {
-            let path =
-                std::env::temp_dir().join(format!("agent-share-test-{}", rand::rng().next_u64()));
-            std::fs::create_dir_all(&path).expect("create temp dir");
-            Self { path }
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
 
     fn write(path: &std::path::Path, contents: &[u8]) {
         std::fs::write(path, contents).expect("write fixture");
@@ -124,8 +101,8 @@ mod tests {
 
     #[test]
     fn scan_lists_sorted_files_and_all_dirs() {
-        let tmp = TempDir::new();
-        let root = &tmp.path;
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path();
         std::fs::create_dir_all(root.join("b/nested")).unwrap();
         std::fs::create_dir_all(root.join("empty")).unwrap();
         write(&root.join("z.txt"), b"zz");
@@ -160,8 +137,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn scan_skips_symlinks() {
-        let tmp = TempDir::new();
-        let root = &tmp.path;
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path();
         write(&root.join("real.txt"), b"real");
         std::os::unix::fs::symlink(root.join("real.txt"), root.join("link.txt")).unwrap();
 

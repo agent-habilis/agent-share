@@ -32,8 +32,11 @@ pub(crate) struct State {
     pids: Vec<(u32, String)>,
     /// Mountpoints to `umount` if they are still mounted.
     mounts: Vec<String>,
-    /// The folder key a headless window was launched against.
-    browser_folder: Option<String>,
+    /// Folder keys headless windows were launched against. A set rather than
+    /// one slot: a cell that stands up two peers has two windows, and tracking
+    /// the second used to forget the first — which leaked it on a hard kill.
+    #[serde(default)]
+    browser_folders: Vec<String>,
 }
 
 fn path() -> PathBuf {
@@ -86,20 +89,24 @@ pub(crate) fn untrack_mount(mountpoint: &str) {
 
 pub(crate) fn track_browser(folder: &str) {
     let mut state = load();
-    state.browser_folder = Some(folder.to_owned());
+    if !state.browser_folders.iter().any(|known| known == folder) {
+        state.browser_folders.push(folder.to_owned());
+    }
     store(&state);
 }
 
-pub(crate) fn untrack_browser() {
+/// Forget one window. Takes the folder, so a guard dropping its own window
+/// cannot untrack a sibling that is still open.
+pub(crate) fn untrack_browser(folder: &str) {
     let mut state = load();
-    state.browser_folder = None;
+    state.browser_folders.retain(|known| known != folder);
     store(&state);
 }
 
 /// Clear anything a previous run left behind. Safe to call when there is none.
 pub(crate) fn reap_stale() {
     let state = load();
-    if state.pids.is_empty() && state.mounts.is_empty() && state.browser_folder.is_none() {
+    if state.pids.is_empty() && state.mounts.is_empty() && state.browser_folders.is_empty() {
         return;
     }
     output::status_warn("Reaping", "leftovers from an interrupted bench run");
@@ -123,7 +130,7 @@ pub(crate) fn reap_stale() {
                 .output();
         }
     }
-    if let Some(folder) = &state.browser_folder {
+    for folder in &state.browser_folders {
         let _ = Command::new("agent-browse").args(["quit", folder]).output();
     }
     store(&State::default());

@@ -36,8 +36,8 @@ pub trait Watcher {
 ///
 /// Three implementations, sharing nothing but this trait: the CLI's producer
 /// reads through to files on disk, the browser's producer reads through to
-/// `FileSystemFileHandle`s, and a seeder of either kind reads from a chunk
-/// store. [`serve_stream`] drives all of them.
+/// whatever the browser gave it for a picked file, and a seeder of either kind
+/// reads from a chunk store. [`serve_stream`] drives all of them.
 /// `Clone + 'static` because a protocol handler builds one per accepted stream
 /// and hands it to a spawned task. Every implementation is a handle over shared
 /// state — an `Arc` or an `Rc` — so cloning is a refcount bump, never a copy of

@@ -121,12 +121,14 @@
       <section>
         <h2>File share</h2>
         <p class="hint">
-          A real <code>ShareProducer</code> over real files — the same path
-          <b>Add files/folder</b> takes in the app, but the folder comes from the
-          <a href="https://developer.mozilla.org/docs/Web/API/File_System_API/Origin_private_file_system">origin private file system</a>
-          instead of the directory picker. OPFS hands back genuine
-          <code>FileSystemFileHandle</code>s with no user gesture, which is what
-          makes this drivable headlessly.
+          A real <code>ShareProducer</code> over real files — the same path the
+          share buttons take in the app, with the picker replaced by something
+          that needs no user gesture. <b>opfs</b> serves genuine
+          <code>FileSystemFileHandle</code>s from the
+          <a href="https://developer.mozilla.org/docs/Web/API/File_System_API/Origin_private_file_system">origin private file system</a>,
+          the live path Chromium takes. <b>snapshot</b> serves constructed
+          <code>File</code>s, the pinned path Safari and Firefox take from
+          <code>&lt;input type="file"&gt;</code>.
         </p>
         <div class="row">
           <label>
@@ -134,10 +136,18 @@
             <input id="share-files" type="number" min="1" max="200" value="3" />
           </label>
           <label>
+            source
+            <select id="share-mode">
+              <option value="opfs">opfs</option>
+              <option value="snapshot">snapshot</option>
+            </select>
+          </label>
+          <label>
             password
             <input id="share-password" type="password" placeholder="(none)" />
           </label>
           <button type="button" id="share-start">Start file share</button>
+          <button type="button" id="share-add" disabled>Add a file</button>
           <button type="button" id="share-stop" disabled>Stop</button>
           <button type="button" id="share-copy" disabled>Copy ticket</button>
         </div>

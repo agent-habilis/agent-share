@@ -29,7 +29,7 @@ use tokio::sync::broadcast;
 
 use super::{MAX_DELTA_BYTES, WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
 use agent_share_proto::authorship::SecretKey;
-use agent_share_proto::authorship::{SIGNATURE_LEN, SignedManifest, sign_manifest};
+use agent_share_proto::authorship::{SIGNATURE_LEN, SignedManifest};
 use agent_share_proto::manifest::{DirEntry, FileEntry, ManifestDelta, MountManifest};
 
 /// How long the tree must sit still before a rescan.
@@ -106,6 +106,11 @@ struct TreeState {
     /// Signing per request would put an ed25519 operation over several MB on
     /// the path of every consumer that connects.
     envelope: Arc<Vec<u8>>,
+    /// The creator's signature over `version ‖ encoded`, kept beside the
+    /// envelope that carries it. Both the delta frame and `OP_MANIFEST_SINCE`
+    /// need it alone, and decoding the envelope to reach it copies the whole
+    /// manifest to read sixty-four bytes.
+    signature: [u8; SIGNATURE_LEN],
     /// Recent published deltas, oldest first, bounded by
     /// [`DELTA_HISTORY_BYTES`]. What `OP_MANIFEST_SINCE` replays.
     ///
@@ -123,18 +128,14 @@ struct TreeState {
 /// An unsigned share sends a zero signature rather than a shorter body: one
 /// wire shape means a reader decides whether to verify from the *ticket*, which
 /// it trusts, instead of from the answer, which it does not.
-fn seal(author: Option<&SecretKey>, version: u64, encoded: &[u8]) -> Arc<Vec<u8>> {
-    let signature = author.map_or([0u8; SIGNATURE_LEN], |key| {
-        sign_manifest(key, version, encoded)
-    });
-    Arc::new(
-        SignedManifest {
-            version,
-            signature,
-            manifest: encoded.to_vec(),
-        }
-        .encode(),
-    )
+fn seal(
+    author: Option<&SecretKey>,
+    version: u64,
+    encoded: &[u8],
+) -> (Arc<Vec<u8>>, [u8; SIGNATURE_LEN]) {
+    let signed = agent_share_proto::authorship::sealed(author, version, encoded);
+    let signature = signed.signature;
+    (Arc::new(signed.encode()), signature)
 }
 
 impl std::fmt::Debug for LiveTree {
@@ -180,7 +181,7 @@ impl LiveTree {
             .collect();
         let served = paths.into_iter().map(Some).collect();
         let encoded = Arc::new(manifest.encode());
-        let envelope = seal(author.as_ref(), 1, &encoded);
+        let (envelope, signature) = seal(author.as_ref(), 1, &encoded);
         let (updates, _) = broadcast::channel(UPDATE_BACKLOG);
         Self {
             root,
@@ -193,6 +194,7 @@ impl LiveTree {
                 encoded,
                 version: 1,
                 envelope,
+                signature,
                 history: VecDeque::new(),
                 history_bytes: 0,
             }),
@@ -262,7 +264,10 @@ impl LiveTree {
             .collect();
 
         let (updates, _) = broadcast::channel(UPDATE_BACKLOG);
-        let version = SignedManifest::decode(&envelope)?.version;
+        // Both off one decode: a mirror re-serves the creator's signature
+        // verbatim and can mint none of its own.
+        let origin = SignedManifest::decode(&envelope)?;
+        let (version, signature) = (origin.version, origin.signature);
         Ok(Self {
             root,
             author: None,
@@ -277,6 +282,7 @@ impl LiveTree {
                 encoded: Arc::new(origin_bytes),
                 version,
                 envelope: Arc::new(envelope),
+                signature,
                 // A mirror publishes no changes of its own, so it never has a
                 // difference to replay — see `LiveTree::mirrored`.
                 history: VecDeque::new(),
@@ -360,21 +366,21 @@ impl LiveTree {
     /// The full-manifest frame a watcher opens with, and the one it is resent
     /// after falling behind.
     ///
-    /// **Watch frames carry the bare manifest, not the signed envelope**, and
-    /// that is not an oversight. A watch stream is followed against the origin
-    /// and nowhere else — `consume::watch_tree` opens it on the origin client,
-    /// and the browser client says the same at its own call site — so the
-    /// endpoint the ticket names has already authenticated it. Wrapping it
-    /// would put a signature on the one path where nobody can be lied to, and
-    /// leave the deltas beside it unsigned anyway.
+    /// **Watch frames carry the signed envelope**, so a consumer checks who
+    /// wrote a change rather than inferring it from who handed it over. That is
+    /// what lets a peer follow updates through a seeder: only the creator can
+    /// author a version, but anybody may carry one. Deltas travel the same way
+    /// — see the [`ManifestSince`] frame beside this one, which is the exact
+    /// shape `OP_MANIFEST_SINCE` already answers with, so both are verified by
+    /// the same `apply_since` on the far side.
     pub(super) fn opening_frame(&self) -> Vec<u8> {
-        Self::manifest_frame(&self.manifest_bytes())
+        Self::manifest_frame(&self.manifest_envelope())
     }
 
-    fn manifest_frame(encoded: &[u8]) -> Vec<u8> {
-        let mut frame = Vec::with_capacity(encoded.len() + 1);
+    fn manifest_frame(envelope: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(envelope.len() + 1);
         frame.push(WATCH_FRAME_MANIFEST);
-        frame.extend_from_slice(encoded);
+        frame.extend_from_slice(envelope);
         frame
     }
 
@@ -479,13 +485,24 @@ impl LiveTree {
         .encode();
         state.encoded = Arc::new(refreshed);
         state.version += 1;
-        state.envelope = seal(self.author.as_ref(), state.version, &state.encoded);
+        (state.envelope, state.signature) =
+            seal(self.author.as_ref(), state.version, &state.encoded);
 
         let body = delta.encode();
         if u32::try_from(body.len()).is_ok_and(|len| len <= MAX_DELTA_BYTES) {
-            let mut frame = Vec::with_capacity(body.len() + 1);
+            // Carried as a `ManifestSince` — the same shape `OP_MANIFEST_SINCE`
+            // answers with — so the version and the creator's signature travel
+            // with the difference and the consumer verifies its reconstruction
+            // through the one `apply_since` both paths already share.
+            let since = agent_share_proto::framing::ManifestSince {
+                target_version: state.version,
+                signature: state.signature,
+                deltas: vec![body.clone()],
+            }
+            .encode();
+            let mut frame = Vec::with_capacity(since.len() + 1);
             frame.push(WATCH_FRAME_DELTA);
-            frame.extend_from_slice(&body);
+            frame.extend_from_slice(&since);
             state.remember(body);
             Some(frame)
         } else {
@@ -499,7 +516,7 @@ impl LiveTree {
             // would catch it, but answering with a chain we know is broken is
             // not something to leave for the reader to catch.
             state.forget_history();
-            Some(Self::manifest_frame(&state.encoded))
+            Some(Self::manifest_frame(&state.envelope))
         }
     }
 
@@ -513,14 +530,17 @@ impl LiveTree {
     /// The signature returned is the **current** version's, over the manifest a
     /// correct consumer will have reconstructed. That is what makes an unsigned
     /// delta safe to send; see `OP_MANIFEST_SINCE`.
-    pub(super) fn deltas_since(&self, since: u64) -> Option<(u64, [u8; SIGNATURE_LEN], Vec<Vec<u8>>)> {
+    pub(super) fn deltas_since(
+        &self,
+        since: u64,
+    ) -> Option<(u64, [u8; SIGNATURE_LEN], Vec<Vec<u8>>)> {
         let state = self.read();
         if since > state.version {
             // Ahead of us: a consumer holding a version this tree never
             // published, which a restarted origin produces. Nothing to replay.
             return None;
         }
-        let signature = SignedManifest::decode(&state.envelope).ok()?.signature;
+        let signature = state.signature;
         if since == state.version {
             return Some((state.version, signature, Vec::new()));
         }
@@ -615,9 +635,30 @@ pub(super) fn spawn_watcher(tree: Arc<LiveTree>) -> Result<()> {
             };
             let (manifest, paths) = scanned;
             if let Some(frame) = tree.apply(manifest, paths) {
-                tracing::debug!(bytes = frame.len(), "publishing a tree change");
+                let bytes = frame.len();
                 // `Err` only means nobody is watching, which is the common case.
-                let _ = tree.updates.send(Arc::new(frame));
+                let watchers = tree.updates.send(Arc::new(frame)).unwrap_or(0);
+                let (version, files) = {
+                    let state = tree.read();
+                    (state.version, state.files.len())
+                };
+                // `info`, and carrying the subscriber count, because these are
+                // the two questions asked when a peer looks stale: did the
+                // producer notice, and was anyone still listening when it did?
+                // A change published to nobody is a very different bug from one
+                // that was never published.
+                //
+                // Both numbers, because `serve` holds a feed of its own to
+                // republish its mesh card — so `feeds` is never 0 while a
+                // producer is up, and `peers` is the one to read.
+                tracing::info!(
+                    version,
+                    files,
+                    bytes,
+                    feeds = watchers,
+                    peers = watchers.saturating_sub(1),
+                    "published a tree change"
+                );
             }
         }
     });
@@ -730,7 +771,7 @@ mod tests {
 
     /// An `OP_MANIFEST` envelope around `bytes`, as an origin would serve it.
     fn sealed(bytes: &[u8]) -> Vec<u8> {
-        seal(Some(&creator()), 1, bytes).as_ref().clone()
+        seal(Some(&creator()), 1, bytes).0.as_ref().clone()
     }
 
     /// **The requirement, as a test.** A mirror is handed the creator's
@@ -909,7 +950,18 @@ mod tests {
             .map(|(path, _)| PathBuf::from(format!("/root/{path}")))
             .collect();
         let frame = tree.apply(manifest, paths).expect("something changed");
-        ManifestDelta::decode(&frame[1..]).expect("decode the delta")
+        // A delta frame is a `ManifestSince` — version and signature travel
+        // with the difference so a consumer can verify what it rebuilds,
+        // whoever relayed it. One delta per published change.
+        let since = agent_share_proto::framing::ManifestSince::decode(&frame[1..])
+            .expect("decode the since frame");
+        let [delta] = since.deltas.as_slice() else {
+            panic!(
+                "one published change carries one delta, got {}",
+                since.deltas.len()
+            );
+        };
+        ManifestDelta::decode(delta).expect("decode the delta")
     }
 
     #[test]

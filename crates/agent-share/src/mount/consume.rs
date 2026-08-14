@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 use agent_share_proto::PeerCard;
 use agent_share_proto::framing::decode_response_header;
-use agent_share_proto::manifest::ManifestDelta;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fofoca::iroh::Endpoint;
@@ -30,7 +29,6 @@ use agent_share_proto::framing::{
 // The root type comes from the store, not from this crate: `agent-share` names
 // what `fofoca-blobs` verifies against rather than defining a second one.
 use super::{MountManifest, ReadStatus};
-use super::{WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
 use agent_share_proto::auth::ShareAuth;
 use fofoca_chunks::{ChunkHash, ChunkMap};
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
@@ -234,6 +232,7 @@ pub(crate) async fn attach(
         Err(error) => return Err(error),
     };
     let file_count = manifest.files.len();
+    let watch = watch_inputs(&envelope, &manifest, origin_ticket.author);
     // Taken before `manifest` moves into the watch task below. Re-encodes
     // rather than hashing the wire bytes, which `fetch_manifest` discards;
     // safe because the encoding is canonical (`encoding_is_canonical`).
@@ -264,10 +263,7 @@ pub(crate) async fn attach(
         },
     ));
     let remote_fs = RemoteFs::new(nodes, Arc::clone(&source_set), uid, gid);
-    // Taken before the server consumes the filesystem: this is the watch
-    // task's only way back to the tree.
-    let shared_nodes = remote_fs.nodes();
-    tokio::spawn(watch_tree(Arc::clone(&client), shared_nodes, ids, manifest));
+    spawn_watch(&client, remote_fs.nodes(), ids, watch);
 
     let listener = NFSTcpListener::bind("127.0.0.1:0", remote_fs)
         .await
@@ -667,6 +663,47 @@ async fn bootstrap_from_seeders(
     )
 }
 
+/// What the watch task checks a frame against: the manifest this mount already
+/// believes, and the creator the ticket names. Taken in `attach` before both
+/// move into the source set.
+///
+/// A frame is believed by its signature rather than by who sent it, so both
+/// halves travel into the task — an envelope that will not decode falls back to
+/// version 0, which every real version outranks.
+fn watch_inputs(
+    envelope: &[u8],
+    manifest: &MountManifest,
+    author: Option<[u8; 32]>,
+) -> (
+    SignedManifest,
+    Option<agent_share_proto::authorship::PublicKey>,
+) {
+    let held = SignedManifest::decode(envelope).unwrap_or_else(|_| SignedManifest {
+        version: 0,
+        signature: [0u8; agent_share_proto::authorship::SIGNATURE_LEN],
+        manifest: manifest.encode(),
+    });
+    let author =
+        author.and_then(|bytes| agent_share_proto::authorship::PublicKey::from_bytes(&bytes).ok());
+    (held, author)
+}
+
+/// Start the task that keeps the mount in step with the producer.
+///
+/// The nodes handle is taken before the NFS server consumes the filesystem —
+/// it is the watch task's only way back to the tree.
+fn spawn_watch(
+    client: &Arc<RemoteClient>,
+    nodes: nfs::SharedNodes,
+    ids: TreeIds,
+    watch: (
+        SignedManifest,
+        Option<agent_share_proto::authorship::PublicKey>,
+    ),
+) {
+    tokio::spawn(watch_tree(Arc::clone(client), nodes, ids, watch.0, watch.1));
+}
+
 /// Keep the mounted tree in step with the producer's, for as long as the
 /// mount lives.
 ///
@@ -682,10 +719,11 @@ async fn watch_tree(
     client: Arc<RemoteClient>,
     nodes: nfs::SharedNodes,
     mut ids: TreeIds,
-    mut manifest: MountManifest,
+    mut held: SignedManifest,
+    author: Option<agent_share_proto::authorship::PublicKey>,
 ) {
     loop {
-        match follow_watch_stream(&client, &nodes, &mut ids, &mut manifest).await {
+        match follow_watch_stream(&client, &nodes, &mut ids, &mut held, author.as_ref()).await {
             Ok(()) => {
                 tracing::debug!("the producer closed the watch stream");
                 return;
@@ -703,7 +741,8 @@ async fn follow_watch_stream(
     client: &RemoteClient,
     nodes: &nfs::SharedNodes,
     ids: &mut TreeIds,
-    manifest: &mut MountManifest,
+    held: &mut SignedManifest,
+    author: Option<&agent_share_proto::authorship::PublicKey>,
 ) -> Result<()> {
     let (mut send, mut recv) = client.request(OP_WATCH).await?;
     // Nothing more to say on this stream; the producer answers until it or we
@@ -722,14 +761,19 @@ async fn follow_watch_stream(
             .await
             .context("reading a watch frame")?;
         let (kind, payload) = body.split_first().context("empty watch frame")?;
-        match *kind {
-            WATCH_FRAME_MANIFEST => *manifest = MountManifest::decode(payload)?,
-            WATCH_FRAME_DELTA => manifest.apply(&ManifestDelta::decode(payload)?),
-            other => bail!("unknown watch frame kind: {other}"),
-        }
+        // Verified before it is believed: whoever relayed this frame, only the
+        // creator can have authored the version inside it.
+        let manifest =
+            match agent_share_proto::manifest::apply_watch_frame(held, *kind, payload, author) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    tracing::warn!(%error, "refusing a watch frame");
+                    continue;
+                }
+            };
         // A hostile manifest fails the build; keep the tree we had rather than
         // tearing the mount down over one bad frame.
-        match build_tree(ids, manifest) {
+        match build_tree(ids, &manifest) {
             Ok(rebuilt) => {
                 tracing::debug!(files = manifest.files.len(), "tree updated");
                 nfs::replace_nodes(nodes, rebuilt);
