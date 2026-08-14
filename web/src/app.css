@@ -47,3 +47,31 @@ html {
   -webkit-user-select: text;
   user-select: text;
 }
+
+/*
+ * The brand's shimmer, while an agent is working. See `components/Brand`.
+ *
+ * Here rather than in a `css()` object because it cannot go in one. Keyframe
+ * selectors are not selectors as far as `visage-style` is concerned — `0%`
+ * starts with neither `@` nor `&`, so it compiles to `:scope 0%` — and every
+ * rule that library emits is wrapped in `@scope`, where a `@keyframes` is
+ * dropped. A real stylesheet has neither problem.
+ *
+ * The resting state is the dim end, and the bright spot is what travels: each
+ * character sits at a dimmed green and passes through full `--success` once per
+ * cycle. Staggering the start per character is what turns that into a wave
+ * rather than eleven letters blinking together.
+ *
+ * Only the colour moves. The letters must not shift by a pixel: the top bar is
+ * exactly one row tall and everything below is placed from it, so a brand that
+ * changed weight or size would nudge the whole page.
+ */
+@keyframes agent-shimmer {
+  0%,
+  65% {
+    color: color-mix(in oklab, var(--success) 55%, var(--bg-sunken));
+  }
+  30% {
+    color: var(--success);
+  }
+}

@@ -12,7 +12,7 @@
  * support. A tab with tools published and nobody calling them is
  * indistinguishable from a tab no agent has ever found.
  *
- * Deliberately free of the render layer, like the rest of `lib/`. The badge and
+ * Deliberately free of the render layer, like the rest of `lib/`. The brand and
  * the `/info` panel subscribe and keep their own signals.
  */
 
@@ -89,8 +89,8 @@ let nextId = 1
  * Record the start of a call, and return the function that ends it.
  *
  * Counted at the start rather than on completion: a `shareSync` pulling a large
- * share can run for a long time, and a badge that only lit up afterwards would
- * be dark for exactly the period an agent was most obviously in control. The
+ * share can run for a long time, and an indicator that only lit up afterwards
+ * would be dark for exactly the period an agent was most obviously in control. The
  * log entry appears at the same moment, saying `running`.
  *
  * The end function finds its entry by `id` rather than by position. Calls

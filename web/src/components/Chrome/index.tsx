@@ -1,7 +1,7 @@
 import { Stack, Text, t } from 'moonspace-dom'
 import type { Child } from 'visage-dom'
 
-import { AgentBadge } from '../AgentBadge/index.tsx'
+import { Brand } from '../Brand/index.tsx'
 
 /**
  * App chrome: top bar on the sunken page background + content surface on `bg`
@@ -79,26 +79,26 @@ export function Chrome({
           A toast takes this row rather than being given one under it. A second
           line appearing would push every pixel of the page down and pull it
           back up again seconds later. It takes all of it, brand included:
-          crumb, badge, status and actions can all wait a few seconds, and the
-          name of the app is not news to anyone reading a failure.
+          crumb, status and actions can all wait a few seconds, and the name of
+          the app is not news to anyone reading a failure.
         */}
         {toast ?? (
           <>
             <Stack direction="row" gap={1}>
-              <Text weight="bold">agent-share</Text>
+              {/*
+                The name doubles as the agent indicator — it goes green once a
+                tool has been called. Carried by the brand rather than by
+                something beside it because an element that appears would move
+                the crumb sideways, and because what it reports is about the
+                whole page rather than about what you can do next.
+              */}
+              <Brand />
               {crumb ? (
                 <>
                   <Text color="fgMuted">/</Text>
                   <Text color="fgMuted">{crumb}</Text>
                 </>
               ) : null}
-              {/*
-                Beside the brand rather than out with the actions: it says
-                something about the whole page, not about what you can do next,
-                and it must not move the action row when it appears. It renders
-                nothing until an agent has actually called a tool.
-              */}
-              <AgentBadge />
             </Stack>
             {center ? (
               // `overflow: hidden` so a window too narrow for everything clips

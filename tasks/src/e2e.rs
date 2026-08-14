@@ -2220,6 +2220,13 @@ fn cell_webmcp_ui(ctx: &Ctx<'_>) -> Res<()> {
         ACTION_TIMEOUT,
         "the WebMCP panel to report the tools this page published",
     )?;
+    // The whole feature in one attribute: an agent called a tool, and the name
+    // of the app in the top bar says so without a word.
+    wait_for_true(
+        "document.querySelector('[data-agent]')?.dataset.agent === 'working'",
+        ACTION_TIMEOUT,
+        "the brand to report an agent working",
+    )?;
 
     run_webmcp(
         r"

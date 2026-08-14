@@ -143,9 +143,12 @@ and subject to eviction.
 
 ## Telling the user an agent is here
 
-The top bar shows a badge — `‹AGENT CONTROLLING›` while a tool call is running,
-`‹AGENT ACTIVE›` for fifteen seconds after one, then a muted
-`‹AGENT · 4 ACTIONS›`. Hovering gives the last tool and when it ran.
+The name of the app in the top bar carries it. **agent-share** turns green the
+first time any tool is called and stays green; while a call is running, or for
+ten seconds after one, its characters shimmer between full and dimmed green.
+Hovering gives the sentence — which tool, how many times, how long ago — and
+before anything has happened it says how many tools are published, or that this
+browser has no WebMCP at all. See `web/src/components/Brand`.
 
 The wording is careful, because **the thing you would want to show cannot be
 observed**. WebMCP lets a page publish tools; it never tells the page that
@@ -154,11 +157,15 @@ at all. `getTools()` is a *caller's* API — a page calling it learns about its 
 tools, not about who else is looking. A tab whose tools nobody has ever called
 is indistinguishable from a tab no agent has found.
 
-So the badge is built from the only real evidence, a tool actually being
-invoked, and it never claims more than that. It is absent until the first call,
-and once the active window lapses it drops the present tense and says outright
-that the agent may no longer be attached. Do not "improve" it into a
-connected/disconnected indicator; there is nothing to drive one with.
+So the colour is driven by the only real evidence, a tool actually being
+invoked, and it never claims more than that. The name is untouched until the
+first call, and once the active window lapses the tooltip drops the present
+tense and says outright that the agent may no longer be attached. Do not
+"improve" it into a connected/disconnected indicator; there is nothing to drive
+one with.
+
+Two states rather than three, and green never decays back to grey: the page
+cannot un-know that an agent was here, so only the movement is allowed to stop.
 
 ## Browser behaviour worth knowing
 

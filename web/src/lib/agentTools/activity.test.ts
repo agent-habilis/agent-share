@@ -62,7 +62,7 @@ describe('in-flight tracking', () => {
   })
 
   // The wrapper calls `end` in a `finally`, and a retry or double-dispose must
-  // not drive the counter below zero and leave the badge stuck dark.
+  // not drive the counter below zero and leave the brand stuck shimmering.
   test('ending twice is harmless', () => {
     const end = beginToolCall('shareRead')
     end()

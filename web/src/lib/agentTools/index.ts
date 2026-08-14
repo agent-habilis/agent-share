@@ -41,9 +41,9 @@ export const TOOLS: readonly ModelContextTool[] = [...SHARE_TOOLS, ...UI_TOOLS]
  * Wrap a tool so its invocations are visible to the page.
  *
  * Nothing tells a page that an agent has connected — WebMCP has no such signal
- * — so being *called* is the only evidence there is, and the badge in the top
- * bar is built entirely out of it. Wrapping here rather than in each tool means
- * a tool cannot be added and quietly left out of the count.
+ * — so being *called* is the only evidence there is, and the colour of the name
+ * in the top bar is built entirely out of it. Wrapping here rather than in each
+ * tool means a tool cannot be added and quietly left out of the count.
  *
  * It is also the one place that sees the name, the arguments and the result of
  * every call, which is what the log on `/info` is made of.

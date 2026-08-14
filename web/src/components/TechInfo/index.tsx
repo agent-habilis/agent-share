@@ -395,7 +395,7 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
     The one thing on this pane that does not arrive as a prop. Agent calls are
     not the session sampler's to report, and a log that appeared up to a second
     after the call would be the wrong pace for watching an agent work — so this
-    subscribes to the store directly, the way the badge in the top bar does.
+    subscribes to the store directly, the way the brand in the top bar does.
   */
   const agent = signal<AgentActivity>(agentActivity());
   using _agent = disposable(
