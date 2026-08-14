@@ -16,7 +16,7 @@
  * questions this pane answers are separate ones — how fast is it going, who is
  * it talking to, what is carrying the bytes — and a flat list gives every fact
  * the same weight. One column on a narrow window, two above `WIDE_PX`, with the
- * two panels that hold a grid or a table spanning both.
+ * peer table spanning both because its columns have fixed widths.
  *
  * Panels are separated by a raised background rather than by a rule — see
  * `Panel`. Six bordered boxes on one screen is six rectangles competing with
@@ -26,7 +26,6 @@
 
 import {
   Badge,
-  Box,
   Button,
   ProgressBar,
   Stack,
@@ -36,10 +35,9 @@ import {
   rows,
   t,
 } from "moonspace-dom";
-import { component, interval, listen, signal } from "visage-dom";
+import { component, disposable, interval, listen, signal } from "visage-dom";
 import type { ReadonlySignal } from "visage-dom";
-import type { Child } from "visage-dom/types";
-import { Style, css, raw } from "visage-style";
+import { Style, css } from "visage-style";
 
 import {
   missingSlots,
@@ -64,6 +62,12 @@ import { shareProgress } from "./progress/index.ts";
 import { SlotGrid } from "./SlotGrid/index.tsx";
 import { sparkline } from "./sparkline/index.ts";
 import type { RateSample } from "../Session/session.ts";
+import { Bento, Panel } from "../Panel/index.tsx";
+import {
+  agentActivity,
+  subscribeAgentActivity,
+  type AgentActivity,
+} from "../../lib/agentTools/index.ts";
 import { fileSeedState, type Coverage } from "../../lib/seeding/index.ts";
 import { formatRate, laneSummary } from "../../lib/transferStats/index.ts";
 import type { LinkSample } from "../../lib/transferStats/index.ts";
@@ -176,45 +180,6 @@ interface SessionInfo {
   };
 }
 
-/** Where the bento goes from one column to two. */
-const WIDE_PX = 960;
-
-/**
- * The bento.
- *
- * `minmax(0, 1fr)` rather than `1fr`, because a track's automatic minimum is its
- * content — the peer table would refuse to narrow and push the column beside it
- * off the page. Each `Box` snaps its own width down to a whole cell, so a
- * fractional track costs nothing.
- *
- * The max width is two measures: the design system's 80ch is what a line of
- * prose wants, and a panel is a line of prose plus its padding. Wider than that
- * and the eye loses the start of the next line.
- */
-const BENTO = css({
-  display: "grid",
-  gridTemplateColumns: raw("minmax(0, 1fr)"),
-  rowGap: raw("var(--ms-row)"),
-  columnGap: "2ch",
-  maxWidth: "164ch",
-  marginInline: "auto",
-  [`@media (min-width: ${WIDE_PX}px)`]: {
-    gridTemplateColumns: raw("repeat(2, minmax(0, 1fr))"),
-  },
-});
-
-/**
- * Applied to a panel that wants the whole row once there are two columns.
- *
- * A stylesheet rendered *inside* the panel rather than a selector in `BENTO`,
- * because `Box` owns its own `dataset` and would overwrite anything passed
- * through for a parent selector to hook. `Style()` scopes to its parent
- * element, so this lands on the Box itself.
- */
-const WIDE = css({
-  [`@media (min-width: ${WIDE_PX}px)`]: { gridColumn: raw("1 / -1") },
-});
-
 /**
  * The peer table's wrapper: a horizontal escape, since its columns have fixed
  * widths, and one override.
@@ -237,44 +202,14 @@ const PEER_TABLE = css({
 });
 
 /**
- * One panel of the bento.
+ * How tall the WebMCP log is, in rows.
  *
- * `Box`'s own `title` is not used, and the reason is the rule it draws under the
- * label. That rule earns its place on a bordered box, where it continues the
- * frame; on a filled one it is a second divider inside a shape that has already
- * divided itself, and six of them read as a page full of lines. The row of space
- * it occupied stays — the label still needs air under it, just not ink.
+ * A fixed height rather than a `min`/`max` pair, because the panel sits beside
+ * another one: a box that grew with the number of calls would move its
+ * neighbour's row every time an agent did anything. Twelve is about what the
+ * panels next to it come to.
  */
-function Panel(props: { title: string; wide?: boolean; children?: Child }) {
-  return (
-    <Box background="bgRaised" padX={2} padY={1}>
-      {props.wide ? Style(WIDE) : null}
-      <Text as="div" color="fgMuted" caps>
-        {props.title}
-      </Text>
-      <div style={{ height: rows(1) }} />
-      {props.children}
-    </Box>
-  );
-}
-
-/**
- * Two columns inside a panel that spans both of the bento's.
- *
- * Without this the Activity panel is a wide box with a narrow column of text in
- * it — the sparkline sets the width, and everything else is shorter. The graph
- * and the holdings are separate questions anyway, so they get separate columns
- * and collapse together on a narrow window.
- */
-const SPLIT = css({
-  display: "grid",
-  gridTemplateColumns: raw("minmax(0, 1fr)"),
-  rowGap: raw("var(--ms-row)"),
-  columnGap: "4ch",
-  [`@media (min-width: ${WIDE_PX}px)`]: {
-    gridTemplateColumns: raw("minmax(0, 62ch) minmax(0, 1fr)"),
-  },
-});
+const LOG_ROWS = 12;
 
 /**
  * One peer's availability as a line of squares, the way a BitTorrent client
@@ -334,6 +269,10 @@ function formatDuration(ms: number): string {
 function pingLabel(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return "—";
   return `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+}
+
+function callsLabel(calls: number): string {
+  return calls === 1 ? "1 call" : `${calls} calls`;
 }
 
 function dash(value: string | null | undefined): string {
@@ -452,6 +391,17 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
   // second. The recurring sweep belongs to the session's sampler.
   void props.client.refresh_peer_ips();
 
+  /*
+    The one thing on this pane that does not arrive as a prop. Agent calls are
+    not the session sampler's to report, and a log that appeared up to a second
+    after the call would be the wrong pace for watching an agent work — so this
+    subscribes to the store directly, the way the badge in the top bar does.
+  */
+  const agent = signal<AgentActivity>(agentActivity());
+  using _agent = disposable(
+    subscribeAgentActivity((next) => (agent.value = next)),
+  );
+
   using _keys = listen(window, "keydown", (event: Event) => {
     const keyEvent = event as KeyboardEvent;
     if (keyEvent.key === "Escape") {
@@ -504,6 +454,15 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
     /** How much of each slot *this tab* holds, in manifest order. */
     const heldStates = files.map((file) => fileSeedState(file, held, coverage));
 
+    const agentActivityNow = agent.value;
+    const callRows = agentActivityNow.log.map((call) => ({
+      ...call,
+      time: clockLabel(call.startedAt),
+      // A call still running has no duration yet, and a 0 there would read as
+      // one that finished instantly.
+      ms: call.endedAt === null ? "—" : `${call.endedAt - call.startedAt}ms`,
+    }));
+
     const peerRows = peers.map((peer, index) => {
       if (peer.ip) requestCountry(peer.ip);
       return {
@@ -536,12 +495,9 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
           background: t.bg,
         }}
       >
-        <div>
-          {Style(BENTO)}
-
-          <Panel title="Activity" wide>
-            <div>
-              {Style(SPLIT)}
+        <Bento>
+          <Panel title="Activity">
+            <Stack direction="column" gap={1}>
               <Stack direction="column" gap={1}>
                 {/*
                   A row of space between the two graphs, and between them and the
@@ -600,7 +556,7 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
                   {progress.filesComplete}/{totalSlots} slots held whole
                 </Text>
               </Stack>
-            </div>
+            </Stack>
           </Panel>
 
           {/*
@@ -776,6 +732,90 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
             </Stack>
           </Panel>
 
+          {/*
+            What an agent has done to this page.
+
+            Present even where WebMCP is not, which is nearly everywhere — no
+            browser enables it by default. A panel that disappeared would leave
+            the reader unable to tell "nothing has called these tools" from
+            "this browser cannot publish them", and those are opposite answers.
+          */}
+          <Panel title="WebMCP">
+            <Stack direction="column" gap={1}>
+              <Text color="fgMuted">
+                {agentActivityNow.registered.length === 0
+                  ? "no tools published — this browser has no WebMCP"
+                  : `${agentActivityNow.registered.length} tools published · ${callsLabel(agentActivityNow.calls)}`}
+              </Text>
+              {/*
+                Newest first, so the box needs no auto-scroll: a new line lands
+                at the top, where the reader already is, instead of below the
+                fold — and nothing jumps while an older line is being read.
+              */}
+              <div style={{ height: rows(LOG_ROWS), overflowY: "auto" }}>
+                {callRows.length === 0 ? (
+                  <Text color="fgMuted">no calls yet</Text>
+                ) : (
+                  <Table
+                    rows={callRows}
+                    rowKey={(call) => call.id}
+                    columns={[
+                      { key: "time", header: "time", width: 11 },
+                      { key: "tool", header: "tool", width: 20 },
+                      {
+                        /*
+                          The one flexible column, and the only one allowed to
+                          be. Everything else has a fixed width, so the table
+                          fits a half-width panel and the arguments give up
+                          their tail rather than the panel scrolling sideways.
+                        */
+                        key: "args",
+                        header: "args",
+                        render: (call) => (
+                          <Text
+                            color="fgMuted"
+                            truncate
+                            title={call.args || undefined}
+                          >
+                            {dash(call.args)}
+                          </Text>
+                        ),
+                      },
+                      {
+                        key: "outcome",
+                        header: "result",
+                        width: 12,
+                        // The code is what fits; the prose behind it is the
+                        // hover, since a failure message is a sentence. The
+                        // code repeats in the hover because the longest ones
+                        // are exactly the ones the column clips.
+                        render: (call) =>
+                          call.endedAt === null ? (
+                            <Text color="fgMuted">…running</Text>
+                          ) : call.outcome === "ok" ? (
+                            <Text color="success">ok</Text>
+                          ) : (
+                            <Text
+                              color="warning"
+                              truncate
+                              title={
+                                call.error
+                                  ? `${call.outcome} — ${call.error}`
+                                  : call.outcome
+                              }
+                            >
+                              {call.outcome}
+                            </Text>
+                          ),
+                      },
+                      { key: "ms", header: "took", width: 8, align: "right" },
+                    ]}
+                  />
+                )}
+              </div>
+            </Stack>
+          </Panel>
+
           <Panel title="Peers" wide>
             {peerRows.length === 0 ? (
               <Text color="fgMuted">no peers</Text>
@@ -923,7 +963,7 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
               </Text>
             </Panel>
           ) : null}
-        </div>
+        </Bento>
       </div>
     );
   };

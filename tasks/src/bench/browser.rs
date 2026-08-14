@@ -1,10 +1,11 @@
 //! The browser cells: a real headless Chrome driving `/lab`.
 //!
 //! No application code changes to make this drivable. `/lab` is click-driven,
-//! but it is built on stable committed DOM ids (`web/src/lab/index.html`) and
-//! `runBench` already ends at `web/src/lab/index.ts:126` with `log('report', report)`
-//! — and `logger` (`lab/index.ts:22-40`) `JSON.stringify`s any non-string. So the
-//! `BenchReport` is already sitting in `#rx-log` as JSON; nobody had read it.
+//! but it is built on stable committed DOM ids (`web/src/lab/consumer.tsx`,
+//! `web/src/lab/producer.tsx`) and `runBench` already ends with
+//! `log('report', report)` — and the log writer (`web/src/lab/parts.tsx`)
+//! `JSON.stringify`s any non-string. So the `BenchReport` is already sitting in
+//! `#rx-log` as JSON; nobody had read it.
 //!
 //! Chrome rather than Node deliberately: `node-datachannel` is `libdatachannel`,
 //! a different WebRTC implementation, and the backpressure question in
@@ -22,7 +23,7 @@ use super::row::{BenchReport, Cpu, Row};
 use super::{CellResult, Options, WASM_ARTIFACT};
 use crate::util::{self, output};
 
-/// The browser's bench window is fixed: `lab/index.ts:102` passes `undefined` for
+/// The browser's bench window is fixed: `lab/consumer.tsx` passes `undefined` for
 /// duration, so `DEFAULT_BENCH_DURATION_SECS` applies and `--duration` cannot
 /// reach it without an app change.
 const BROWSER_WINDOW: Duration = Duration::from_secs(30);
@@ -337,7 +338,7 @@ fn produce_cell(binary: &str, opts: &Options, cell: &str, transport: &str) -> Re
 
 fn finish(cell: &str, direction: &str, reports: Vec<BenchReport>, cpu: Option<Cpu>) -> Row {
     let mut notes = vec![
-        "the bench window is pinned at 30 s — `lab/index.ts:102` passes `undefined` \
+        "the bench window is pinned at 30 s — `lab/consumer.tsx` passes `undefined` \
          for duration, so `--duration` does not reach browser cells"
             .to_owned(),
         "signalling is brokered over the iroh relay before the direct data \
