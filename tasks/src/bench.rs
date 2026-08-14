@@ -362,7 +362,7 @@ fn provenance(sh: &Shell, opts: &Options) -> Provenance {
         machine: machine(sh),
         os: os_version(sh),
         rustc: read(sh, "rustc --version"),
-        chrome: chrome_version(sh),
+        chrome: chrome_version(),
         wasm_bytes: std::fs::metadata(util::repo_root().join(WASM_ARTIFACT))
             .ok()
             .map(|meta| meta.len()),
@@ -396,7 +396,7 @@ fn os_version(sh: &Shell) -> String {
 /// Not `xshell`'s `read()`: `agent-browse status` reports on **stderr** (it is
 /// a cargo-style status block, not a machine product), so reading stdout alone
 /// finds nothing and leaks the block into our own output.
-fn chrome_version(_sh: &Shell) -> Option<String> {
+pub(crate) fn chrome_version() -> Option<String> {
     let output = Command::new("agent-browse").arg("status").output().ok()?;
     let text = format!(
         "{}{}",

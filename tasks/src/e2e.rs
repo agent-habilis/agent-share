@@ -222,6 +222,21 @@ const CELLS: &[Cell] = &[
         run: cell_password_web_producer_snapshot,
         precheck: None,
     },
+    Cell {
+        name: "webmcp-read",
+        run: cell_webmcp_read,
+        precheck: Some(webmcp_unavailable),
+    },
+    Cell {
+        name: "webmcp-failures",
+        run: cell_webmcp_failures,
+        precheck: Some(webmcp_unavailable),
+    },
+    Cell {
+        name: "webmcp-ui",
+        run: cell_webmcp_ui,
+        precheck: Some(webmcp_unavailable),
+    },
 ];
 
 pub(crate) fn run(sh: &Shell, cells: &str) -> TaskOutcome {
@@ -1444,6 +1459,98 @@ fn download() -> Res<Saved> {
 }
 
 // ---------------------------------------------------------------------------
+// WebMCP
+// ---------------------------------------------------------------------------
+
+/// Every `f{index:03}.txt` the fixture writes — see [`make_share`]. Spelled as
+/// the string itself so it cannot drift from what is actually served.
+const FIXTURE_FILE_LEN: usize = "file 0 contents\n".len();
+
+/// Chrome below this cannot publish tools at all, so the rows would fail for a
+/// reason that is not a defect. 150 is the floor `docs/webmcp.md` names.
+const WEBMCP_MIN_CHROME: u32 = 150;
+
+/// Run a row's assertions in the page, and turn its report into a verdict.
+///
+/// `call` goes out through `executeTool` rather than reaching into the page's
+/// modules, which is the entire point of covering this here: the unit tests
+/// already exercise the tool bodies, and what they structurally cannot reach is
+/// the browser's own dispatch — argument serialization, the result coming back
+/// as a JSON *string*, and the fact that nothing validates `inputSchema` on the
+/// way in.
+///
+/// Every miss is reported, not just the first. A row that stopped at the first
+/// bad answer would need a run per assertion to see the shape of a breakage,
+/// and these rows cost a relay handshake each.
+fn run_webmcp(body: &str) -> Res<()> {
+    let script = format!(
+        r"(async () => {{
+          if (!document.modelContext) {{
+            return JSON.stringify(['this browser exposes no document.modelContext']);
+          }}
+          const tools = Object.fromEntries(
+            (await document.modelContext.getTools()).map((tool) => [tool.name, tool]),
+          );
+          const bad = [];
+          const call = async (name, args) => {{
+            if (!tools[name]) {{
+              bad.push('the page never published ' + name);
+              return {{}};
+            }}
+            const raw = await document.modelContext.executeTool(
+              tools[name], JSON.stringify(args ?? {{}}),
+            );
+            return typeof raw === 'string' ? JSON.parse(raw) : raw;
+          }};
+          const check = (label, got, want) => {{
+            const g = JSON.stringify(got);
+            const w = JSON.stringify(want);
+            if (g !== w) bad.push(label + ': got ' + g + ', wanted ' + w);
+          }};
+          {body}
+          return JSON.stringify(bad);
+        }})()"
+    );
+    let raw = evaluate(&script)?;
+    let failures: Vec<String> = serde_json::from_str(&raw)
+        .map_err(|error| format!("reading the WebMCP report ({error}): {raw}"))?;
+    if failures.is_empty() {
+        return Ok(());
+    }
+    Err(failures.join("; ").into())
+}
+
+/// Why the `WebMCP` rows cannot run here, if they cannot.
+///
+/// A precheck runs before any window exists, so it cannot ask the page itself
+/// and settles for the version instead. That is the weaker of the two things
+/// `docs/webmcp.md` requires — the browser must also expose the property on the
+/// origin under test — so a row whose browser is new enough but still publishes
+/// nothing fails on the guard at the top of [`run_webmcp`], naming what it
+/// found. Reported as a skip only where the version alone already settles it.
+fn webmcp_unavailable() -> Option<String> {
+    let Some(reported) = crate::bench::chrome_version() else {
+        return Some("agent-browse reports no Chrome version".to_owned());
+    };
+    let major = reported
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u32>().ok());
+    let Some(major) = major else {
+        return Some(format!(
+            "agent-browse reports an unreadable Chrome version: {reported}"
+        ));
+    };
+    if major < WEBMCP_MIN_CHROME {
+        return Some(format!(
+            "Chrome {major} has no WebMCP — {WEBMCP_MIN_CHROME}+ is needed \
+             (agent-browse chrome install --execute)"
+        ));
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // The cells
 // ---------------------------------------------------------------------------
 
@@ -1945,4 +2052,186 @@ fn cell_password_no_producer(ctx: &Ctx<'_>) -> Res<()> {
         "the gate to name the password with no producer running",
     )?;
     Ok(())
+}
+
+/// **An agent reads the share through the tools the page publishes.**
+///
+/// The bytes are the assertion. A tool that listed the right names while
+/// returning the wrong window, or that reported UTF-8 for a binary read, would
+/// hand a model a confident wrong answer — and every layer below here would
+/// still be green, because the manifest and the transport were never at fault.
+fn cell_webmcp_read(ctx: &Ctx<'_>) -> Res<()> {
+    let page = Page::open(ctx, 3, "")?;
+    wait_for_listing()?;
+
+    // Where the blob's first NUL falls is a property of the fixture, not
+    // something to assume: `looksBinary` is a NUL test, deliberately, so a
+    // window that happens to hold none is *correctly* returned as text. Reading
+    // the offset off disk aims the binary read at bytes that must be base64,
+    // and gives something exact to compare the decode against.
+    let blob = std::fs::read(page.dir.path().join("blob.bin"))
+        .map_err(|error| format!("reading the fixture blob: {error}"))?;
+    let Some(nul) = blob.iter().position(|byte| *byte == 0) else {
+        return Err("the fixture blob holds no NUL byte to read".into());
+    };
+    let end = (nul + 8).min(blob.len());
+    let binary_len = end - nul;
+    // Compared as the byte array both sides already have, rather than hex — the
+    // page decodes with `atob` and `check` stringifies, so `[17,0,…]` needs no
+    // encoding step on either end.
+    let expected_bytes = serde_json::to_string(&blob[nul..end])
+        .map_err(|error| format!("describing the expected blob bytes: {error}"))?;
+
+    run_webmcp(&format!(
+        r"
+        const opened = await call('shareConnect');
+        check('shareConnect counts the share', [opened.ok, opened.files, opened.bytes],
+              [true, 4, {bytes}]);
+
+        const listed = await call('shareList');
+        check('shareList names every entry', listed.entries.map((e) => e.name).sort(),
+              ['blob.bin', 'f000.txt', 'f001.txt', 'f002.txt']);
+
+        const stat = await call('shareStat', {{ path: 'f000.txt' }});
+        check('shareStat sizes a file', [stat.kind, stat.size], ['file', {file_len}]);
+
+        const whole = await call('shareRead', {{ path: 'f000.txt' }});
+        check('shareRead returns the fixture bytes', [whole.encoding, whole.text, whole.eof],
+              ['utf8', 'file 0 contents\n', true]);
+
+        // One byte from the middle: the offset must reach the wire, not just
+        // slice a window the page had already pulled in full.
+        const window = await call('shareRead', {{ path: 'f000.txt', offset: 5, length: 1 }});
+        check('shareRead honours offset and length',
+              [window.text, window.eof, window.nextOffset], ['0', false, 6]);
+
+        // Aimed at the blob's first NUL, so this window must not come back as
+        // text — and the decode is compared byte for byte, not just typed.
+        const binary = await call('shareRead',
+                                  {{ path: 'blob.bin', offset: {nul}, length: {binary_len} }});
+        const decoded = typeof binary.data === 'string'
+          ? [...atob(binary.data)].map((char) => char.charCodeAt(0))
+          : null;
+        check('shareRead base64s a window holding a NUL',
+              [binary.encoding, binary.text, decoded], ['base64', undefined, {expected_bytes}]);
+
+        const found = await call('shareSearch', {{ query: 'contents' }});
+        check('shareSearch finds every text file',
+              found.matches.map((m) => m.path).sort(),
+              ['f000.txt', 'f001.txt', 'f002.txt']);
+
+        // What it left out, and why. A search that silently dropped the blob
+        // would read as 'there is nothing else', which is a different answer.
+        check('shareSearch says it skipped the binary',
+              (found.skipped ?? []).map((s) => [s.path, s.reason]),
+              [['blob.bin', 'binary']]);
+
+        // The grammar is `*`, `**` and `?` only — a character class would be
+        // matched literally, so this narrows with the wildcard that exists.
+        const globbed = await call('shareSearch', {{ query: 'contents', glob: 'f000.*' }});
+        check('shareSearch honours a glob',
+              globbed.matches.map((m) => m.path), ['f000.txt']);
+        ",
+        bytes = 3 * FIXTURE_FILE_LEN + BLOB_LEN,
+        file_len = FIXTURE_FILE_LEN,
+    ))?;
+
+    page.finish()
+}
+
+/// **Bad input comes back as a result, never as a throw.**
+///
+/// Two measured browser behaviours make this load-bearing rather than tidy, and
+/// both are invisible to a unit test that calls `execute` directly: the browser
+/// does not check a call against `inputSchema`, so a missing `required` field
+/// arrives as `undefined`; and anything a tool throws is flattened to
+/// `UnknownError`, losing the message. A tool that leaned on either would look
+/// correct in isolation and tell an agent nothing here.
+fn cell_webmcp_failures(ctx: &Ctx<'_>) -> Res<()> {
+    let page = Page::open(ctx, 3, "")?;
+    wait_for_listing()?;
+
+    run_webmcp(
+        r"
+        await call('shareConnect');
+
+        const missing = await call('shareStat', { path: 'nope.txt' });
+        check('a path that is not there', [missing.ok, missing.code], [false, 'not_found']);
+
+        // `path` is `required`, and the browser lets the call through without it.
+        const noPath = await call('shareRead', {});
+        check('a missing required argument', [noPath.ok, noPath.code], [false, 'bad_argument']);
+
+        const escaping = await call('shareStat', { path: '../../etc/passwd' });
+        check('a path that escapes the share root',
+              [escaping.ok, escaping.code], [false, 'bad_argument']);
+
+        const tooSmall = await call('shareRead', { path: 'f000.txt', length: 0 });
+        check('a length under the schema minimum',
+              [tooSmall.ok, tooSmall.code], [false, 'bad_argument']);
+
+        // Every failure has to carry prose as well as a code — the code is for
+        // the caller, the sentence is what the model acts on.
+        check('every failure explains itself',
+              [missing, noPath, escaping, tooSmall].every((r) => typeof r.error === 'string'
+                                                                 && r.error.length > 0),
+              true);
+        ",
+    )?;
+
+    page.finish()
+}
+
+/// **The interface tools actually move the page.**
+///
+/// The half no unit test can reach. `shareNavigate` and `shareOpenView` return
+/// a snapshot, and a version of them that built the snapshot without touching
+/// the app would satisfy every assertion about their return value — so what is
+/// checked here is the route the person is left on, read back from the page.
+///
+/// It ends on `/info`, which is also where the call log lives, so the last
+/// assertion is that the page can see the traffic this row just made.
+fn cell_webmcp_ui(ctx: &Ctx<'_>) -> Res<()> {
+    let page = Page::open(ctx, 3, "")?;
+    wait_for_listing()?;
+
+    run_webmcp(
+        r"
+        const before = await call('shareUiState');
+        check('the page starts on the file browser', before.view, 'files');
+
+        // `selection` is one segment per level, not a joined path.
+        const moved = await call('shareNavigate', { path: 'f001.txt' });
+        check('shareNavigate selects a file', [moved.ok, moved.selection], [true, ['f001.txt']]);
+
+        const opened = await call('shareOpenView', { view: 'info' });
+        check('shareOpenView reports success', opened.ok, true);
+        ",
+    )?;
+
+    wait_for_true(
+        "location.pathname.startsWith('/info/')",
+        ACTION_TIMEOUT,
+        "shareOpenView to move the page to the info panel",
+    )?;
+    // The log panel, fed by the calls above rather than by a fixture.
+    wait_for_true(
+        "/tools published/.test(document.body.innerText)",
+        ACTION_TIMEOUT,
+        "the WebMCP panel to report the tools this page published",
+    )?;
+
+    run_webmcp(
+        r"
+        const back = await call('shareOpenView', { view: 'files' });
+        check('shareOpenView goes back', back.ok, true);
+        ",
+    )?;
+    wait_for_true(
+        "location.pathname.startsWith('/files/')",
+        ACTION_TIMEOUT,
+        "shareOpenView to return the page to the file browser",
+    )?;
+
+    page.finish()
 }

@@ -18,7 +18,12 @@ import { beginToolCall, markToolsRegistered } from './activity.ts'
 import { TOOLS as SHARE_TOOLS } from './tools.ts'
 import { UI_TOOLS } from './uiTools.ts'
 
-export { agentActivity, subscribeAgentActivity, type AgentActivity } from './activity.ts'
+export {
+  agentActivity,
+  subscribeAgentActivity,
+  type AgentActivity,
+  type AgentCall,
+} from './activity.ts'
 export { publishAgentSession, type AgentSession } from './uiBridge.ts'
 export { resetSessions } from './session.ts'
 
@@ -39,16 +44,23 @@ export const TOOLS: readonly ModelContextTool[] = [...SHARE_TOOLS, ...UI_TOOLS]
  * — so being *called* is the only evidence there is, and the badge in the top
  * bar is built entirely out of it. Wrapping here rather than in each tool means
  * a tool cannot be added and quietly left out of the count.
+ *
+ * It is also the one place that sees the name, the arguments and the result of
+ * every call, which is what the log on `/info` is made of.
  */
 function instrument(tool: ModelContextTool): ModelContextTool {
   return {
     ...tool,
     execute: async (input) => {
-      const end = beginToolCall(tool.name)
+      const end = beginToolCall(tool.name, input)
+      // Left undefined by a throw, which is how `end` tells a failure that came
+      // back as a result from one that escaped the tool's own `guard`.
+      let result: unknown
       try {
-        return await tool.execute(input)
+        result = await tool.execute(input)
+        return result
       } finally {
-        end()
+        end(result)
       }
     },
   }
