@@ -1,0 +1,7 @@
+# `root` because the workspace root is now the repo root: without it `bun test`
+# walks `target/` too, which is ~445k cargo build entries — a ~400 ms, ~469k
+# syscall scan that can never match, since every test lives under `packages/`.
+# The pre-split run was bounded to the app tree and never paid it.
+[test]
+root = "packages"
+preload = ["./scripts/test-setup.ts"]

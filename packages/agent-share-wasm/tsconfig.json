@@ -1,0 +1,8 @@
+// `path.ts` and `glue/` are generated into `src/` by `scripts/wasm-asset.ts`,
+// so a clean checkout has to run `bun scripts/gen-wasm-path.ts` before this
+// program resolves. The root `typecheck` script does exactly that first.
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "types": [], "exactOptionalPropertyTypes": false },
+  "include": ["src"]
+}

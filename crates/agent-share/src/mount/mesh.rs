@@ -72,7 +72,7 @@ use fofoca::net::MAX_DIRECT_PEERS;
 ///
 /// The two strings are a vocabulary shared with the browser peer — `role` on
 /// the meta card, rendered per peer by the web Info panel (`PeerRole` in
-/// `web/src/lib/peerCard/index.ts`). An enum rather than a `&str` argument so a typo is a
+/// `packages/agent-share-core/src/peerCard/index.ts`). An enum rather than a `&str` argument so a typo is a
 /// compile error instead of a peer that renders as an unknown role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {

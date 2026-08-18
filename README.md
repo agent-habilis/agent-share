@@ -134,13 +134,20 @@ measure it — not as a transport to choose.
 ### Building
 
 ```
-cd web && bun install && bun run build
+bun install && bun run build
 ```
 
-`web/` is the browser app, `node/` the `npx agent-share <ticket>` receiver.
-Both consume the same `.wasm`; only the wasm-bindgen glue differs.
+`packages/` is the JavaScript half — a Bun workspace beside the `crates/` cargo
+one, with the same flat shape. `agent-share-app` is the bundled browser entry
+point, over `agent-share-ui`, over `agent-share-core`, over `agent-share-wasm`.
+`agent-share-node` is the `npx agent-share <ticket>` receiver; it is the one
+member that gets published, so it alone is not `private`, and its directory name
+carries the `agent-share-` prefix its npm name (`agent-share`) does not. The six
+`visage-*` and `moonspace-*` members are vendored — see `docs/vendoring.md`.
+Browser and receiver consume the same `.wasm`; only the wasm-bindgen glue
+differs.
 
-`bun run build` builds that wasm too, through `web/scripts/build-wasm.ts` — so
+`bun run build` builds that wasm too, through `scripts/build-wasm.ts` — so
 it needs the `wasm32-unknown-unknown` target, the `wasm-bindgen` CLI, and a
 clang that can emit wasm32 (`brew install llvm` on macOS; Apple's has no wasm
 backend). It says which one is missing. `cargo task web-wasm` runs the same
@@ -150,7 +157,7 @@ script when only the binary is wanted.
 contended port, via [portless](https://github.com/vercel-labs/portless) — and
 expects the wasm to exist already. `bun run build && bun run start` is the
 production pair: `start` serves the built `dist/` on `PORT`, with the same
-routing the deployed image uses (`web/scripts/serve.ts`).
+routing the deployed image uses (`scripts/serve.ts`).
 
 ### Deploying
 

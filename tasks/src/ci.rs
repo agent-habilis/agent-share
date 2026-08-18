@@ -1,7 +1,7 @@
 use xshell::{Shell, cmd};
 
 use crate::TaskOutcome;
-use crate::util::output;
+use crate::util::{output, repo_root};
 
 pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     output::status("Checking", "formatting");
@@ -28,7 +28,10 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         .read()
         .is_ok()
     {
-        let _guard = sh.push_dir("web");
+        // Anchored rather than cwd-relative, like `web_image` and the bench
+        // harness: `cargo task` runs from wherever it was invoked, and the bun
+        // workspace root is the repo root.
+        let _guard = sh.push_dir(repo_root());
         // Only on a cold checkout: installing every run would put the network
         // on the critical path of a gate that otherwise needs none.
         if !sh.path_exists("node_modules") {

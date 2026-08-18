@@ -74,7 +74,7 @@ enum Task {
     /// no privileges: RTT is measured per row, not injected.
     Bench {
         /// Seconds per bench window (native cells only — the browser's is
-        /// pinned at 30 s by `web/src/lab/consumer.tsx`).
+        /// pinned at 30 s by `packages/agent-share-app/src/lab/consumer.tsx`).
         #[arg(long, default_value_t = 15)]
         duration: u64,
         /// Runs per cell; the row reports the median and the spread.
@@ -120,7 +120,7 @@ enum Task {
     Proptest,
     /// Build the browser/Node wasm client into its `dist/{web,nodejs}`.
     WebWasm,
-    /// Build `web/` into a container image — Bun serving the static `dist/` —
+    /// Build the browser app into a container image — Bun serving the static `dist/` —
     /// and push it to the self-hosted Gitea registry. Hermetic: the image
     /// rebuilds the wasm from source, so nothing on this machine leaks into it
     /// and no `web-wasm` run is needed first.

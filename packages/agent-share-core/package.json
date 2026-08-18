@@ -1,0 +1,34 @@
+{
+  "name": "agent-share-core",
+  "version": "0.0.0",
+  "description": "Share domain logic — tickets, manifests, transfers, mounts, agent tools. No UI framework.",
+  "type": "module",
+  "private": true,
+  "exports": {
+    "./agentTools": "./src/agentTools/index.ts",
+    "./agentTools/result": "./src/agentTools/result.ts",
+    "./client": "./src/client/index.ts",
+    "./download": "./src/download/index.ts",
+    "./keep": "./src/keep/index.ts",
+    "./mount": "./src/mount/index.ts",
+    "./opfs": "./src/opfs/index.ts",
+    "./peerCard": "./src/peerCard/index.ts",
+    "./pickShareFiles": "./src/pickShareFiles/index.ts",
+    "./produce": "./src/produce.ts",
+    "./seeding": "./src/seeding/index.ts",
+    "./stream": "./src/stream/index.ts",
+    "./stream/protocol": "./src/stream/protocol.ts",
+    "./stream/range": "./src/stream/range.ts",
+    "./ticket": "./src/ticket/index.ts",
+    "./transferStats": "./src/transferStats/index.ts",
+    "./tree": "./src/tree.ts"
+  },
+  "dependencies": {
+    "agent-share-wasm": "workspace:*",
+    "client-zip": "^2.4.5"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

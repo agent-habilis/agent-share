@@ -1,0 +1,38 @@
+// Shared compiler options for the `packages/` Bun workspace — the four
+// first-party members and the vendored `visage-*` ones. Adapted from visage's
+// tsconfig.base.json.
+//
+// Deliberately no `references` and no `composite`. Project references would
+// force `declaration: true`, and cross-package imports would then resolve
+// through emitted .d.ts files rather than source.
+//
+// The `jsx`/`jsxImportSource` pair below does NOT reach a package whose `.tsx`
+// the bundler loads through a `node_modules` symlink — it ignores `extends`
+// there. Such a package must repeat the two options itself; see
+// `packages/agent-share-ui/tsconfig.json` and `docs/vendoring.md`.
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "lib": ["esnext", "dom", "dom.iterable", "esnext.disposable"],
+
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+
+    // Applies to .tsx files only, so the JSX layer is opt-in by file extension
+    // and every existing .ts file is unaffected.
+    "jsx": "react-jsx",
+    "jsxImportSource": "visage-dom",
+
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "allowJs": false,
+    "isolatedModules": true
+  }
+}

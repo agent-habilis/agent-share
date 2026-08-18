@@ -5,11 +5,11 @@
 # Hermetic by construction. The wasm the app loads is rebuilt from
 # `crates/agent-share-wasm-client/` here rather than copied off a developer's
 # machine, so the image cannot ship whatever `dist/` happened to be lying around
-# in a checkout — the staleness class `web/scripts/wasm-asset.ts` documents at
-# length. That is also why the build context is the repo root and not `web/`.
+# in a checkout — the staleness class `scripts/wasm-asset.ts` documents at
+# length.
 #
 # Nothing below restates how the wasm is built: `bun run build` does that
-# itself, through `web/scripts/build-wasm.ts`. This file only has to supply the
+# itself, through `scripts/build-wasm.ts`. This file only has to supply the
 # toolchain that script expects to find.
 #
 # Driven by `cargo task web-image` (tasks/src/web_image.rs).
@@ -66,21 +66,32 @@ COPY Cargo.toml Cargo.lock ./
 COPY tasks/ tasks/
 COPY crates/ crates/
 
-WORKDIR /app/web
+# `packages/` comes along whole before the install: every one of its members is
+# named with `workspace:*`, and `--frozen-lockfile` fails if a member's manifest
+# is absent. That puts first-party *source* in this layer's cache key too, so
+# unlike the pre-split layout — where only `vendor/` sat here — an edit under
+# `packages/*/src/**` does re-run the install. The cache mount is what makes
+# that cheap: an invalidated layer relinks from the store instead of refetching
+# ~78 MB. Copying only `packages/*/package.json` would avoid the invalidation
+# outright, but needs the `--parents` flag and so a `-labs` syntax channel.
+COPY package.json bun.lock ./
+COPY packages/ packages/
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile
 
-# Manifests first, so an edit under `src/` does not redo the install. `vendor/`
-# comes along whole: its six packages are workspace members named with
-# `workspace:*`, and `--frozen-lockfile` fails if their manifests are absent.
-COPY web/package.json web/bun.lock ./
-COPY web/vendor/ vendor/
-RUN bun install --frozen-lockfile
-
-COPY web/ ./
+# Named rather than `COPY . ./`: this set has to stay one-to-one with
+# `BUILD_INPUTS` in `tasks/src/web_image.rs`, which decides whether a tag gets
+# the `-dirty` suffix. A blanket copy silently widens what the image is built
+# from without widening what that list watches, so an edit to a root tsconfig
+# would ship under a clean sha.
+COPY scripts/ scripts/
+COPY types/ types/
+COPY tsconfig.base.json tsconfig.json bunfig.toml ./
 
 # One step, because `bun run build` is self-contained: it builds the wasm, the
 # glue, the bundle, `sw.js`, and the content-addressed binary with its
-# precompressed siblings. A `web/src/**` edit invalidates this layer, but the
-# cargo half is then a no-op off the cache mount rather than a rebuild.
+# precompressed siblings. A `packages/*/src/**` edit invalidates this layer, but
+# the cargo half is then a no-op off the cache mount rather than a rebuild.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/crates/agent-share-wasm-client/target \
@@ -102,7 +113,7 @@ ENV PORT=3000
 # The checkout's layout, reproduced: `serve.js` resolves `../dist/` against its
 # own module URL, so `scripts/` beside `dist/` is what makes it need no
 # configuration.
-COPY --from=build --chown=bun:bun /app/web/dist/ ./dist/
+COPY --from=build --chown=bun:bun /app/dist/ ./dist/
 COPY --from=build --chown=bun:bun /app/out/scripts/serve.js ./scripts/serve.js
 
 USER bun

@@ -1,0 +1,9 @@
+// Not a type-checking program — every package under `packages/` owns its own,
+// and `bun run typecheck` runs them through `--filter '*'`. This file exists so
+// tools that look for a tsconfig at the repo root find the JSX settings:
+// `bun test` reads `jsxImportSource` from here to resolve `visage-dom/jsx-dev-runtime`,
+// and without it every `.tsx` test falls back to React and fails to resolve.
+{
+  "extends": "./tsconfig.base.json",
+  "files": []
+}

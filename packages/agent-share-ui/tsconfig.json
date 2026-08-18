@@ -1,0 +1,25 @@
+// `../../types` carries the ambient globals: `TechInfo` reads the WebMCP
+// `Document.modelContext`, and the File System Access pickers reach this
+// program through `agent-share-core`'s source.
+//
+// `jsx`/`jsxImportSource` are repeated from `tsconfig.base.json` rather than
+// inherited, and must stay repeated. Every consumer imports this package by its
+// bare name, so the bundler reaches these files through the `node_modules`
+// symlink — and it ignores `extends` for a tsconfig read that way, including an
+// `extends` pointing inside the same package. Left to the base alone, each
+// component compiles against the default `react/jsx-dev-runtime` and the build
+// fails to resolve it. `moonspace-dom` is the only other package this applies
+// to; `docs/vendoring.md` says why it must not be normalized to `extends`.
+// `agent-share-app` does not need the pair — the bundler reaches it by real
+// path, not through `node_modules`.
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": [],
+    "exactOptionalPropertyTypes": false,
+    "jsx": "react-jsx",
+    "jsxImportSource": "visage-dom"
+  },
+  "include": ["src", "../../types"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
+}

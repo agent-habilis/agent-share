@@ -1,0 +1,10 @@
+// No `exports` and no `main` in this package's manifest: it is built, not
+// imported. `../../types` carries the ambient globals — the File System Access
+// pickers `pages/home` calls, and the `declare module '*.css'` that lets
+// `main.tsx` and `lab/` import `app.css`.
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "types": [], "exactOptionalPropertyTypes": false },
+  "include": ["src", "../../types"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
+}

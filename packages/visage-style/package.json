@@ -1,0 +1,18 @@
+{
+  "name": "visage-style",
+  "version": "0.0.0",
+  "description": "Vendored — see docs/vendoring.md.",
+  "type": "module",
+  "private": true,
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "visage-dom": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

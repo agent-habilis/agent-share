@@ -1,0 +1,20 @@
+{
+  "name": "visage-router",
+  "version": "0.0.0",
+  "description": "Vendored — see docs/vendoring.md.",
+  "type": "module",
+  "private": true,
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./match": "./src/match/index.ts",
+    "./history": "./src/history/index.ts"
+  },
+  "dependencies": {
+    "visage-dom": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

@@ -243,7 +243,7 @@ the roster forever — 100 churned consumers read as "(100 reading)".
 
 ## Nothing observably breaks when the zip entries are built eagerly
 
-`web/src/lib/download/index.ts` builds its ZIP entries from a generator, and the comment
+`packages/agent-share-core/src/download/index.ts` builds its ZIP entries from a generator, and the comment
 there says an eager `.map()` "would have stalled on the first tick" past the
 producer's 100-stream ceiling. `cargo task e2e` says otherwise: reverting to
 `.map()` passed `web-download-zip` at 301 files and again at 1201. quinn queues
@@ -273,7 +273,7 @@ regardless of timer drift.
 - **The dev server serving stale JS glue against a fresh wasm.** The reverse
   twin of the stale-`.wasm` entry below: the binary healed itself through the
   content-addressed URL, but the glue was bundled straight out of the crate's
-  `dist/web/` — outside `web/`, where bun's watcher never looks — so a
+  `dist/web/` — outside `packages/`, where bun's watcher never looks — so a
   `cargo task web-wasm` mid-session paired new wasm with old glue and died at
   `LinkError: … __wbg_connectionState… function import requires a callable`
   (caught 2026-08-07 while validating the channel-health watcher; the error

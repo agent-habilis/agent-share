@@ -1087,7 +1087,7 @@ fn cell_password_web_persist(ctx: &Ctx<'_>) -> Res<()> {
 /// the native tests nor the browser cells.
 fn cell_password_node_cli(ctx: &Ctx<'_>) -> Res<()> {
     let root = util::repo_root();
-    let cli = root.join("node/src/cli.js");
+    let cli = root.join("packages/agent-share-node/src/cli.js");
     let (dir, _sha) = make_share(1)?;
     let (mut producer, ticket) = serve(ctx.binary, dir.path(), Some(PASSWORD))?;
 
@@ -1137,7 +1137,7 @@ fn node_datachannel_missing() -> Option<String> {
     // the state a bun install leaves, and it fails at import rather than at
     // resolution, so a path check reports it as present and the row then fails
     // for a reason that is not a defect.
-    let node_dir = util::repo_root().join("node");
+    let node_dir = util::repo_root().join("packages/agent-share-node");
     let loaded = Command::new("node")
         .current_dir(&node_dir)
         .args(["-e", "import('node-datachannel/polyfill')"])
@@ -1853,7 +1853,7 @@ fn cell_reconnect(ctx: &Ctx<'_>) -> Res<()> {
     // `reconnecting` is rendered in exactly one place — `TechInfo`'s status —
     // because the breadcrumb deliberately never says it ("redialing is the
     // app's permanent background posture … naming it in the chrome would label
-    // the normal state of the world", `web/src/pages/files/index.tsx`). This
+    // the normal state of the world", `packages/agent-share-app/src/pages/files/index.tsx`). This
     // cell used to close the panel first and then wait for a word only the
     // panel renders.
     wait_for_true(

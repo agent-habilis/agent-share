@@ -1,0 +1,34 @@
+{
+  "name": "agent-share-ui",
+  "version": "0.0.0",
+  "description": "The share UI kit and the stateful session shell.",
+  "type": "module",
+  "private": true,
+  "exports": {
+    "./Centered": "./src/Centered/index.tsx",
+    "./Chrome": "./src/Chrome/index.tsx",
+    "./ColumnView": "./src/ColumnView/index.tsx",
+    "./FailedBody": "./src/FailedBody/index.tsx",
+    "./LoadingBody": "./src/LoadingBody/index.tsx",
+    "./Panel": "./src/Panel/index.tsx",
+    "./Preview": "./src/Preview/index.tsx",
+    "./Session": "./src/Session/index.tsx",
+    "./Session/session": "./src/Session/session.ts",
+    "./SessionChrome": "./src/SessionChrome/index.tsx",
+    "./TechInfo": "./src/TechInfo/index.tsx",
+    "./nav": "./src/nav.ts"
+  },
+  "dependencies": {
+    "agent-share-core": "workspace:*",
+    "agent-share-wasm": "workspace:*",
+    "moonspace": "workspace:*",
+    "moonspace-dom": "workspace:*",
+    "visage-dom": "workspace:*",
+    "visage-router": "workspace:*",
+    "visage-style": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

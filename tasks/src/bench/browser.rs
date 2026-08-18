@@ -1,9 +1,9 @@
 //! The browser cells: a real headless Chrome driving `/lab`.
 //!
 //! No application code changes to make this drivable. `/lab` is click-driven,
-//! but it is built on stable committed DOM ids (`web/src/lab/consumer.tsx`,
-//! `web/src/lab/producer.tsx`) and `runBench` already ends with
-//! `log('report', report)` — and the log writer (`web/src/lab/parts.tsx`)
+//! but it is built on stable committed DOM ids (`packages/agent-share-app/src/lab/consumer.tsx`,
+//! `packages/agent-share-app/src/lab/producer.tsx`) and `runBench` already ends with
+//! `log('report', report)` — and the log writer (`packages/agent-share-app/src/lab/parts.tsx`)
 //! `JSON.stringify`s any non-string. So the `BenchReport` is already sitting in
 //! `#rx-log` as JSON; nobody had read it.
 //!
@@ -205,9 +205,7 @@ fn prepare() -> Result<(Proc, Browser), String> {
 /// ephemeral port costs nothing to discover.
 pub(crate) fn start_dev_server(root: &Path) -> Res<(Proc, String)> {
     let mut cmd = Command::new("bun");
-    cmd.arg("scripts/dev.ts")
-        .current_dir(root.join("web"))
-        .env("PORT", "0");
+    cmd.arg("scripts/dev.ts").current_dir(root).env("PORT", "0");
     let (server, mut lines) = spawn_piped_with_stderr(cmd, "bun dev server")?;
     // `scripts/dev.ts` prints `dev http://localhost:3000/` once bound.
     let Some(line) = lines.wait_for("dev http", Duration::from_mins(1)) else {
@@ -268,8 +266,8 @@ fn assert_wasm_is_fresh(root: &Path, url: &str) -> Res<()> {
 
 /// The URL path the dev server actually answers the wasm on.
 ///
-/// Content-addressed, so it cannot be a constant here: `web/scripts/wasm-asset.ts`
-/// hashes the binary and writes the path into `web/src/wasm/path.ts`, and the
+/// Content-addressed, so it cannot be a constant here: `scripts/wasm-asset.ts`
+/// hashes the binary and writes the path into `packages/agent-share-wasm/src/path.ts`, and the
 /// dev server 404s the old fixed name on purpose. Read from that generated file
 /// rather than re-deriving the hash, so there is one source of truth and no
 /// second implementation of the digest to drift.
@@ -277,7 +275,7 @@ fn assert_wasm_is_fresh(root: &Path, url: &str) -> Res<()> {
 /// Safe to read at this point in the run: `scripts/dev.ts` regenerates it before it
 /// binds a port, and the caller has already seen the server's ready line.
 fn served_wasm_path(root: &Path) -> Res<String> {
-    const GENERATED: &str = "web/src/wasm/path.ts";
+    const GENERATED: &str = "packages/agent-share-wasm/src/path.ts";
     let source = std::fs::read_to_string(root.join(GENERATED))
         .map_err(|error| format!("cannot read {GENERATED}: {error}"))?;
     source

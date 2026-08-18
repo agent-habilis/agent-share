@@ -41,7 +41,7 @@ pub(crate) fn run(sh: &Shell, opts: &Options) -> TaskOutcome {
     }
 
     // The build context is the repo root, not wherever this was invoked: the
-    // image builds the wasm from `crates/`, so `web/` is only half of what it
+    // image builds the wasm from `crates/`, so `packages/` is only half of what it
     // needs.
     let _guard = sh.push_dir(repo_root());
 
@@ -94,7 +94,14 @@ const BUILD_INPUTS: &[&str] = &[
     ".cargo",
     "rust-toolchain.toml",
     "crates",
-    "web",
+    "packages",
+    "scripts",
+    "types",
+    "package.json",
+    "bun.lock",
+    "bunfig.toml",
+    "tsconfig.base.json",
+    "tsconfig.json",
 ];
 
 /// The commit this image was built from, marked `-dirty` when the working tree

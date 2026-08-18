@@ -2,7 +2,7 @@
 //! the front ends consume: `dist/web/` for the browser UI and `dist/nodejs/`
 //! for the npx CLI.
 //!
-//! The build itself moved to `web/scripts/build-wasm.ts`, so that `bun run
+//! The build itself moved to `scripts/build-wasm.ts`, so that `bun run
 //! build` is self-contained rather than depending on this task having been run
 //! by hand first. What is left here is the entry point the rest of the repo
 //! already reaches for — `e2e`, the browser bench, the README — pointed at the
@@ -16,7 +16,7 @@
 use xshell::{Shell, cmd};
 
 use crate::TaskOutcome;
-use crate::util::output;
+use crate::util::{output, repo_root};
 
 pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     if cmd!(sh, "bun --version").quiet().read().is_err() {
@@ -24,7 +24,10 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     }
 
     output::status("Building", "agent-share-wasm-client (wasm32, release)");
-    let _guard = sh.push_dir("web");
+    // Anchored rather than cwd-relative, like `web_image` and the bench
+    // harness: `cargo task` runs from wherever it was invoked, and the bun
+    // workspace root is the repo root.
+    let _guard = sh.push_dir(repo_root());
     cmd!(sh, "bun scripts/build-wasm.ts").run()?;
 
     output::status(

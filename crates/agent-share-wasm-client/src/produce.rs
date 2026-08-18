@@ -1182,9 +1182,17 @@ fn js_err(context: &str, error: JsValue) -> JsValue {
 }
 
 async fn wait_ms(millis: i32) {
+    // `setTimeout` off the global rather than the `Window`, matching `lib.rs`'s
+    // `wait_ms`: identical in a page, and it keeps this future resolvable under
+    // Node — `agent-share-node` produces through this module, and there is no
+    // `Window` there. A window-bound timer resolved nothing, so the `select`
+    // in `wait_until_dialable` below silently lost its 8 s cap.
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis);
+        use wasm_bindgen::JsCast as _;
+        let global = js_sys::global();
+        if let Ok(set_timeout) = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout")) {
+            let set_timeout: js_sys::Function = set_timeout.unchecked_into();
+            let _ = set_timeout.call2(&global, &resolve, &JsValue::from(millis));
         }
     });
     let _ = JsFuture::from(promise).await;
