@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { ansi } from './ansi.ts'
 import { COLOR_ROLES } from './roles.ts'
 import type { ColorRole } from './roles.ts'
-import type { ColorTheme } from './defineTheme.ts'
+import type { ColorTheme } from './define-theme.ts'
 import {
   CHROME_ROLES,
   CONTRAST_FLOOR,

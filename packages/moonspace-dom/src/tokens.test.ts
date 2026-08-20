@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { grid, gridVars } from 'moonspace'
 import { COLOR_ROLES, superstylinDark, superstylinLight } from 'moonspace-theme'
-import { GlobalStyle } from './GlobalStyle.ts'
+import { GlobalStyle } from './global-style.ts'
 import { MoonspaceTheme, gridLiterals, t } from './tokens.ts'
 
 const themeCss = String(MoonspaceTheme().children[0])

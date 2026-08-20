@@ -27,8 +27,8 @@ export type { AnsiColor, ColorRole, ColorValue } from './roles.ts'
 
 export { ansi } from './ansi.ts'
 
-export { defineTheme } from './defineTheme.ts'
-export type { ColorTheme } from './defineTheme.ts'
+export { defineTheme } from './define-theme.ts'
+export type { ColorTheme } from './define-theme.ts'
 
 export {
   superstylinDark,

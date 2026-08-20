@@ -19,7 +19,7 @@
  */
 
 // Theme plumbing.
-export { GlobalStyle } from './GlobalStyle.ts'
+export { GlobalStyle } from './global-style.ts'
 export { MoonspaceTheme, t } from './tokens.ts'
 export type { MoonspaceThemeProps } from './tokens.ts'
 
@@ -37,27 +37,27 @@ export {
 } from './mixins.ts'
 
 // Primitives
-export * from './components/Box/index.ts'
-export * from './components/Text/index.ts'
-export * from './components/Stack/index.ts'
-export * from './components/Divider/index.ts'
+export * from './components/box/index.ts'
+export * from './components/text/index.ts'
+export * from './components/stack/index.ts'
+export * from './components/divider/index.ts'
 
 // Controls
-export * from './components/Button/index.ts'
-export * from './components/Input/index.ts'
-export * from './components/Select/index.ts'
-export * from './components/Checkbox/index.ts'
-export * from './components/Radio/index.ts'
+export * from './components/button/index.ts'
+export * from './components/input/index.ts'
+export * from './components/select/index.ts'
+export * from './components/checkbox/index.ts'
+export * from './components/radio/index.ts'
 
 // Display
-export * from './components/Badge/index.ts'
-export * from './components/StatusDot/index.ts'
-export * from './components/Table/index.ts'
-export * from './components/ProgressBar/index.ts'
-export * from './components/Spinner/index.ts'
-export * from './components/MiddleTruncate/index.ts'
-export * from './components/Kbd/index.ts'
+export * from './components/badge/index.ts'
+export * from './components/status-dot/index.ts'
+export * from './components/table/index.ts'
+export * from './components/progress-bar/index.ts'
+export * from './components/spinner/index.ts'
+export * from './components/middle-truncate/index.ts'
+export * from './components/kbd/index.ts'
 
 // Feedback and navigation
-export * from './components/Note/index.ts'
-export * from './components/Tabs/index.ts'
+export * from './components/note/index.ts'
+export * from './components/tabs/index.ts'

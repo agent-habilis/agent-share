@@ -1,4 +1,4 @@
-import type { ColorTheme } from '../defineTheme.ts'
+import type { ColorTheme } from '../define-theme.ts'
 
 /**
  * Superstylin — the default palette, in a dark and a light variant.
