@@ -12,6 +12,25 @@ Three suites, and they do not overlap:
 built wasm and network reach, so they run by hand — and a missing prerequisite
 is reported as a **skipped row naming the reason**, never a quiet pass.
 
+## Naming
+
+`cargo task naming` — also the first step of `ci` — checks what files and
+folders are called. One rule per language:
+
+- **snake_case** inside a crate, because a Rust module file name *is* the
+  module name: `mod mesh_key;` only ever finds `mesh_key.rs`.
+- **kebab-case** everywhere else.
+
+A crate is a folder whose `Cargo.toml` has a `[package]` section, so the crate
+folder itself keeps its package spelling (`crates/agent-share-proto/`) and only
+what lives under it is module naming. `Cargo.toml`, `README.md`, `Dockerfile`
+and the few other names the ecosystem picks are allowed as-is.
+
+It reads `git ls-files`, so generated and ignored trees are out of scope, and
+it prints a suggested name per offender — a failure is a rename list, not a
+complaint. It runs first because it is the only step of `ci` needing no
+toolchain and having no skip path.
+
 ## The coverage matrix
 
 `cargo task e2e` prints this at the end of every run. Each row records which

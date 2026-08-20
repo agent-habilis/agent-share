@@ -31,9 +31,9 @@ Re-apply these when re-vendoring:
    hoisting.
 4. `moonspace/src/theme/grid.ts` — row height forked to 22.5px
    (line-height 1.5) for the share browser's readability; upstream is 18px.
-5. `moonspace-dom/src/components/ProgressBar/` — `fluid` prop (fill the
+5. `moonspace-dom/src/components/progress-bar/` — `fluid` prop (fill the
    container instead of a fixed cell width), plus test.
-6. `moonspace-dom/src/components/MiddleTruncate/MiddleTruncate.tsx` —
+6. `moonspace-dom/src/components/middle-truncate/middle-truncate.tsx` —
    migrated to the `this`-based component context (upstream had not yet).
 7. `visage-router/src/index.test.ts` — routers mounted by a test are torn
    down in an `afterEach`. Clearing `document.body` leaves the render root
@@ -42,11 +42,17 @@ Re-apply these when re-vendoring:
    in 8 without it. The teardown takes that to ~1 in 12, so it is an
    improvement rather than a cure — see the feedback note in
    `~/Notes/projects/agent-share/feedback/`.
-8. `moonspace-dom/src/components/Button/` — forked back to the boxed
+8. `moonspace-dom/src/components/button/` — forked back to the boxed
    presentation the app shipped with before the re-vendor (one-row chrome:
    1ch padding + inset transparent outline, per-variant fills, lowercase
    labels, fill-step hover, focus recolours the outline), replacing
    upstream's `[ brackets ]` style. Colors still come from the tokens.
+9. `moonspace-dom` and `moonspace-theme` — every file and folder renamed to
+   kebab-case for this repo's naming rule. Upstream spells component files
+   `Badge/Badge.tsx`. Exported symbols are untouched; only the file names and
+   the relative import specifiers changed. This is the one patch you do not
+   have to reconstruct by hand: copy upstream verbatim, run
+   `cargo task naming`, and it prints the rename list.
 
 ## Workspace wiring (differs from upstream)
 
