@@ -33,10 +33,7 @@ export type ToolErrorCode =
   | 'unauthorized'
   | 'not_found'
   | 'not_a_file'
-  | 'not_a_directory'
   | 'unsupported'
-  /** The browser refused because a real click is required. Not retryable. */
-  | 'needs_user_gesture'
   | 'failed'
 
 export function ok<T extends object>(data: T): ToolOk<T> {
@@ -140,10 +137,10 @@ export function optionalBool(
  * A share-relative path, split into components and checked the way the tree
  * checks a manifest path.
  *
- * An empty path means the share root, which `shareList` and `shareStat` accept
- * and `shareRead` does not. Rejecting `..` here is belt-and-braces — nothing in
- * this module touches a filesystem — but a path that escapes the root can still
- * name a file the agent did not mean, and the manifest is a remote peer's word.
+ * An empty path means the share root, which `list` accepts and `read` does not.
+ * Rejecting `..` here is belt-and-braces — nothing in this module touches a
+ * filesystem — but a path that escapes the root can still name a file the agent
+ * did not mean, and the manifest is a remote peer's word.
  */
 export function sharePathParts(raw: string | undefined): string[] {
   if (raw === undefined) return []

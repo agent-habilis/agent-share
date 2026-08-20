@@ -66,8 +66,9 @@ import { Bento, Panel } from "../Panel/index.tsx";
 import {
   agentActivity,
   subscribeAgentActivity,
+  TOOLS,
   type AgentActivity,
-} from "../../lib/agentTools/index.ts";
+} from "../../lib/webmcp/index.ts";
 import { fileSeedState, type Coverage } from "../../lib/seeding/index.ts";
 import { formatRate, laneSummary } from "../../lib/transferStats/index.ts";
 import type { LinkSample } from "../../lib/transferStats/index.ts";
@@ -210,6 +211,15 @@ const PEER_TABLE = css({
  * panels next to it come to.
  */
 const LOG_ROWS = 12;
+
+/**
+ * Wide enough for the longest tool there is, derived rather than guessed.
+ *
+ * A literal here would be a number that silently stops being true the day a
+ * longer tool is published — and this column has no `render`, so it would show
+ * as a clipped name rather than as anything anyone would go and fix.
+ */
+const TOOL_WIDTH = Math.max(...TOOLS.map((tool) => tool.name.length)) + 1;
 
 /**
  * One peer's availability as a line of squares, the way a BitTorrent client
@@ -761,7 +771,7 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
                     rowKey={(call) => call.id}
                     columns={[
                       { key: "time", header: "time", width: 11 },
-                      { key: "tool", header: "tool", width: 20 },
+                      { key: "tool", header: "tool", width: TOOL_WIDTH },
                       {
                         /*
                           The one flexible column, and the only one allowed to

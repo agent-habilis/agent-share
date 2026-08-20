@@ -44,6 +44,16 @@ export interface DirNode {
   name: string
   path: string
   children: Node[]
+  /**
+   * Everything beneath this directory, at any depth.
+   *
+   * Totalled once while the tree is built rather than by flattening a subtree
+   * per question, because "how big is this folder" is asked on every listing
+   * and the walk that answers it is the whole share.
+   */
+  files: number
+  bytes: number
+  dirs: number
 }
 
 export type Node = FileNode | DirNode
@@ -64,7 +74,20 @@ export function safeSplit(relPath: string): string[] | null {
 }
 
 function emptyDir(name: string, path: string): DirNode {
-  return { kind: 'dir', name, path, children: [] }
+  return { kind: 'dir', name, path, children: [], files: 0, bytes: 0, dirs: 0 }
+}
+
+/**
+ * A directory holding `children`, with its totals worked out.
+ *
+ * The way to build one outside `buildTree` — a hand-written literal would have
+ * to carry three numbers that must agree with the children beside them.
+ */
+export function dirNode(name: string, path: string, children: Node[]): DirNode {
+  const dir = emptyDir(name, path)
+  dir.children = children
+  settle(dir)
+  return dir
 }
 
 /** Find or create the directory chain for `parts`, under `root`. */
@@ -125,18 +148,37 @@ export function buildTree(manifest: Manifest): { root: DirNode; skipped: number 
     })
   })
 
-  sortRecursive(root)
+  settle(root)
   return { root, skipped }
 }
 
 /** Directories first, then files, each alphabetically — Finder's order. */
-function sortRecursive(dir: DirNode): void {
+/**
+ * Sort every level, and total what lies under it.
+ *
+ * One post-order pass for both: each needs the children settled first, and the
+ * tree is already being walked here once. That is what makes the totals free —
+ * they ride along on a traversal `buildTree` was doing anyway.
+ */
+function settle(dir: DirNode): void {
   dir.children.sort((left, right) => {
     if (left.kind !== right.kind) return left.kind === 'dir' ? -1 : 1
     return left.name.localeCompare(right.name)
   })
+
+  dir.files = 0
+  dir.bytes = 0
+  dir.dirs = 0
   for (const child of dir.children) {
-    if (child.kind === 'dir') sortRecursive(child)
+    if (child.kind === 'dir') {
+      settle(child)
+      dir.files += child.files
+      dir.bytes += child.bytes
+      dir.dirs += child.dirs + 1
+    } else {
+      dir.files += 1
+      dir.bytes += child.size
+    }
   }
 }
 

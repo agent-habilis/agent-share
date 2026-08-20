@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { dirSeedState, fileSeedState, missingUnder, seedLabel } from './index.ts'
-import type { DirNode, FileNode } from '../tree.ts'
+import { dirNode, type DirNode, type FileNode } from '../tree.ts'
 
 function file(name: string, index: number): FileNode {
   return {
@@ -15,7 +15,7 @@ function file(name: string, index: number): FileNode {
 }
 
 function dir(name: string, children: (DirNode | FileNode)[]): DirNode {
-  return { kind: 'dir', name, path: name, children }
+  return dirNode(name, name, children)
 }
 
 describe('fileSeedState', () => {

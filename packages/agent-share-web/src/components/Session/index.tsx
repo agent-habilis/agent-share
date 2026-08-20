@@ -13,7 +13,7 @@
  * ticket change, which is exactly what must not happen.
  */
 
-import { component, computed, disposable, interval, signal } from 'visage-dom'
+import { component, computed, interval, signal } from 'visage-dom'
 import type { Signal } from 'visage-dom'
 import { Outlet, useLocation, useParams } from 'visage-router'
 
@@ -35,8 +35,7 @@ import { FailedBody } from '../FailedBody/index.tsx'
 import { LoadingBody } from '../LoadingBody/index.tsx'
 import { PasswordGate } from '../PasswordGate/index.tsx'
 import { Toast } from '../Toast/index.tsx'
-import { publishAgentSession } from '../../lib/agentTools/index.ts'
-import { describe } from '../../lib/agentTools/result.ts'
+import { describe } from '../../lib/webmcp/result.ts'
 import { useShareNav } from '../nav.ts'
 import {
   clientKey,
@@ -63,7 +62,7 @@ import {
   type MountSession,
   type SyncedState,
 } from '../../lib/mount/index.ts'
-import { parseRoute, parseTransport, type TransportMode } from '../../lib/ticket/index.ts'
+import { parseTransport, type TransportMode } from '../../lib/ticket/index.ts'
 import type { TransferSnapshot } from '../../lib/transferStats/index.ts'
 import {
   buildTree,
@@ -131,22 +130,17 @@ const Session = component<{
   // Nested plain functions below capture `ctx`; `this` would not reach them.
   const ctx = this
   const nav = useShareNav(this)
-  // Read by the agent bridge below, to say which view is on screen.
-  const sessionLocation = useLocation(this)
   const state = signal<State>({ phase: 'connecting' })
   const path = signal<string[]>([])
   const transfer = signal<Transfer | null>(null)
-  const mountError = signal<string | null>(null)
   /**
-   * Why the last download stopped, when it was not a cancellation.
+   * Why the last mirror stopped.
    *
-   * A transfer can fail for reasons the peer connection knows about and the
-   * page cannot guess — the producer stopped sharing, or the connection
-   * expired while the tab sat in the background. Those need to reach the user
-   * as text on the page; before this they reached them as an unhandled
-   * rejection, which reads as a crash.
+   * The one failure with a life after its toast, and so the one with a signal:
+   * a mount that stopped writing is still stopped when the message has gone.
+   * The Info panel reads it.
    */
-  const downloadError = signal<string | null>(null)
+  const mountError = signal<string | null>(null)
   /**
    * Re-dialling a connection that died while the tab was away.
    *
@@ -180,7 +174,6 @@ const Session = component<{
   const coverage = signal<ReadonlyMap<number, number>>(new Map())
   /** Whether a seed is in flight, so the button can say it is busy. */
   const seeding = signal(false)
-  const seedError = signal<string | null>(null)
   /**
    * The latest transfer reading, from the one sampler below.
    *
@@ -236,18 +229,22 @@ const Session = component<{
 
   ctx.aborted.addEventListener('abort', () => clearTimeout(hideTimer))
 
+  /** An action failed: say so on the bar and on the console. */
+  function reportFailure(error: unknown): void {
+    raiseToast('error', describe(error), error)
+  }
+
   /**
-   * An action failed: say so on the bar, on the console, and to the agent.
+   * The same, for the one failure that outlives its toast.
    *
-   * The signal is the third of those and the one that lasts: the Info panel's
-   * `last error` and the WebMCP bridge's `errors()` both read it long after the
-   * toast has gone — which is how `shareDownload` can tell an agent the browser
-   * refused its picker.
+   * Only mounting keeps a record, because only mounting is still true after the
+   * message has cleared: a mirror that stopped writing stays stopped, where a
+   * download that failed is simply over. The Info panel's `last error` is the
+   * reader, and a signal nothing reads is a signal that will drift.
    */
-  function reportFailure(last: Signal<string | null>, error: unknown): void {
-    const message = describe(error)
-    last.value = message
-    raiseToast('error', message, error)
+  function reportMountFailure(error: unknown): void {
+    mountError.value = describe(error)
+    reportFailure(error)
   }
 
   /**
@@ -392,7 +389,7 @@ const Session = component<{
       if (error instanceof DOMException && error.name === 'AbortError') {
         if (label === 'mounting') await clearMount()
       } else if (!ctx.aborted.aborted) {
-        reportFailure(mountError, error)
+        reportMountFailure(error)
         await clearMount()
       }
     } finally {
@@ -708,7 +705,6 @@ const Session = component<{
     await ensureLive()
     const current = state.peek()
     if (current.phase !== 'ready') return
-    downloadError.value = null
     // One file travels as itself; only a multi-file selection needs a ZIP.
     const single = files.length === 1 ? files[0] : null
 
@@ -722,7 +718,7 @@ const Session = component<{
     } catch (error) {
       // User dismissed the picker — not an error worth surfacing.
       if (error instanceof DOMException && error.name === 'AbortError') return
-      reportFailure(downloadError, error)
+      reportFailure(error)
       return
     }
 
@@ -752,7 +748,7 @@ const Session = component<{
       // a connection expired while the tab was backgrounded) reached nobody.
       const cancelled =
         abort.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')
-      if (!cancelled) reportFailure(downloadError, error)
+      if (!cancelled) reportFailure(error)
     } finally {
       untrack()
       if (transfer.peek()?.kind === 'download') transfer.value = null
@@ -838,7 +834,6 @@ const Session = component<{
     const current = state.peek()
     if (current.phase !== 'ready') return
     seeding.value = true
-    seedError.value = null
     const untrack = trackHoldings(current.client)
     try {
       await current.client.sync(only)
@@ -848,7 +843,7 @@ const Session = component<{
       // that must cost seeding rather than the share. Surfaced rather than
       // logged: a Seed button that silently does nothing is worse than one
       // that says why.
-      reportFailure(seedError, error)
+      reportFailure(error)
     } finally {
       untrack()
       seeding.value = false
@@ -912,7 +907,7 @@ const Session = component<{
     } catch (error) {
       // User dismissed the picker — not an error worth surfacing.
       if (error instanceof DOMException && error.name === 'AbortError') return
-      reportFailure(mountError, error)
+      reportMountFailure(error)
       await clearMount()
     }
   }
@@ -956,8 +951,6 @@ const Session = component<{
     seeding,
     toast,
     mountError,
-    downloadError,
-    seedError,
     redialling: reviving,
     mounted,
     status: computed(() => {
@@ -987,62 +980,6 @@ const Session = component<{
   // Before the first yield: context only reaches children mounted after it,
   // and the outlet below is one of them.
   this.provide(SessionCtx, api)
-
-  /*
-    The same session, in the shape an agent is allowed to drive.
-
-    Published for as long as this component is mounted, and withdrawn when it
-    is not — which is what lets the interface tools answer "no share page is
-    open" honestly on `/` instead of opening one nobody asked for.
-
-    Deliberately a separate, narrower object rather than `api` itself. `api` is
-    the pages' full view of the session, signals and all; this names only the
-    handful of moves an agent may make, so widening what an agent can reach is
-    a decision taken here rather than a side effect of adding a field above.
-  */
-  using _agentBridge = disposable(
-    publishAgentSession({
-      ticket: props.ticket,
-      selection: () => [...path.peek()],
-      select: (next) => {
-        path.value = next
-      },
-      view: () => parseRoute(sessionLocation.peek().pathname, sessionLocation.peek().search)?.view ?? 'files',
-      openView: (view, file) => {
-        // Only `preview` takes a path. A trailing segment on `files` or `info`
-        // is not a route at all — `parseRoute` rejects it — so the router would
-        // fall through to home, unmounting this session and taking the bridge
-        // with it. An agent switching views while a file was selected did
-        // exactly that.
-        const carry = view === 'preview' && file && file.length > 0 ? { file } : undefined
-        nav.go(props.ticket, view, carry)
-      },
-      status: () => api.status.peek(),
-      mounted: () => mounted.peek(),
-      transfer: () => {
-        const active = transfer.peek()
-        return active
-          ? { kind: active.kind, done: active.progress.done, total: active.progress.total }
-          : null
-      },
-      errors: () => ({
-        download: downloadError.peek(),
-        mount: mountError.peek(),
-        seed: seedError.peek(),
-      }),
-      // An empty selection means the whole share, matching what the buttons do
-      // when nothing is picked.
-      download: () => {
-        if (path.peek().length > 0) void downloadSelected()
-        else void downloadAll()
-      },
-      mount: () => void mount(),
-      seed: () => {
-        if (path.peek().length > 0) void seedSelected()
-        else void seedShare()
-      },
-    }),
-  )
 
   yield () => {
     const current = state.value

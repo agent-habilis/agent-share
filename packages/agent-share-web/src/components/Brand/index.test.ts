@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { describeBrand } from './index.tsx'
-import type { AgentActivity } from '../../lib/agentTools/index.ts'
+import type { AgentActivity } from '../../lib/webmcp/index.ts'
 
 function activity(over: Partial<AgentActivity> = {}): AgentActivity {
   return {
@@ -24,7 +24,7 @@ describe('before an agent has called anything', () => {
    * not evidence of anything — a tab nobody has found looks identical.
    */
   test('publishing tools on its own leaves the name alone', () => {
-    const state = describeBrand(activity({ registered: ['shareRead', 'shareList'] }), NOW)
+    const state = describeBrand(activity({ registered: ['read', 'list'] }), NOW)
 
     expect(state.green).toBe(false)
     expect(state.animated).toBe(false)
@@ -33,7 +33,7 @@ describe('before an agent has called anything', () => {
   // Two different silences, and the tooltip is the only thing that can tell
   // them apart: nobody has called, versus nothing could have.
   test('the tooltip says how many tools are waiting', () => {
-    const state = describeBrand(activity({ registered: ['shareRead', 'shareList'] }), NOW)
+    const state = describeBrand(activity({ registered: ['read', 'list'] }), NOW)
 
     expect(state.title).toContain('2 tools published')
   })
@@ -45,7 +45,7 @@ describe('before an agent has called anything', () => {
 
 describe('once a tool has been called', () => {
   test('the name goes green', () => {
-    const state = describeBrand(activity({ calls: 1, lastAt: NOW, lastTool: 'shareList' }), NOW)
+    const state = describeBrand(activity({ calls: 1, lastAt: NOW, lastTool: 'list' }), NOW)
 
     expect(state.green).toBe(true)
     expect(state.animated).toBe(true)
@@ -55,7 +55,7 @@ describe('once a tool has been called', () => {
   // decay the way the movement does.
   test('it stays green long after the shimmer stops', () => {
     const state = describeBrand(
-      activity({ calls: 4, lastAt: NOW - 600_000, lastTool: 'shareList' }),
+      activity({ calls: 4, lastAt: NOW - 600_000, lastTool: 'list' }),
       NOW,
     )
 
@@ -65,43 +65,45 @@ describe('once a tool has been called', () => {
 
   test('the shimmer lasts ten seconds', () => {
     const at = (ago: number) =>
-      describeBrand(activity({ calls: 1, lastAt: NOW - ago, lastTool: 'shareList' }), NOW).animated
+      describeBrand(activity({ calls: 1, lastAt: NOW - ago, lastTool: 'list' }), NOW).animated
 
     expect(at(9_500)).toBe(true)
     expect(at(10_500)).toBe(false)
   })
 
   /**
-   * Counted from the start of the call rather than the end of it. A `shareSync`
+   * Counted from the start of the call rather than the end of it. A `sync`
    * pulling a large share runs far longer than the window, and a clock-only
    * rule would stop moving during the one call an agent is most obviously in
    * the middle of.
    */
   test('a call still running shimmers however old it is', () => {
     const state = describeBrand(
-      activity({ calls: 1, inFlight: 1, lastAt: NOW - 600_000, lastTool: 'shareSync' }),
+      activity({ calls: 1, inFlight: 1, lastAt: NOW - 600_000, lastTool: 'sync' }),
       NOW,
     )
 
     expect(state.animated).toBe(true)
-    expect(state.title).toContain('running shareSync right now')
+    // Quoted: the names are bare verbs, so the sentence has to mark which word
+    // is the tool.
+    expect(state.title).toContain('running "sync" right now')
   })
 })
 
 describe('what the tooltip is allowed to claim', () => {
   test('a finished call is reported in the past tense, with the count', () => {
     const state = describeBrand(
-      activity({ calls: 3, lastAt: NOW - 7_000, lastTool: 'shareRead' }),
+      activity({ calls: 3, lastAt: NOW - 7_000, lastTool: 'read' }),
       NOW,
     )
 
-    expect(state.title).toContain('shareRead')
+    expect(state.title).toContain('"read"')
     expect(state.title).toContain('3 actions')
   })
 
   test('"just now" reads better than a number under five seconds', () => {
     const state = describeBrand(
-      activity({ calls: 1, lastAt: NOW - 1_000, lastTool: 'shareRead' }),
+      activity({ calls: 1, lastAt: NOW - 1_000, lastTool: 'read' }),
       NOW,
     )
 
@@ -112,7 +114,7 @@ describe('what the tooltip is allowed to claim', () => {
   // it, so the sentence has to say that out loud.
   test('an idle page admits it cannot tell whether the agent is still attached', () => {
     const state = describeBrand(
-      activity({ calls: 2, lastAt: NOW - 60_000, lastTool: 'shareList' }),
+      activity({ calls: 2, lastAt: NOW - 60_000, lastTool: 'list' }),
       NOW,
     )
 
@@ -122,7 +124,7 @@ describe('what the tooltip is allowed to claim', () => {
   test('every state has something to say on hover', () => {
     const states = [
       activity(),
-      activity({ registered: ['shareList'] }),
+      activity({ registered: ['list'] }),
       activity({ calls: 1, inFlight: 1, lastAt: NOW }),
       activity({ calls: 1, lastAt: NOW - 2_000 }),
       activity({ calls: 1, lastAt: NOW - 90_000 }),

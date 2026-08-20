@@ -28,8 +28,17 @@ describe('tool names', () => {
     expect(new Set(TOOLS.map((tool) => tool.name)).size).toBe(TOOLS.length)
   })
 
-  test('every tool is namespaced to this app, so it reads clearly in a merged list', () => {
-    for (const tool of TOOLS) expect(tool.name.startsWith('share')).toBe(true)
+  /**
+   * Bare verbs, not `shareRead`. A caller reaches these through a page it has
+   * already navigated to, so a namespace prefix told it nothing it did not know
+   * and was paid for on every listing. What a tool is about lives in its
+   * description now, which is where a model reads it anyway.
+   */
+  test('names are bare camelCase verbs, with no namespace prefix', () => {
+    for (const tool of TOOLS) {
+      expect(tool.name, tool.name).toMatch(/^[a-z][A-Za-z]*$/)
+      expect(tool.name.startsWith('share'), tool.name).toBe(false)
+    }
   })
 })
 
@@ -94,10 +103,9 @@ describe('input schemas', () => {
     const demanding = TOOLS.filter((tool) => (schemaOf(tool).required ?? []).length > 0)
 
     expect(demanding.map((tool) => tool.name).sort()).toEqual([
-      'shareOpenView',
-      'sharePublish',
-      'shareRead',
-      'shareSearch',
+      'publish',
+      'read',
+      'search',
     ])
   })
 })
@@ -110,35 +118,24 @@ describe('annotations', () => {
   })
 
   /**
-   * Reading a share changes nothing; moving the interface changes what a person
-   * is looking at, which is a side effect even though no bytes move. Both kinds
-   * of writer are listed here so adding a tool has to make the choice knowingly.
+   * Reading a share changes nothing. Writing means bytes land somewhere they
+   * were not — in this browser's storage, or in a share other peers can open.
+   * Listed exhaustively so adding a tool has to make the choice knowingly.
    */
   test('every tool that changes something says so', () => {
     const writers = TOOLS.filter((tool) => tool.annotations?.readOnlyHint === false)
 
-    expect(writers.map((tool) => tool.name).sort()).toEqual([
-      'shareDownload',
-      'shareMount',
-      'shareNavigate',
-      'shareOpenView',
-      'sharePublish',
-      'shareSeedSelection',
-      'shareSync',
-    ])
+    expect(writers.map((tool) => tool.name).sort()).toEqual(['publish', 'sync'])
   })
 
   test('the read-only tools are the ones that only look', () => {
     const readers = TOOLS.filter((tool) => tool.annotations?.readOnlyHint === true)
 
     expect(readers.map((tool) => tool.name).sort()).toEqual([
-      'shareConnect',
-      'shareList',
-      'shareRead',
-      'shareSearch',
-      'shareStat',
-      'shareStatus',
-      'shareUiState',
+      'connect',
+      'list',
+      'read',
+      'search',
     ])
   })
 
@@ -151,10 +148,9 @@ describe('annotations', () => {
     const untrusted = TOOLS.filter((tool) => tool.annotations?.untrustedContentHint === true)
 
     expect(untrusted.map((tool) => tool.name).sort()).toEqual([
-      'shareList',
-      'shareRead',
-      'shareSearch',
-      'shareStat',
+      'list',
+      'read',
+      'search',
     ])
   })
 })

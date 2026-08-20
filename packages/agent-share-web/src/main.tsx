@@ -6,7 +6,7 @@ import { component, render } from 'visage-dom'
 
 import './app.css'
 
-import { registerAgentTools } from './lib/agentTools/index.ts'
+import { registerAgentTools } from './lib/webmcp/index.ts'
 import { App } from './pages/index.ts'
 import { loadWasm } from 'agent-share-wasm'
 

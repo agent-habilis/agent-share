@@ -9,7 +9,7 @@ binary; `npx agent-share` needs the `node-datachannel` addon, because Node has
 no `RTCPeerConnection`. A browser already has WebRTC, a sandbox and storage. The
 tab becomes the runtime.
 
-Registration lives in `packages/agent-share-web/src/lib/agentTools/`. It is feature-detected, so on a
+Registration lives in `packages/agent-share-web/src/lib/webmcp/`. It is feature-detected, so on a
 browser without WebMCP — which today is every browser by default — it reads one
 property and does nothing.
 
@@ -47,69 +47,77 @@ plugin update would overwrite them.
 
 ```
 navigate_page       https://share.agent-habilis.com/files/<ticket>
-list_webmcp_tools   -> the eight tools below
-execute_webmcp_tool { toolName: "shareRead", input: "{\"path\":\"src/lib.rs\"}" }
+list_webmcp_tools   -> the six tools below
+execute_webmcp_tool { toolName: "read", input: "{\"path\":\"src/lib.rs\"}" }
 ```
 
 The ticket in the page URL is the default for every tool, so once you have
-navigated you can call `shareConnect` with no arguments at all.
+navigated you can call `connect` with no arguments at all.
 
 ## The tools
 
-There are two families. The **share tools** work on any route and need nobody
-present. The **interface tools** move what a person is looking at, so they need
-a share page open — and two of them need that person to click something.
-
-### Share tools
-
 | Tool | Does | Changes state |
 |---|---|---|
-| `shareConnect` | Open a share; report file count, bytes, transport, peers | no |
-| `shareList` | List files and directories, `depth` levels deep | no |
-| `shareStat` | Size, mtime, manifest index, and how much is held locally | no |
-| `shareRead` | Read a byte window of one file | no |
-| `shareSearch` | Find a string across the share's text files | no |
-| `shareSync` | Pull files into browser storage; this tab then seeds them | yes |
-| `shareStatus` | Transport, peers, how many files are held locally | no |
-| `sharePublish` | Publish files as a new share and return a ticket | yes |
+| `connect` | Open a share; report its contents and the live connection | no |
+| `list` | A directory's entries, or one file's size and local coverage | no |
+| `read` | Read a byte window of one file | no |
+| `search` | Find a string across the share's text files | no |
+| `sync` | Pull files into browser storage; this tab then seeds them | yes |
+| `publish` | Publish files as a new share and return a ticket | yes |
 
-### Interface tools
+They work on any route and need nobody present. There is nothing here that moves
+the page, selects a file, or switches a view, and that is the line the surface
+is drawn on: **WebMCP is the agent's interface, the screen is the person's.** An
+agent that could move a tab out from under someone reading it has been handed a
+capability nobody asked it to have, and the tools it would need — a selection, a
+current view — are meaningless to a caller that cannot see them anyway.
 
-| Tool | Does | Needs a person |
-|---|---|---|
-| `shareUiState` | What the person is looking at: view, selection, status | no |
-| `shareNavigate` | Move the file browser to a folder or file | no |
-| `shareOpenView` | Switch between files, info and preview | no |
-| `shareSeedSelection` | Seed the selection, as the Seed button does | no |
-| `shareDownload` | Download the selection, as the Download button does | **yes** |
-| `shareMount` | Mirror into a local folder, as the Mount button does | **yes** |
-
-They fail with `no_session` when no share page is mounted — on `/`, for
-instance. That is deliberate: opening one invisibly would move a page nobody
-asked about.
-
-`shareDownload` and `shareMount` need `showSaveFilePicker` and
-`showDirectoryPicker`, which only a real click can open, and no directory handle
-is persisted anywhere so there is nothing to reuse from last time. Driven
-unattended they return `needs_user_gesture` with the browser's own words:
-
-```json
-{ "ok": false, "code": "needs_user_gesture",
-  "error": "The browser refused: Failed to execute 'showSaveFilePicker' … Must be
-            handling a user gesture to show a file picker. … ask the person at
-            this page to press the button." }
-```
-
-That is the honest answer, not a bug. For bulk transfer to a filesystem, use
-`agent-share mirror`.
+Two capabilities are therefore absent rather than broken. Nothing here downloads
+to a filesystem or mirrors into a local folder: both need `showSaveFilePicker`
+or `showDirectoryPicker`, which only a real click can open, and no directory
+handle is persisted anywhere. For bulk transfer to a filesystem, use
+`agent-share mirror`. To pull bytes into the browser instead — where later reads
+are local and the tab starts seeding — use `sync`.
 
 Every result is flat and carries `ok`. A failure is `{ ok: false, code, error }`
 with a stable `code` — `not_found`, `unauthorized`, `bad_argument`,
-`not_a_file`, `unsupported`, `failed`.
+`not_a_file`, `no_session`, `unsupported`, `failed`.
+
+### Opening and re-opening
+
+`connect` is idempotent. The first call dials; a later one refreshes the
+file list and re-reads the connection, so it doubles as a status check and there
+is no separate status tool:
+
+```json
+{ "ok": true, "ticket": "SvL6pH…", "files": 128, "directories": 12,
+  "bytes": 4210433, "transport": "webrtc", "closed": false,
+  "peersOnMesh": 3, "peersDirect": 1, "maxDirect": 4,
+  "filesHeldLocally": 0, "skippedEntries": 0 }
+```
+
+### Listing
+
+`list` answers for whatever the path names, and says which it got in `kind`. A
+directory returns `entries` `depth` levels deep, plus the rollup of everything
+beneath it; a file returns its size and how much of it this browser already
+holds. `depth` means nothing on a file and is ignored there:
+
+```json
+{ "ok": true, "kind": "dir", "path": "src", "entries": [ … ], "count": 9,
+  "files": 40, "bytes": 210433 }
+
+{ "ok": true, "kind": "file", "path": "src/lib.rs", "name": "lib.rs",
+  "size": 210433, "mtime": 1755000000, "index": 7,
+  "held": false, "coverage": 0.25 }
+```
+
+The rollup is free: `buildTree` totals every directory as it builds one, so
+asking how big a folder is never walks it.
 
 ### Reading a file
 
-`shareRead` is windowed. It returns UTF-8 `text`, or `data` as base64 when the
+`read` is windowed. It returns UTF-8 `text`, or `data` as base64 when the
 bytes are binary, plus `size`, `eof` and `nextOffset`. Follow `nextOffset` until
 `eof` is true:
 
@@ -125,12 +133,12 @@ large tree is still `agent-share mirror`'s job.
 
 ### Publishing
 
-`sharePublish` writes into the origin private file system and serves it with the
+`publish` writes into the origin private file system and serves it with the
 same producer the **Add folder** button uses, so no user gesture is involved and
 the result is an ordinary share a native peer can read:
 
 ```
-sharePublish { files: [{ path: "notes.md", content: "# hi\n" }] }
+publish { files: [{ path: "notes.md", content: "# hi\n" }] }
   -> { ticket: "SvL6pH…", url: "https://…/files/SvL6pH…", files: 1 }
 
 agent-share mirror SvL6pH… ./out     # works from the CLI
@@ -205,5 +213,5 @@ From the console:
 ```js
 const tools = await document.modelContext.getTools()
 await document.modelContext.executeTool(
-  tools.find(t => t.name === 'shareList'), '{}')
+  tools.find(t => t.name === 'list'), '{}')
 ```

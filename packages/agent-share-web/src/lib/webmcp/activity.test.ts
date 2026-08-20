@@ -19,33 +19,33 @@ describe('what the page can know about an agent', () => {
    * evidence of anything — a tab nobody has found looks identical.
    */
   test('publishing tools on its own is not evidence of an agent', () => {
-    markToolsRegistered(['shareRead', 'shareList'])
+    markToolsRegistered(['read', 'list'])
 
-    expect(agentActivity().registered).toEqual(['shareRead', 'shareList'])
+    expect(agentActivity().registered).toEqual(['read', 'list'])
     expect(agentActivity().calls).toBe(0)
     expect(agentActivity().lastAt).toBe(0)
   })
 
   test('an invocation is', () => {
-    beginToolCall('shareRead')
+    beginToolCall('read')
 
     expect(agentActivity().calls).toBe(1)
-    expect(agentActivity().lastTool).toBe('shareRead')
+    expect(agentActivity().lastTool).toBe('read')
     expect(agentActivity().lastAt).toBeGreaterThan(0)
   })
 })
 
 describe('in-flight tracking', () => {
-  // Counted at the start, so a long shareSync shows as "controlling" while it
+  // Counted at the start, so a long sync shows as "controlling" while it
   // runs rather than only once it has finished.
   test('a call is in flight from the moment it starts', () => {
-    beginToolCall('shareSync')
+    beginToolCall('sync')
 
     expect(agentActivity().inFlight).toBe(1)
   })
 
   test('ending a call clears it', () => {
-    const end = beginToolCall('shareSync')
+    const end = beginToolCall('sync')
     end()
 
     expect(agentActivity().inFlight).toBe(0)
@@ -53,8 +53,8 @@ describe('in-flight tracking', () => {
   })
 
   test('overlapping calls are counted together', () => {
-    const first = beginToolCall('shareRead')
-    beginToolCall('shareList')
+    const first = beginToolCall('read')
+    beginToolCall('list')
 
     expect(agentActivity().inFlight).toBe(2)
     first()
@@ -64,7 +64,7 @@ describe('in-flight tracking', () => {
   // The wrapper calls `end` in a `finally`, and a retry or double-dispose must
   // not drive the counter below zero and leave the brand stuck shimmering.
   test('ending twice is harmless', () => {
-    const end = beginToolCall('shareRead')
+    const end = beginToolCall('read')
     end()
     end()
 
@@ -72,7 +72,7 @@ describe('in-flight tracking', () => {
   })
 
   test('finishing a call still counts as recent activity', () => {
-    const end = beginToolCall('shareRead')
+    const end = beginToolCall('read')
     const started = agentActivity().lastAt
     end()
 
@@ -84,11 +84,11 @@ describe('the call log', () => {
   const log = () => agentActivity().log
 
   test('a call is in the log from the moment it starts, still running', () => {
-    beginToolCall('shareRead', { path: 'a.md' })
+    beginToolCall('read', { path: 'a.md' })
 
     expect(log()).toHaveLength(1)
     expect(log()[0]).toMatchObject({
-      tool: 'shareRead',
+      tool: 'read',
       args: 'path=a.md',
       outcome: 'running',
       endedAt: null,
@@ -98,14 +98,14 @@ describe('the call log', () => {
   // Newest first, so the panel needs no auto-scroll: a new line lands where the
   // reader is already looking rather than below the fold.
   test('the newest call is first', () => {
-    beginToolCall('shareList')
-    beginToolCall('shareStat')
+    beginToolCall('list')
+    beginToolCall('read')
 
-    expect(log().map((call) => call.tool)).toEqual(['shareStat', 'shareList'])
+    expect(log().map((call) => call.tool)).toEqual(['read', 'list'])
   })
 
   test('a success is recorded as ok, with a duration', () => {
-    beginToolCall('shareList')({ ok: true, entries: [] })
+    beginToolCall('list')({ ok: true, entries: [] })
 
     expect(log()[0]).toMatchObject({ outcome: 'ok', error: null })
     expect(log()[0]?.endedAt).toBeGreaterThanOrEqual(log()[0]!.startedAt)
@@ -114,7 +114,7 @@ describe('the call log', () => {
   // The code is what the panel shows; the prose is the hover. Both come off the
   // result, because a tool reports failure by returning rather than throwing.
   test('a failure keeps its code and its message', () => {
-    beginToolCall('shareStat')({ ok: false, code: 'not_found', error: 'no such path' })
+    beginToolCall('read')({ ok: false, code: 'not_found', error: 'no such path' })
 
     expect(log()[0]).toMatchObject({ outcome: 'not_found', error: 'no such path' })
   })
@@ -122,7 +122,7 @@ describe('the call log', () => {
   // Nothing should reach this — every tool wraps itself in `guard` — so if it
   // does, the log has to say so rather than leave the line running forever.
   test('a throw past guard still closes the entry', () => {
-    beginToolCall('shareSync')(undefined)
+    beginToolCall('sync')(undefined)
 
     expect(log()[0]?.outcome).toBe('failed')
     expect(log()[0]?.endedAt).not.toBeNull()
@@ -134,8 +134,8 @@ describe('the call log', () => {
    * position taken when the call started names a different entry later.
    */
   test('overlapping calls finishing out of order each update their own entry', () => {
-    const first = beginToolCall('shareSync')
-    const second = beginToolCall('shareList')
+    const first = beginToolCall('sync')
+    const second = beginToolCall('list')
 
     second({ ok: true })
     expect(log().map((call) => call.outcome)).toEqual(['ok', 'running'])
@@ -145,7 +145,7 @@ describe('the call log', () => {
   })
 
   test('ending twice does not reopen or duplicate the entry', () => {
-    const end = beginToolCall('shareRead')
+    const end = beginToolCall('read')
     end({ ok: true })
     end(undefined)
 
@@ -169,7 +169,7 @@ describe('the call log', () => {
 describe('argument summaries', () => {
   /**
    * The whole reason summarizing happens when the call is recorded rather than
-   * when it is drawn: `shareConnect` and `sharePublish` both take a password,
+   * when it is drawn: `connect` and `publish` both take a password,
    * and this way the real one never enters the store for a later reader to
    * leak by accident.
    */
@@ -240,7 +240,7 @@ describe('what the log keeps of a failure', () => {
   // Several failures quote the argument they were handed back at the agent, so
   // the message length is the caller's — and up to LOG_LIMIT are held at once.
   test('a long error message is clipped', () => {
-    beginToolCall('shareStat')({ ok: false, code: 'not_found', error: 'x'.repeat(5_000) })
+    beginToolCall('read')({ ok: false, code: 'not_found', error: 'x'.repeat(5_000) })
 
     const entry = agentActivity().log[0]
     expect(entry?.error?.length).toBeLessThan(400)
@@ -253,7 +253,7 @@ describe('subscribers', () => {
     const seen: number[] = []
     const stop = subscribeAgentActivity((activity) => seen.push(activity.calls))
 
-    beginToolCall('shareRead')()
+    beginToolCall('read')()
     expect(seen.length).toBeGreaterThanOrEqual(2)
     stop()
   })
@@ -262,14 +262,14 @@ describe('subscribers', () => {
     let count = 0
     const stop = subscribeAgentActivity(() => (count += 1))
     stop()
-    beginToolCall('shareRead')
+    beginToolCall('read')
 
     expect(count).toBe(0)
   })
 
   test('the snapshot is replaced, not mutated, so a signal sees a new value', () => {
     const before = agentActivity()
-    beginToolCall('shareRead')
+    beginToolCall('read')
 
     expect(agentActivity()).not.toBe(before)
     expect(before.calls).toBe(0)

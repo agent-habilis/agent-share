@@ -3,15 +3,14 @@
  *
  * A tool call is a single request with no memory, but a share connection is a
  * live WebRTC session that takes a round of ICE to build. So the ticket is
- * resolved per call and the connection is not: `shareConnect` establishes one,
- * and every later call finds it again.
+ * resolved per call and the connection is not: the `connect` tool establishes
+ * one, and every later call finds it again.
  *
  * The connection itself is **not** cached here. `connect()` in `lib/client`
  * already keeps one client per ticket and transport, which is what makes an
- * agent and a human co-exist on one page: an agent calling `shareConnect` for
- * the ticket already open in the tab gets handed the session the UI is using,
- * rather than opening a second one. A second cache in front of it would undo
- * that.
+ * agent and a human co-exist on one page: an agent opening the ticket already
+ * open in the tab gets handed the session the UI is using, rather than a second
+ * one. A second cache in front of it would undo that.
  *
  * What *is* kept here is the manifest. Fetching it is a round trip, and the
  * obvious alternative — subscribing with `watch()` — is wrong: the connection
@@ -43,7 +42,7 @@ interface Entry {
 
 const sessions = new Map<string, Entry>()
 
-/** The ticket the last `shareConnect` used, so later calls can omit it. */
+/** The ticket the last `connect` tool call used, so later calls can omit it. */
 let lastTicket: string | undefined
 
 /**
@@ -107,6 +106,13 @@ export async function openSession(
       }
       throw error
     }
+    // Once per client, not once per call. This adopts the store this origin
+    // already has and recomputes what the tab can seed; afterwards `held` is
+    // kept current by syncing and by the retraction watcher. Doing it on every
+    // call would put a second manifest round trip behind every tool — worst on
+    // `connect`, which is the one an agent is invited to poll.
+    await client.refresh_held()
+
     entry = { ticket, transport: options.transport, client }
     sessions.set(key, entry)
   }
@@ -128,11 +134,11 @@ export async function openSession(
 }
 
 /**
- * The session for a call that is not `shareConnect`.
+ * The session for a call that is not the `connect` tool.
  *
  * Deliberately does not take a password: a tool that would silently dial a new
- * connection makes `shareConnect` look optional, and then a wrong password
- * surfaces from whichever tool happened to run first.
+ * connection makes `connect` look optional, and then a wrong password surfaces
+ * from whichever tool happened to run first.
  */
 export async function requireSession(
   explicit: string | undefined,
@@ -141,22 +147,3 @@ export async function requireSession(
   return openSession(resolveTicket(explicit), { refresh })
 }
 
-/**
- * The cached tree for `ticket`, without dialling anything.
- *
- * For callers that want to check a path against the share but must not pay a
- * connection to do it — the UI tools, which are moving a view the user already
- * has open and should not open a second session to validate a click.
- */
-export function peekTree(ticket: string): DirNode | null {
-  for (const entry of sessions.values()) {
-    if (entry.ticket === ticket && entry.tree) return entry.tree.root
-  }
-  return null
-}
-
-/** Forget every session. Test seam; the clients themselves are owned by `lib/client`. */
-export function resetSessions(): void {
-  sessions.clear()
-  lastTicket = undefined
-}

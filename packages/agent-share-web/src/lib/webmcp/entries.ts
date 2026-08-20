@@ -22,7 +22,7 @@ export interface Entry {
 /**
  * The node at `parts`, or a failure naming the path that missed.
  *
- * An empty path is the share root rather than an error — `shareList` with no
+ * An empty path is the share root rather than an error — `list` with no
  * arguments is the first call an agent makes, and "list the share" is a
  * reasonable thing for it to mean.
  */

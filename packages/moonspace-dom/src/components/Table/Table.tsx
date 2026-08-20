@@ -41,6 +41,10 @@ const CELL = {
   ...ONE_ROW,
   overflow: 'hidden',
   whiteSpace: 'nowrap',
+  // A fixed-width column with no `render` would otherwise cut mid-word with
+  // nothing to show it had. Columns that wrap their content in `<Text truncate>`
+  // bring their own ellipsis; this is for the ones that do not.
+  textOverflow: 'ellipsis',
   minWidth: 0,
 } as const
 

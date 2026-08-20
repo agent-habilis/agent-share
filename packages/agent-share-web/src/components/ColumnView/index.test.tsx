@@ -11,29 +11,19 @@ import { render, flushSync } from 'visage-dom'
 import type { Root } from 'visage-dom'
 
 import { ColumnView } from './index.tsx'
-import type { DirNode } from '../../lib/tree.ts'
+import { dirNode, type DirNode } from '../../lib/tree.ts'
 
 let host: HTMLElement
 let root: Root | null = null
 let selected: string[][] = []
 let previews = 0
 
-const root_: DirNode = {
-  kind: 'dir',
-  name: '',
-  path: '',
-  children: [
-    { kind: 'file', name: 'note.txt', path: 'note.txt', index: 0, size: 44, mtime: 0 },
-    {
-      kind: 'dir',
-      name: 'docs',
-      path: 'docs',
-      children: [
-        { kind: 'file', name: 'deep.md', path: 'docs/deep.md', index: 1, size: 9, mtime: 0 },
-      ],
-    },
-  ],
-}
+const root_: DirNode = dirNode('', '', [
+  { kind: 'file', name: 'note.txt', path: 'note.txt', index: 0, size: 44, mtime: 0 },
+  dirNode('docs', 'docs', [
+    { kind: 'file', name: 'deep.md', path: 'docs/deep.md', index: 1, size: 9, mtime: 0 },
+  ]),
+])
 
 const held = new Set<number>()
 const noop = () => undefined

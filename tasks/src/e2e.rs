@@ -393,8 +393,8 @@ const CELLS: &[Cell] = &[
         precheck: Some(webmcp_unavailable),
     },
     Cell {
-        name: "webmcp-ui",
-        run: cell_webmcp_ui,
+        name: "webmcp-activity",
+        run: cell_webmcp_activity,
         producer: Peer::Native,
         consumer: Peer::Web,
         transport: Transport::Dynamic,
@@ -2337,52 +2337,61 @@ fn cell_webmcp_read(ctx: &Ctx<'_>) -> Res<()> {
 
     run_webmcp(&format!(
         r"
-        const opened = await call('shareConnect');
-        check('shareConnect counts the share', [opened.ok, opened.files, opened.bytes],
+        const opened = await call('connect');
+        check('connect counts the share', [opened.ok, opened.files, opened.bytes],
               [true, 4, {bytes}]);
 
-        const listed = await call('shareList');
-        check('shareList names every entry', listed.entries.map((e) => e.name).sort(),
-              ['blob.bin', 'f000.txt', 'f001.txt', 'f002.txt']);
+        // Re-calling it must refresh rather than dial again, which is the whole
+        // reason there is no separate status tool.
+        const again = await call('connect');
+        check('connect re-reports a live connection',
+              [again.ok, again.closed, typeof again.filesHeldLocally],
+              [true, false, 'number']);
 
-        const stat = await call('shareStat', {{ path: 'f000.txt' }});
-        check('shareStat sizes a file', [stat.kind, stat.size], ['file', {file_len}]);
+        const listed = await call('list');
+        check('list names every entry',
+              [listed.kind, listed.entries.map((e) => e.name).sort()],
+              ['dir', ['blob.bin', 'f000.txt', 'f001.txt', 'f002.txt']]);
 
-        const whole = await call('shareRead', {{ path: 'f000.txt' }});
-        check('shareRead returns the fixture bytes', [whole.encoding, whole.text, whole.eof],
+        // The same tool on a file answers for the file rather than listing it.
+        const stat = await call('list', {{ path: 'f000.txt' }});
+        check('list sizes a file', [stat.kind, stat.size], ['file', {file_len}]);
+
+        const whole = await call('read', {{ path: 'f000.txt' }});
+        check('read returns the fixture bytes', [whole.encoding, whole.text, whole.eof],
               ['utf8', 'file 0 contents\n', true]);
 
         // One byte from the middle: the offset must reach the wire, not just
         // slice a window the page had already pulled in full.
-        const window = await call('shareRead', {{ path: 'f000.txt', offset: 5, length: 1 }});
-        check('shareRead honours offset and length',
+        const window = await call('read', {{ path: 'f000.txt', offset: 5, length: 1 }});
+        check('read honours offset and length',
               [window.text, window.eof, window.nextOffset], ['0', false, 6]);
 
         // Aimed at the blob's first NUL, so this window must not come back as
         // text — and the decode is compared byte for byte, not just typed.
-        const binary = await call('shareRead',
+        const binary = await call('read',
                                   {{ path: 'blob.bin', offset: {nul}, length: {binary_len} }});
         const decoded = typeof binary.data === 'string'
           ? [...atob(binary.data)].map((char) => char.charCodeAt(0))
           : null;
-        check('shareRead base64s a window holding a NUL',
+        check('read base64s a window holding a NUL',
               [binary.encoding, binary.text, decoded], ['base64', undefined, {expected_bytes}]);
 
-        const found = await call('shareSearch', {{ query: 'contents' }});
-        check('shareSearch finds every text file',
+        const found = await call('search', {{ query: 'contents' }});
+        check('search finds every text file',
               found.matches.map((m) => m.path).sort(),
               ['f000.txt', 'f001.txt', 'f002.txt']);
 
         // What it left out, and why. A search that silently dropped the blob
         // would read as 'there is nothing else', which is a different answer.
-        check('shareSearch says it skipped the binary',
+        check('search says it skipped the binary',
               (found.skipped ?? []).map((s) => [s.path, s.reason]),
               [['blob.bin', 'binary']]);
 
         // The grammar is `*`, `**` and `?` only — a character class would be
         // matched literally, so this narrows with the wildcard that exists.
-        const globbed = await call('shareSearch', {{ query: 'contents', glob: 'f000.*' }});
-        check('shareSearch honours a glob',
+        const globbed = await call('search', {{ query: 'contents', glob: 'f000.*' }});
+        check('search honours a glob',
               globbed.matches.map((m) => m.path), ['f000.txt']);
         ",
         bytes = 3 * FIXTURE_FILE_LEN + BLOB_LEN,
@@ -2406,20 +2415,20 @@ fn cell_webmcp_failures(ctx: &Ctx<'_>) -> Res<()> {
 
     run_webmcp(
         r"
-        await call('shareConnect');
+        await call('connect');
 
-        const missing = await call('shareStat', { path: 'nope.txt' });
+        const missing = await call('list', { path: 'nope.txt' });
         check('a path that is not there', [missing.ok, missing.code], [false, 'not_found']);
 
         // `path` is `required`, and the browser lets the call through without it.
-        const noPath = await call('shareRead', {});
+        const noPath = await call('read', {});
         check('a missing required argument', [noPath.ok, noPath.code], [false, 'bad_argument']);
 
-        const escaping = await call('shareStat', { path: '../../etc/passwd' });
+        const escaping = await call('list', { path: '../../etc/passwd' });
         check('a path that escapes the share root',
               [escaping.ok, escaping.code], [false, 'bad_argument']);
 
-        const tooSmall = await call('shareRead', { path: 'f000.txt', length: 0 });
+        const tooSmall = await call('read', { path: 'f000.txt', length: 0 });
         check('a length under the schema minimum',
               [tooSmall.ok, tooSmall.code], [false, 'bad_argument']);
 
@@ -2435,44 +2444,27 @@ fn cell_webmcp_failures(ctx: &Ctx<'_>) -> Res<()> {
     page.finish()
 }
 
-/// **The interface tools actually move the page.**
+/// **A call is visible to the person whose tab it happened in.**
 ///
-/// The half no unit test can reach. `shareNavigate` and `shareOpenView` return
-/// a snapshot, and a version of them that built the snapshot without touching
-/// the app would satisfy every assertion about their return value — so what is
-/// checked here is the route the person is left on, read back from the page.
+/// The tools themselves say nothing about this, and nothing else can check it:
+/// WebMCP never tells a page that an agent connected, so being *called* is the
+/// only evidence the UI has, and the wiring from `execute` to the brand and the
+/// log runs through the whole app rather than through any one module.
 ///
-/// It ends on `/info`, which is also where the call log lives, so the last
-/// assertion is that the page can see the traffic this row just made.
-fn cell_webmcp_ui(ctx: &Ctx<'_>) -> Res<()> {
+/// A person is owed this. An agent reading a share in their tab is not
+/// something to discover afterwards from a network panel.
+fn cell_webmcp_activity(ctx: &Ctx<'_>) -> Res<()> {
     let page = Page::open(ctx, 3, "")?;
     wait_for_listing()?;
 
     run_webmcp(
         r"
-        const before = await call('shareUiState');
-        check('the page starts on the file browser', before.view, 'files');
-
-        // `selection` is one segment per level, not a joined path.
-        const moved = await call('shareNavigate', { path: 'f001.txt' });
-        check('shareNavigate selects a file', [moved.ok, moved.selection], [true, ['f001.txt']]);
-
-        const opened = await call('shareOpenView', { view: 'info' });
-        check('shareOpenView reports success', opened.ok, true);
+        await call('connect');
+        const listed = await call('list', { path: 'f001.txt' });
+        check('list stats a file', [listed.ok, listed.kind], [true, 'file']);
         ",
     )?;
 
-    wait_for_true(
-        "location.pathname.startsWith('/info/')",
-        ACTION_TIMEOUT,
-        "shareOpenView to move the page to the info panel",
-    )?;
-    // The log panel, fed by the calls above rather than by a fixture.
-    wait_for_true(
-        "/tools published/.test(document.body.innerText)",
-        ACTION_TIMEOUT,
-        "the WebMCP panel to report the tools this page published",
-    )?;
     // The whole feature in one attribute: an agent called a tool, and the name
     // of the app in the top bar says so without a word.
     wait_for_true(
@@ -2481,16 +2473,19 @@ fn cell_webmcp_ui(ctx: &Ctx<'_>) -> Res<()> {
         "the brand to report an agent working",
     )?;
 
-    run_webmcp(
-        r"
-        const back = await call('shareOpenView', { view: 'files' });
-        check('shareOpenView goes back', back.ok, true);
-        ",
-    )?;
+    // The log panel, fed by the calls above rather than by a fixture. Clicked,
+    // because a person is the only thing that moves this page — there is no
+    // tool that could have brought us here, and that is the point.
+    //
+    // Counted rather than name-matched: the names are bare verbs now, and
+    // `/list/` against the whole page would pass on any prose that says it.
+    // The count of calls is this cell's subject; the count of tools is not, so
+    // adding a seventh tool must not break this row.
+    click("Info")?;
     wait_for_true(
-        "location.pathname.startsWith('/files/')",
+        "/· 2 calls/.test(document.body.innerText)",
         ACTION_TIMEOUT,
-        "shareOpenView to return the page to the file browser",
+        "the panel to count the two calls the agent just made",
     )?;
 
     page.finish()

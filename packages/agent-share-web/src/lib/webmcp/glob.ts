@@ -1,5 +1,5 @@
 /**
- * A small glob matcher, so `shareSearch` can be pointed at part of a share.
+ * A small glob matcher, so `search` can be pointed at part of a share.
  *
  * Written here rather than pulled in: the app has no glob dependency, the
  * grammar needed is four characters wide, and a matcher run against a remote

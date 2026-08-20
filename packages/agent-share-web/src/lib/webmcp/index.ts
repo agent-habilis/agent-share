@@ -15,8 +15,7 @@
  */
 
 import { beginToolCall, markToolsRegistered } from './activity.ts'
-import { TOOLS as SHARE_TOOLS } from './tools.ts'
-import { UI_TOOLS } from './uiTools.ts'
+import { TOOLS } from './tools.ts'
 
 export {
   agentActivity,
@@ -24,18 +23,7 @@ export {
   type AgentActivity,
   type AgentCall,
 } from './activity.ts'
-export { publishAgentSession, type AgentSession } from './uiBridge.ts'
-export { resetSessions } from './session.ts'
-
-/**
- * Everything this page publishes: the share itself, then the interface over it.
- *
- * The split is worth keeping in mind when reading them. The share tools work on
- * any route and need no one present. The interface tools move what a person is
- * looking at, so they need a share page mounted — and two of them need that
- * person to click something.
- */
-export const TOOLS: readonly ModelContextTool[] = [...SHARE_TOOLS, ...UI_TOOLS]
+export { TOOLS }
 
 /**
  * Wrap a tool so its invocations are visible to the page.
@@ -94,7 +82,7 @@ export async function registerAgentTools(): Promise<RegisterResult> {
   // round trip, and until the last one lands an agent calling `getTools()` sees
   // a partial set — it would not be told the list is still filling, so it would
   // simply conclude the missing tools do not exist. Observed: listing right
-  // after load returned three of eight.
+  // after load returned three of six.
   const settled = await Promise.all(
     TOOLS.map(async (tool) => {
       try {

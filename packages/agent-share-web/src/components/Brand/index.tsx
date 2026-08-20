@@ -6,7 +6,7 @@ import {
   agentActivity,
   subscribeAgentActivity,
   type AgentActivity,
-} from '../../lib/agentTools/index.ts'
+} from '../../lib/webmcp/index.ts'
 
 /**
  * The app's name, which is also where it says an agent is using the page.
@@ -63,13 +63,15 @@ export function describeBrand(activity: AgentActivity, now: number): BrandState 
   }
 
   const since = now - activity.lastAt
-  const tool = activity.lastTool ?? 'a tool'
+  // Quoted, because the names are bare verbs: "An agent used sync" reads as a
+  // sentence about syncing, "An agent used "sync"" names the tool that ran.
+  const tool = activity.lastTool ? `"${activity.lastTool}"` : 'a tool'
   const plural = activity.calls === 1 ? '1 action' : `${activity.calls} actions`
 
   if (activity.inFlight > 0) {
     return {
       green: true,
-      // Not on the clock. A `shareSync` pulling a large share runs for a long
+      // Not on the clock. A `sync` pulling a large share runs for a long
       // time, and a rule that only counted `lastAt` would stop moving halfway
       // through the one call an agent is most obviously in the middle of.
       animated: true,

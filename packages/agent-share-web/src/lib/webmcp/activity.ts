@@ -88,7 +88,7 @@ let nextId = 1
 /**
  * Record the start of a call, and return the function that ends it.
  *
- * Counted at the start rather than on completion: a `shareSync` pulling a large
+ * Counted at the start rather than on completion: a `sync` pulling a large
  * share can run for a long time, and an indicator that only lit up afterwards
  * would be dark for exactly the period an agent was most obviously in control. The
  * log entry appears at the same moment, saying `running`.
@@ -168,7 +168,7 @@ const LINE_CHARS = 80
  * A call's arguments as one line.
  *
  * Done here, when the call is recorded, rather than in the panel that draws it.
- * That way the password an agent passed to `shareConnect` never enters the
+ * That way the password an agent passed to `connect` never enters the
  * store at all, and no later reader of the log has to remember to hide it.
  *
  * Nothing here is allowed to scale with what the agent sent. The browser does

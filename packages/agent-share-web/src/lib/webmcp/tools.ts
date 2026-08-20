@@ -1,10 +1,12 @@
 /**
  * The tools this page publishes to an agent.
  *
- * They mirror what the UI does — open a share, walk it, read a file, seed it,
- * publish one — rather than exposing a second API of their own. Everything here
- * is built on the same `lib/client`, `lib/tree` and `lib/produce` the pages use,
- * so an agent and a person are driving one implementation.
+ * This is the agent's interface to a share, and only that. It does what a share
+ * can do — open one, walk it, read a file, take a copy, publish a new one — and
+ * says nothing about what is on screen; the UI is the person's interface and has
+ * its own. Everything here is built on the same `lib/client`, `lib/tree` and
+ * `lib/produce` the pages use, so an agent and a person drive one
+ * implementation.
  *
  * Two rules hold for every tool in this file, both forced by how the browser
  * behaves rather than by taste (see `result.ts`):
@@ -60,15 +62,17 @@ function object(properties: object, required: string[] = []): object {
 }
 
 // ---------------------------------------------------------------------------
-// shareConnect
+// connect
 // ---------------------------------------------------------------------------
 
-const shareConnect: ModelContextTool = {
-  name: 'shareConnect',
+const connect: ModelContextTool = {
+  name: 'connect',
   description:
-    'Open an agent-share peer-to-peer share and report what it holds. Call this ' +
-    'before the other share tools. Files are read over the network on demand; ' +
-    'nothing is written to disk.',
+    'Open an agent-share peer-to-peer share and report what it holds and how it ' +
+    'is connected. Call this before the other tools. Calling it again on a share ' +
+    'that is already open refreshes the file list and the connection state ' +
+    'rather than dialling a second time, so it doubles as a status check. Files ' +
+    'are read over the network on demand; nothing is written to disk.',
   inputSchema: object({
     ticket: {
       type: 'string',
@@ -89,16 +93,22 @@ const shareConnect: ModelContextTool = {
       const password = optionalString(input, 'password')
       const session = await openSession(ticket, { transport, password, refresh: true })
 
-      const files = session.manifest.files.filter((file) => file.rel_path !== '')
-      const bytes = files.reduce((total, file) => total + file.size, 0)
+      // Counted off the tree, not the manifest. `buildTree` drops tombstones
+      // and paths that would escape the root, so a manifest tally would report
+      // files that `list` then refuses to show — two answers to one question,
+      // in the same result that reports `skippedEntries`.
       return ok({
         ticket: session.ticket,
         url: shareUrl(session.ticket),
-        files: files.length,
-        directories: session.manifest.dirs.length,
-        bytes,
+        files: session.root.files,
+        directories: session.root.dirs,
+        bytes: session.root.bytes,
         transport: session.client.transport,
-        peers: session.client.peers_gossip,
+        closed: session.client.closed,
+        peersOnMesh: session.client.peers_gossip,
+        peersDirect: session.client.peers_direct,
+        maxDirect: session.client.max_direct,
+        filesHeldLocally: session.client.held.length,
         // Non-zero means the peer named paths that would escape the share root.
         // Surfaced rather than swallowed: it says something about the peer.
         skippedEntries: session.skipped,
@@ -107,21 +117,37 @@ const shareConnect: ModelContextTool = {
 }
 
 // ---------------------------------------------------------------------------
-// shareList
+// list
 // ---------------------------------------------------------------------------
 
-const shareList: ModelContextTool = {
-  name: 'shareList',
+async function coverageOf(
+  session: Awaited<ReturnType<typeof requireSession>>,
+  index: number,
+): Promise<number | undefined> {
+  try {
+    const map = (await session.client.coverage_map()) as Record<string, number> | null
+    const value = map?.[String(index)]
+    return typeof value === 'number' ? value : undefined
+  } catch {
+    // Coverage is a nicety on top of the answer, not the answer.
+    return undefined
+  }
+}
+
+const list: ModelContextTool = {
+  name: 'list',
   description:
-    'List the files and directories inside an open share. Returns names, sizes ' +
-    'and modification times. Use before shareRead to find a path.',
+    'Describe a path inside an open share. A directory returns its entries with ' +
+    'names, sizes and modification times, plus the total files and bytes beneath ' +
+    'it. A file returns its size, modification time, and how much of it this ' +
+    'browser already holds locally. Use it to find a path before reading one.',
   inputSchema: object({
     ...PATH_PROPERTY,
     depth: {
       type: 'integer',
       minimum: 1,
       maximum: 10,
-      description: 'How many directory levels to include. Default 1.',
+      description: 'How many directory levels to include. Default 1. Ignored for a file.',
     },
     refresh: {
       type: 'boolean',
@@ -139,69 +165,30 @@ const shareList: ModelContextTool = {
       const node = locate(session.root, parts)
 
       if (node.kind === 'file') {
-        return ok({ path: node.path, entries: [describeEntry(node)] })
-      }
-      const entries: Entry[] = []
-      collect(node, depth, entries)
-      return ok({ path: parts.join('/'), entries, count: entries.length })
-    }),
-}
-
-// ---------------------------------------------------------------------------
-// shareStat
-// ---------------------------------------------------------------------------
-
-async function coverageOf(
-  session: Awaited<ReturnType<typeof requireSession>>,
-  index: number,
-): Promise<number | undefined> {
-  try {
-    const map = (await session.client.coverage_map()) as Record<string, number> | null
-    const value = map?.[String(index)]
-    return typeof value === 'number' ? value : undefined
-  } catch {
-    // Coverage is a nicety on top of the answer, not the answer.
-    return undefined
-  }
-}
-
-const shareStat: ModelContextTool = {
-  name: 'shareStat',
-  description:
-    'Describe one file or directory in an open share: size, modification time, ' +
-    'and how much of it this browser already holds locally.',
-  inputSchema: object({ ...PATH_PROPERTY, ...TICKET_PROPERTY }, []),
-  annotations: { readOnlyHint: true, untrustedContentHint: true },
-  execute: (input) =>
-    guard(async () => {
-      const session = await requireSession(optionalString(input, 'ticket'))
-      const parts = sharePathParts(optionalString(input, 'path'))
-      const node = locate(session.root, parts)
-
-      if (node.kind === 'dir') {
-        const files = filesUnder(node)
+        const held = session.client.held.includes(node.index)
         return ok({
-          kind: 'dir' as const,
-          path: node.path,
-          files: files.length,
-          bytes: files.reduce((total, file) => total + file.size, 0),
+          ...describeEntry(node),
+          index: node.index,
+          held,
+          coverage: held ? 1 : ((await coverageOf(session, node.index)) ?? 0),
         })
       }
-      const held = session.client.held.includes(node.index)
+
+      const entries: Entry[] = []
+      collect(node, depth, entries)
       return ok({
-        kind: 'file' as const,
+        kind: 'dir' as const,
         path: node.path,
-        size: node.size,
-        mtime: node.mtime,
-        index: node.index,
-        held,
-        coverage: held ? 1 : ((await coverageOf(session, node.index)) ?? 0),
+        entries,
+        count: entries.length,
+        files: node.files,
+        bytes: node.bytes,
       })
     }),
 }
 
 // ---------------------------------------------------------------------------
-// shareRead
+// read
 // ---------------------------------------------------------------------------
 
 async function readWindow(
@@ -215,8 +202,8 @@ async function readWindow(
   return session.client.read(file.index, BigInt(window.offset), window.len)
 }
 
-const shareRead: ModelContextTool = {
-  name: 'shareRead',
+const read: ModelContextTool = {
+  name: 'read',
   description:
     'Read part of a file from an open share. Returns UTF-8 text, or base64 when ' +
     'the bytes are binary. Reads are windowed: follow nextOffset in the result ' +
@@ -267,7 +254,7 @@ const shareRead: ModelContextTool = {
 }
 
 // ---------------------------------------------------------------------------
-// shareSearch
+// search
 // ---------------------------------------------------------------------------
 
 /**
@@ -287,8 +274,8 @@ interface Match {
   text: string
 }
 
-const shareSearch: ModelContextTool = {
-  name: 'shareSearch',
+const search: ModelContextTool = {
+  name: 'search',
   description:
     'Search the text files of an open share for a string and return matching ' +
     'lines with their paths and line numbers. Narrow it with a glob such as ' +
@@ -388,11 +375,11 @@ const shareSearch: ModelContextTool = {
 }
 
 // ---------------------------------------------------------------------------
-// shareSync
+// sync
 // ---------------------------------------------------------------------------
 
-const shareSync: ModelContextTool = {
-  name: 'shareSync',
+const sync: ModelContextTool = {
+  name: 'sync',
   description:
     'Download files from an open share into this browser so later reads are ' +
     'local and this tab helps serve them to other peers. Stores in browser ' +
@@ -432,36 +419,7 @@ const shareSync: ModelContextTool = {
 }
 
 // ---------------------------------------------------------------------------
-// shareStatus
-// ---------------------------------------------------------------------------
-
-const shareStatus: ModelContextTool = {
-  name: 'shareStatus',
-  description:
-    'Report the state of the open share connection: transport in use, peers ' +
-    'connected, and how many files this browser holds locally.',
-  inputSchema: object({ ...TICKET_PROPERTY }),
-  annotations: { readOnlyHint: true, untrustedContentHint: false },
-  execute: (input) =>
-    guard(async () => {
-      const session = await requireSession(optionalString(input, 'ticket'))
-      await session.client.refresh_held()
-      const files = session.manifest.files.filter((file) => file.rel_path !== '').length
-      return ok({
-        ticket: session.ticket,
-        transport: session.client.transport,
-        closed: session.client.closed,
-        peersOnMesh: session.client.peers_gossip,
-        peersDirect: session.client.peers_direct,
-        maxDirect: session.client.max_direct,
-        filesHeldLocally: session.client.held.length,
-        files,
-      })
-    }),
-}
-
-// ---------------------------------------------------------------------------
-// sharePublish
+// publish
 // ---------------------------------------------------------------------------
 
 /**
@@ -489,8 +447,8 @@ function decodeContent(
   return bytes
 }
 
-const sharePublish: ModelContextTool = {
-  name: 'sharePublish',
+const publish: ModelContextTool = {
+  name: 'publish',
   description:
     'Publish files as a new peer-to-peer share and return a ticket and URL that ' +
     'others can open. Files are held in this browser, so the share lasts only ' +
@@ -558,14 +516,12 @@ const sharePublish: ModelContextTool = {
 }
 
 export const TOOLS: readonly ModelContextTool[] = [
-  shareConnect,
-  shareList,
-  shareStat,
-  shareRead,
-  shareSearch,
-  shareSync,
-  shareStatus,
-  sharePublish,
+  connect,
+  list,
+  read,
+  search,
+  sync,
+  publish,
 ]
 
 export type { ToolResult }

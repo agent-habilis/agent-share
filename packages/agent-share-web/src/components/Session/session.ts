@@ -95,15 +95,19 @@ export interface SessionApi {
   /**
    * The last failure or notice, for as long as it is worth showing.
    *
-   * Separate from the three error signals below, and deliberately: those are
-   * the record of what went wrong last, read by the Info panel and by the agent
-   * bridge long after the person has waved the message away. This is only what
-   * is on screen.
+   * Separate from `mountError` below, and deliberately: that is the record of
+   * what went wrong, read by the Info panel long after the person has waved the
+   * message away. This is only what is on screen.
    */
   readonly toast: ReadonlySignal<ToastMessage | null>
+  /**
+   * Why the last mirror stopped, or null.
+   *
+   * Mounting is the only action whose failure outlives its toast — a mirror
+   * that stopped writing stays stopped, where a download that failed is over —
+   * so it is the only one that keeps a signal rather than just raising a toast.
+   */
   readonly mountError: ReadonlySignal<string | null>
-  readonly downloadError: ReadonlySignal<string | null>
-  readonly seedError: ReadonlySignal<string | null>
   /**
    * Re-dialling a connection lost to a backgrounded tab. Browsing is
    * unaffected — the tree is local — so only the actions that reach the peer

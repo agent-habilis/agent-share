@@ -4,7 +4,7 @@
 //
 // `../../types` carries the ambient globals: the File System Access pickers
 // `lib/` and `pages/home` call, the WebMCP `Document.modelContext` surface
-// `lib/agentTools` feature-detects, and the `declare module '*.css'` that lets
+// `lib/webmcp` feature-detects, and the `declare module '*.css'` that lets
 // `main.tsx` and `pages/lab` import `app.css`.
 {
   "extends": "../../tsconfig.base.json",
