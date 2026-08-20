@@ -1,6 +1,6 @@
 import { Badge, Button, Text, t } from 'moonspace-dom'
 
-import type { ToastMessage } from '../Session/session.ts'
+import type { ToastMessage } from '../session/session.ts'
 
 /*
   Hoisted, because a fresh object every render defeats the memo every child of

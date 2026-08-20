@@ -1,7 +1,7 @@
 import { Stack, Text, t } from 'moonspace-dom'
 import type { Child } from 'visage-dom'
 
-import { Brand } from '../Brand/index.tsx'
+import { Brand } from '../brand/index.tsx'
 
 /**
  * App chrome: top bar on the sunken page background + content surface on `bg`

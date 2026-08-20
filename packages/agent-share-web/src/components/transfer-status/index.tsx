@@ -33,7 +33,7 @@ import {
   laneSummary,
   peerCounts,
   type TransferSnapshot,
-} from '../../lib/transferStats/index.ts'
+} from '../../lib/transfer-stats/index.ts'
 import { humanBytes } from '../../lib/tree.ts'
 
 export interface TransferStatusProps {

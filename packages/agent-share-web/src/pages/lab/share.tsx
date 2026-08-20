@@ -9,7 +9,7 @@
 import { Button, Input, Select, Stack, Text } from 'moonspace-dom'
 import { component, signal } from 'visage-dom'
 
-import { Panel } from '../../components/Panel/index.tsx'
+import { Panel } from '../../components/panel/index.tsx'
 import { createShareDirectory, removeShareDirectory, writeOpfsFile } from '../../lib/opfs/index.ts'
 import {
   directorySource,

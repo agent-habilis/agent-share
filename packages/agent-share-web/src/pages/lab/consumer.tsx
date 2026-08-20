@@ -8,7 +8,7 @@
 import { Button, Stack, Text } from 'moonspace-dom'
 import { component } from 'visage-dom'
 
-import { Panel } from '../../components/Panel/index.tsx'
+import { Panel } from '../../components/panel/index.tsx'
 import { parseShareInput } from '../../lib/ticket/index.ts'
 import { loadWasm } from 'agent-share-wasm'
 import { TicketBox, createLog, jsError, type Log } from './parts.tsx'

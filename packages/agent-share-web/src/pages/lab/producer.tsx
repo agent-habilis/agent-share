@@ -5,7 +5,7 @@
 import { Button, Select, Stack, Text } from 'moonspace-dom'
 import { component, signal } from 'visage-dom'
 
-import { Panel } from '../../components/Panel/index.tsx'
+import { Panel } from '../../components/panel/index.tsx'
 import { loadWasm, type WasmModule } from 'agent-share-wasm'
 import { Field, TicketBox, createLog, jsError } from './parts.tsx'
 

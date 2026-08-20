@@ -12,7 +12,7 @@
  * READ/MANIFEST/WATCH.
  */
 
-import { buildPeerCard } from './peerCard/index.ts'
+import { buildPeerCard } from './peer-card/index.ts'
 import { snapshotListing, type SnapshotListing } from './snapshot/index.ts'
 import { loadWasm } from 'agent-share-wasm'
 

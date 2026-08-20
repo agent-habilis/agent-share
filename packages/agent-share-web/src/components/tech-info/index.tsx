@@ -50,19 +50,19 @@ import {
   PEER_CELLS,
   isCoarse,
   resampleSlots,
-} from "./availabilityGrid/index.ts";
+} from "./availability-grid/index.ts";
 import { sortPeers } from "./peers/index.ts";
 import type { PeerAvailability } from "./availability/index.ts";
 import {
   formatIpWithFlag,
   isGeoLookupCandidate,
   lookupCountryCode,
-} from "./countryFlag/index.ts";
+} from "./country-flag/index.ts";
 import { shareProgress } from "./progress/index.ts";
-import { SlotGrid } from "./SlotGrid/index.tsx";
+import { SlotGrid } from "./slot-grid/index.tsx";
 import { sparkline } from "./sparkline/index.ts";
-import type { RateSample } from "../Session/session.ts";
-import { Bento, Panel } from "../Panel/index.tsx";
+import type { RateSample } from "../session/session.ts";
+import { Bento, Panel } from "../panel/index.tsx";
 import {
   agentActivity,
   subscribeAgentActivity,
@@ -70,8 +70,8 @@ import {
   type AgentActivity,
 } from "../../lib/webmcp/index.ts";
 import { fileSeedState, type Coverage } from "../../lib/seeding/index.ts";
-import { formatRate, laneSummary } from "../../lib/transferStats/index.ts";
-import type { LinkSample } from "../../lib/transferStats/index.ts";
+import { formatRate, laneSummary } from "../../lib/transfer-stats/index.ts";
+import type { LinkSample } from "../../lib/transfer-stats/index.ts";
 import { humanBytes } from "../../lib/tree.ts";
 import type { FileNode } from "../../lib/tree.ts";
 

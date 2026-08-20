@@ -5,9 +5,9 @@
  * download/mount helpers actually call, rather than everything wasm exports.
  */
 
-import { buildPeerCard } from '../peerCard/index.ts'
+import { buildPeerCard } from '../peer-card/index.ts'
 import type { TransportMode } from '../ticket/index.ts'
-import type { LinkSample } from '../transferStats/index.ts'
+import type { LinkSample } from '../transfer-stats/index.ts'
 import type { Manifest } from '../tree.ts'
 import { loadWasm } from 'agent-share-wasm'
 

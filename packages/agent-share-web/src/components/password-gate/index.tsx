@@ -1,6 +1,6 @@
 import { Box, Button, Input, Stack, Text } from 'moonspace-dom'
 
-import { Centered } from '../Centered/index.tsx'
+import { Centered } from '../centered/index.tsx'
 
 /**
  * The gate in front of a password-protected share.

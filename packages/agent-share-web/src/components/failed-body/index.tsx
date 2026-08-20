@@ -1,6 +1,6 @@
 import { Box, Stack, Text } from 'moonspace-dom'
 
-import { Centered } from '../Centered/index.tsx'
+import { Centered } from '../centered/index.tsx'
 
 export function FailedBody({ reason }: { reason: string }) {
   const iceHint = /ice_connection_state|ondatachannel|ICE failed|no ICE candidates/i.test(reason)

@@ -17,8 +17,8 @@ import { component, render } from 'visage-dom'
 
 import '../../app.css'
 
-import { Chrome } from '../../components/Chrome/index.tsx'
-import { Bento } from '../../components/Panel/index.tsx'
+import { Chrome } from '../../components/chrome/index.tsx'
+import { Bento } from '../../components/panel/index.tsx'
 import { ConsumerPanel } from './consumer.tsx'
 import { MeshPanel } from './mesh.tsx'
 import { ProducerPanel } from './producer.tsx'

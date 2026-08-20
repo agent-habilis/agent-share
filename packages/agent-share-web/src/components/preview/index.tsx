@@ -31,7 +31,7 @@ import type { Child } from 'visage-dom'
 
 import { singleFileStream, type Progress } from '../../lib/download/index.ts'
 import { openStream, type Stream } from '../../lib/stream/index.ts'
-import { mimeFor, previewKind } from './previewKind/index.ts'
+import { mimeFor, previewKind } from './preview-kind/index.ts'
 import { humanBytes, type FileNode } from '../../lib/tree.ts'
 
 export interface PreviewClient {

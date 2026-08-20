@@ -7,9 +7,9 @@ import { component } from 'visage-dom'
 import type { Child } from 'visage-dom'
 
 import { useShareNav } from '../../components/nav.ts'
-import { ColumnView } from '../../components/ColumnView/index.tsx'
-import { SessionChrome } from '../../components/SessionChrome/index.tsx'
-import { transferLabel, useSession } from '../../components/Session/session.ts'
+import { ColumnView } from '../../components/column-view/index.tsx'
+import { SessionChrome } from '../../components/session-chrome/index.tsx'
+import { transferLabel, useSession } from '../../components/session/session.ts'
 import { canMount } from '../../lib/mount/index.ts'
 import { seedState } from '../../lib/seeding/index.ts'
 

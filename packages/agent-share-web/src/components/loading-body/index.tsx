@@ -1,6 +1,6 @@
 import { Spinner, Stack, Text } from 'moonspace-dom'
 
-import { Centered } from '../Centered/index.tsx'
+import { Centered } from '../centered/index.tsx'
 
 export function LoadingBody({ label }: { label: string }) {
   return (

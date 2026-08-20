@@ -51,7 +51,7 @@ const PREFIX_BITS = 20
 const SHIFT = 32 - PREFIX_BITS
 const BLOCKS = 1 << PREFIX_BITS
 
-const OUT = 'packages/agent-share-web/src/components/TechInfo/countryFlag/table.ts'
+const OUT = 'packages/agent-share-web/src/components/tech-info/country-flag/table.ts'
 
 function toInt(dotted: string): number | null {
   const parts = dotted.split('.')

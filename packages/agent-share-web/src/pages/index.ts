@@ -17,7 +17,7 @@
 
 import { createRouter, type RouteDef } from 'visage-router'
 
-import { SessionLayout } from '../components/Session/index.tsx'
+import { SessionLayout } from '../components/session/index.tsx'
 import { FilesPage } from './files/index.tsx'
 import { HomePage } from './home/index.tsx'
 import { InfoPage } from './info/index.tsx'

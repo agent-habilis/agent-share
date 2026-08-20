@@ -13,7 +13,7 @@ import type { Ctx, ReadonlySignal, Signal } from 'visage-dom'
 
 import type { Client } from '../../lib/client/index.ts'
 import type { Progress } from '../../lib/download/index.ts'
-import type { TransferSnapshot } from '../../lib/transferStats/index.ts'
+import type { TransferSnapshot } from '../../lib/transfer-stats/index.ts'
 import type { DirNode } from '../../lib/tree.ts'
 
 export type Transfer = {

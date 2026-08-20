@@ -1,9 +1,9 @@
 import type { Child } from 'visage-dom'
 
-import { Chrome } from '../Chrome/index.tsx'
-import { Toast } from '../Toast/index.tsx'
-import { TransferStatus } from '../TransferStatus/index.tsx'
-import type { SessionApi } from '../Session/session.ts'
+import { Chrome } from '../chrome/index.tsx'
+import { Toast } from '../toast/index.tsx'
+import { TransferStatus } from '../transfer-status/index.tsx'
+import type { SessionApi } from '../session/session.ts'
 
 /**
  * The app chrome as a share page wears it.

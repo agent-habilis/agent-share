@@ -156,7 +156,7 @@ first time any tool is called and stays green; while a call is running, or for
 ten seconds after one, its characters shimmer between full and dimmed green.
 Hovering gives the sentence — which tool, how many times, how long ago — and
 before anything has happened it says how many tools are published, or that this
-browser has no WebMCP at all. See `packages/agent-share-web/src/components/Brand`.
+browser has no WebMCP at all. See `packages/agent-share-web/src/components/brand`.
 
 The wording is careful, because **the thing you would want to show cannot be
 observed**. WebMCP lets a page publish tools; it never tells the page that

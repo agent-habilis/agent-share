@@ -8,7 +8,7 @@ import { FilesPage } from './files/index.tsx'
 import { HomePage } from './home/index.tsx'
 import { InfoPage } from './info/index.tsx'
 import { PreviewPage } from './preview/index.tsx'
-import { SessionLayout } from '../components/Session/index.tsx'
+import { SessionLayout } from '../components/session/index.tsx'
 import { clientKey } from '../lib/client/index.ts'
 
 const TICKET = 'testTicketAbc123'

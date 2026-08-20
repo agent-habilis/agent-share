@@ -29,12 +29,12 @@ import {
   type ToastTone,
   type Transfer,
 } from './session.ts'
-import { Chrome } from '../Chrome/index.tsx'
-import { ColumnView } from '../ColumnView/index.tsx'
-import { FailedBody } from '../FailedBody/index.tsx'
-import { LoadingBody } from '../LoadingBody/index.tsx'
-import { PasswordGate } from '../PasswordGate/index.tsx'
-import { Toast } from '../Toast/index.tsx'
+import { Chrome } from '../chrome/index.tsx'
+import { ColumnView } from '../column-view/index.tsx'
+import { FailedBody } from '../failed-body/index.tsx'
+import { LoadingBody } from '../loading-body/index.tsx'
+import { PasswordGate } from '../password-gate/index.tsx'
+import { Toast } from '../toast/index.tsx'
 import { describe } from '../../lib/webmcp/result.ts'
 import { useShareNav } from '../nav.ts'
 import {
@@ -63,7 +63,7 @@ import {
   type SyncedState,
 } from '../../lib/mount/index.ts'
 import { parseTransport, type TransportMode } from '../../lib/ticket/index.ts'
-import type { TransferSnapshot } from '../../lib/transferStats/index.ts'
+import type { TransferSnapshot } from '../../lib/transfer-stats/index.ts'
 import {
   buildTree,
   filesUnder,

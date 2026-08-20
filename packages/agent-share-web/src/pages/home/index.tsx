@@ -5,12 +5,12 @@
 import { Badge, Box, Button, Input, Stack, Text } from 'moonspace-dom'
 import { component, signal } from 'visage-dom'
 
-import { Centered } from '../../components/Centered/index.tsx'
-import { Chrome } from '../../components/Chrome/index.tsx'
-import { FailedBody } from '../../components/FailedBody/index.tsx'
-import { LoadingBody } from '../../components/LoadingBody/index.tsx'
+import { Centered } from '../../components/centered/index.tsx'
+import { Chrome } from '../../components/chrome/index.tsx'
+import { FailedBody } from '../../components/failed-body/index.tsx'
+import { LoadingBody } from '../../components/loading-body/index.tsx'
 import { useShareNav } from '../../components/nav.ts'
-import { pickShareFiles, type PickMode } from '../../lib/pickShareFiles/index.ts'
+import { pickShareFiles, type PickMode } from '../../lib/pick-share-files/index.ts'
 import {
   canProduceLive,
   directorySource,

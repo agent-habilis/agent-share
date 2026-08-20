@@ -7,9 +7,9 @@ import { component } from 'visage-dom'
 import { useLocation } from 'visage-router'
 
 import { useShareNav } from '../../components/nav.ts'
-import { SessionChrome } from '../../components/SessionChrome/index.tsx'
-import { useSession } from '../../components/Session/session.ts'
-import { TechInfo } from '../../components/TechInfo/index.tsx'
+import { SessionChrome } from '../../components/session-chrome/index.tsx'
+import { useSession } from '../../components/session/session.ts'
+import { TechInfo } from '../../components/tech-info/index.tsx'
 import { filesUnder } from '../../lib/tree.ts'
 import { parseDev } from '../../lib/ticket/index.ts'
 

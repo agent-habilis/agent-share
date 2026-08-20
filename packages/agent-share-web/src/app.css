@@ -49,7 +49,7 @@ html {
 }
 
 /*
- * The brand's shimmer, while an agent is working. See `components/Brand`.
+ * The brand's shimmer, while an agent is working. See `components/brand`.
  *
  * Here rather than in a `css()` object because it cannot go in one. Keyframe
  * selectors are not selectors as far as `visage-style` is concerned — `0%`

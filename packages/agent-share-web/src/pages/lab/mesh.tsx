@@ -6,8 +6,8 @@
 import { Button, Select, Stack, Text } from 'moonspace-dom'
 import { component, interval, signal } from 'visage-dom'
 
-import { Panel } from '../../components/Panel/index.tsx'
-import { buildPeerCard } from '../../lib/peerCard/index.ts'
+import { Panel } from '../../components/panel/index.tsx'
+import { buildPeerCard } from '../../lib/peer-card/index.ts'
 import { loadWasm, type WasmModule } from 'agent-share-wasm'
 import { Field, TicketBox, createLog, jsError } from './parts.tsx'
 
