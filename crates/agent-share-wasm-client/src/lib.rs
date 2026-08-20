@@ -6479,6 +6479,7 @@ mod tests {
             role: Some("consumer".to_owned()),
             tree: tree.map(str::to_owned),
             serving: tree.map(|_| "AA".to_owned()),
+            holding: None,
         }
     }
 
