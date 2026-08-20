@@ -13,6 +13,7 @@ mod fmt;
 mod install;
 mod lint;
 mod man;
+mod naming;
 mod proptest;
 mod release;
 mod run;
@@ -116,6 +117,10 @@ enum Task {
     Clean,
     /// Generate roff man pages into `target/man/` (needs `clap_mangen`).
     Man,
+    /// Check file and directory names: snake_case inside a crate, kebab-case
+    /// everywhere else. Reads `git ls-files`, so build output and ignored
+    /// files are out of scope.
+    Naming,
     /// Run property-based tests.
     Proptest,
     /// Build the browser/Node wasm client into `packages/agent-share-wasm`.
@@ -206,6 +211,7 @@ fn main() -> ExitCode {
         Task::Lint => lint::run(&sh),
         Task::Clean => clean::run(&sh),
         Task::Man => man::run(),
+        Task::Naming => naming::run(&sh),
         Task::Proptest => proptest::run(&sh),
         Task::WebWasm => web_wasm::run(&sh),
         Task::WebImage {

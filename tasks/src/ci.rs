@@ -4,6 +4,12 @@ use crate::TaskOutcome;
 use crate::util::{output, repo_root};
 
 pub(crate) fn run(sh: &Shell) -> TaskOutcome {
+    // First because it is the only step with no toolchain prerequisite and no
+    // skip path — one `git ls-files` and a character scan. A misnamed file
+    // should not be reported after a multi-minute `clippy --all-targets`.
+    output::status("Checking", "file and directory names");
+    crate::naming::run(sh)?;
+
     output::status("Checking", "formatting");
     cmd!(sh, "cargo fmt --check").quiet().run()?;
 
