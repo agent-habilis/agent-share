@@ -252,7 +252,11 @@ async fn coverage_of_agrees_with_coverage_root_for_root(harness: &impl Harness) 
     assert_eq!(batched.len(), roots.len(), "one answer per root, in order");
     for (root, batch) in roots.iter().zip(&batched) {
         let single = store.coverage(*root).await.expect("coverage");
-        assert_eq!(batch.len(), single.len(), "disagreed on length for {root:?}");
+        assert_eq!(
+            batch.len(),
+            single.len(),
+            "disagreed on length for {root:?}"
+        );
         assert_eq!(
             batch.as_bits(),
             single.as_bits(),

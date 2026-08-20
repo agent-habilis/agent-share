@@ -347,7 +347,10 @@ impl ManifestSince {
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         use anyhow::{bail, ensure};
 
-        ensure!(bytes.len() >= 8 + 64 + 4, "a manifest-since answer is short");
+        ensure!(
+            bytes.len() >= 8 + 64 + 4,
+            "a manifest-since answer is short"
+        );
         let target_version = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
         let mut signature = [0u8; 64];
         signature.copy_from_slice(&bytes[8..72]);
@@ -358,9 +361,7 @@ impl ManifestSince {
         let mut deltas = Vec::new();
         for _ in 0..count {
             ensure!(bytes.len() >= cursor + 4, "a delta length is truncated");
-            let len = u32::from_le_bytes(
-                bytes[cursor..cursor + 4].try_into().expect("4 bytes"),
-            );
+            let len = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().expect("4 bytes"));
             if len > MAX_DELTA_BYTES {
                 bail!("a delta claims {len} bytes, past the cap");
             }

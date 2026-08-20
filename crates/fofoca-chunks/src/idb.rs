@@ -521,7 +521,12 @@ impl ChunkSource for IdbStore {
     }
 
     async fn has(&self, hash: ChunkHash) -> Result<bool> {
-        Ok(self.present(&[hash]).await?.first().copied().unwrap_or(false))
+        Ok(self
+            .present(&[hash])
+            .await?
+            .first()
+            .copied()
+            .unwrap_or(false))
     }
 
     async fn map(&self, root: Root) -> Result<Option<ChunkMap>> {

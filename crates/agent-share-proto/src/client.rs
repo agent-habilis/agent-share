@@ -331,10 +331,16 @@ mod tests {
         let older = card().with_serving(Some("0-5".to_owned()));
         let parsed = PeerCard::from_card_value(&older.to_card_value()).expect("parse");
         assert_eq!(parsed.holding, None, "absent must not decode as false");
-        assert!(parsed.holds_something(), "an older seeder must stay visible");
+        assert!(
+            parsed.holds_something(),
+            "an older seeder must stay visible"
+        );
 
         let browsing = PeerCard::from_card_value(&card().to_card_value()).expect("parse");
-        assert!(!browsing.holds_something(), "no serving and no flag is nothing");
+        assert!(
+            !browsing.holds_something(),
+            "no serving and no flag is nothing"
+        );
     }
 
     /// The state the flag exists for: part-way through a transfer, nothing is
