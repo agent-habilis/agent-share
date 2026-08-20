@@ -107,11 +107,22 @@ the SDP exchange, not file data.
 
 ### Which transport carries bytes
 
-| pair | carries bytes | never |
+Direction matters on the mixed pair, so the rows name a producer and a consumer
+rather than a symmetric "↔".
+
+| producer → consumer | carries bytes | never |
 |---|---|---|
-| native ↔ native | iroh QUIC, else iroh relay | **WebRTC** |
-| native ↔ web | WebRTC, else iroh relay | — |
-| web ↔ web | WebRTC, else iroh relay | — |
+| native → native | iroh QUIC, else iroh relay | **WebRTC** |
+| native → web | WebRTC, else iroh relay | — |
+| web → native | iroh relay, unless forced onto WebRTC | — |
+| web → web | WebRTC, else iroh relay | — |
+| native → node | iroh relay | — |
+
+A browser consuming a native producer prefers the data channel. The reverse is
+not its mirror image: a tab is publicly reachable or not reachable at all — no
+mDNS, no DHT, no loopback peers — so its ticket advertises a relay URL, and a
+native consumer dials that unless `--transport webrtc` takes the alternatives
+away. The node receiver pins the relay outright.
 
 WebRTC exists because a browser has no UDP socket and cannot speak QUIC
 directly. That is the whole of its justification, so it never carries bytes
@@ -138,14 +149,25 @@ bun install && bun run build
 ```
 
 `packages/` is the JavaScript half — a Bun workspace beside the `crates/` cargo
-one, with the same flat shape. `agent-share-app` is the bundled browser entry
-point, over `agent-share-ui`, over `agent-share-core`, over `agent-share-wasm`.
-`agent-share-node` is the `npx agent-share <ticket>` receiver; it is the one
-member that gets published, so it alone is not `private`, and its directory name
-carries the `agent-share-` prefix its npm name (`agent-share`) does not. The six
-`visage-*` and `moonspace-*` members are vendored — see `docs/vendoring.md`.
+one, with the same flat shape. `agent-share-web` is the whole browser half in one
+package, over `agent-share-wasm`: the share logic under `src/lib/`, the UI kit
+under `src/components/`, and the routes, service worker and lab that bundle them.
+The logic is not a package of its own because almost none of it could be shared
+anyway — it reaches for `showDirectoryPicker`, `navigator.serviceWorker` and the
+OPFS. The exception is the stream protocol, which `scripts/serve.ts` imports by
+path so the static host's 404 rule cannot drift from the service worker's URL
+prefix. `agent-share-node` is the
+`npx agent-share <ticket>` receiver; its directory name carries the
+`agent-share-` prefix its npm name (`agent-share`) does not. The six `visage-*`
+and `moonspace-*` members are vendored — see `docs/vendoring.md`.
+
 Browser and receiver consume the same `.wasm`; only the wasm-bindgen glue
-differs.
+differs, and `scripts/build-wasm.ts` writes both layers into
+`agent-share-wasm` — the browser's ES-module glue into `src/glue/`, the
+receiver's CommonJS glue into `node/` beside the binary it reads at import time.
+So `agent-share-node` imports `agent-share-wasm/node` by name rather than
+reaching into a build directory, and those two are the members that get
+published: the receiver, and the wasm package it depends on.
 
 `bun run build` builds that wasm too, through `scripts/build-wasm.ts` — so
 it needs the `wasm32-unknown-unknown` target, the `wasm-bindgen` CLI, and a

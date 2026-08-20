@@ -17,6 +17,7 @@
 //! **skipped cell naming the reason**, never a quiet pass, which is the rule
 //! the bench harness already follows.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -25,7 +26,8 @@ use xshell::{Shell, cmd};
 
 use crate::TaskOutcome;
 use crate::bench::browser::{
-    Browser, evaluate, evaluate_in, js_string, run_browse, start_dev_server,
+    Browser, await_window, clear_cache, evaluate, evaluate_in, js_string, run_browse,
+    start_dev_server,
 };
 use crate::bench::proc::{Proc, Res, TempDir, run_capture, spawn_piped};
 use crate::bench::reap;
@@ -57,8 +59,62 @@ enum Verdict {
 
 #[derive(Debug)]
 struct Outcome {
-    cell: &'static str,
+    cell: &'static Cell,
     verdict: Verdict,
+}
+
+/// Which implementation is on each end of a row.
+///
+/// The three are not interchangeable: only `Native` can mount, only `Native`
+/// can produce from a real folder, and `Node` is receive-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Peer {
+    Native,
+    Web,
+    Node,
+}
+
+impl Peer {
+    const ALL: [Self; 3] = [Self::Native, Self::Web, Self::Node];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Web => "web",
+            Self::Node => "node",
+        }
+    }
+}
+
+/// Which lane carries the bytes, in the sense `README.md`'s transport table
+/// means it.
+#[derive(Debug, Clone, Copy)]
+enum Transport {
+    /// iroh QUIC, falling back to the iroh relay. The native↔native default.
+    Quic,
+    /// The iroh relay, pinned — or the only lane the end in question has.
+    Relay,
+    /// The WebRTC data channel, pinned. A native consumer reaches it only
+    /// under `--transport webrtc`.
+    WebRtc,
+    /// The browser default: WebRTC preferred, relay fallback.
+    Dynamic,
+    /// No dial happens. Not an absence of information — these rows exist to
+    /// prove a refusal is ruled locally, so the lane being unused is the
+    /// assertion.
+    None,
+}
+
+impl Transport {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Quic => "quic",
+            Self::Relay => "relay",
+            Self::WebRtc => "webrtc",
+            Self::Dynamic => "dynamic",
+            Self::None => "none",
+        }
+    }
 }
 
 /// What every cell needs: the built binary, the dev server, the browser folder.
@@ -69,9 +125,18 @@ struct Ctx<'a> {
 }
 
 /// One row of the matrix.
+#[derive(Debug)]
 struct Cell {
     name: &'static str,
     run: fn(&Ctx<'_>) -> Res<()>,
+    /// Which end produces the share, which end reads it, and over what.
+    ///
+    /// Recorded rather than inferred: the pairing a row exercises is otherwise
+    /// only visible by reading its body, which is how a suite ends up believing
+    /// it covers a lane it never dials.
+    producer: Peer,
+    consumer: Peer,
+    transport: Transport,
     /// What this row needs beyond the suite-wide prerequisites, if anything.
     ///
     /// `Some(reason)` skips the row *with that reason* instead of failing it.
@@ -90,151 +155,249 @@ const CELLS: &[Cell] = &[
     Cell {
         name: "web-list",
         run: cell_list,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "web-download-single",
         run: cell_download_single,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "web-download-zip",
         run: cell_download_zip,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "web-download-dismissed",
         run: cell_download_dismissed,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "web-reconnect",
         run: cell_reconnect,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "web-producer-gone",
         run: cell_producer_gone,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "web-live-update",
         run: cell_live_update,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "web-live-delete",
         run: cell_live_delete,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "web-seeder-propagation",
         run: cell_seeder_propagation,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "web-seeder-propagation-two-tabs",
         run: cell_seeder_propagation_two_tabs,
+        producer: Peer::Web,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "web-transport-webrtc",
         run: cell_transport_webrtc,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::WebRtc,
         precheck: None,
     },
     Cell {
         name: "web-transport-relay",
         run: cell_transport_relay,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Relay,
         precheck: None,
     },
     Cell {
         name: "web-password",
         run: cell_password,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "web-password-no-producer",
         run: cell_password_no_producer,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::None,
         precheck: None,
     },
     Cell {
         name: "password-native-live-right",
         run: cell_password_native_live_right,
+        producer: Peer::Native,
+        consumer: Peer::Native,
+        transport: Transport::Quic,
         precheck: None,
     },
     Cell {
         name: "password-native-live-wrong",
         run: cell_password_native_live_wrong,
+        producer: Peer::Native,
+        consumer: Peer::Native,
+        transport: Transport::None,
         precheck: None,
     },
     Cell {
         name: "password-native-dead-wrong",
         run: cell_password_native_dead_wrong,
+        producer: Peer::Native,
+        consumer: Peer::Native,
+        transport: Transport::None,
         precheck: None,
     },
     Cell {
         name: "password-native-dead-right",
         run: cell_password_native_dead_right,
+        producer: Peer::Native,
+        consumer: Peer::Native,
+        transport: Transport::Quic,
         precheck: None,
     },
     Cell {
         name: "password-native-absent",
         run: cell_password_native_absent,
+        producer: Peer::Native,
+        consumer: Peer::Native,
+        transport: Transport::None,
         precheck: None,
     },
     Cell {
         name: "password-native-spurious",
         run: cell_password_native_spurious,
+        producer: Peer::Native,
+        consumer: Peer::Native,
+        transport: Transport::None,
         precheck: None,
     },
     Cell {
         name: "password-native-mirror-reserve",
         run: cell_password_native_mirror_reserve,
+        producer: Peer::Native,
+        consumer: Peer::Native,
+        transport: Transport::Quic,
         precheck: None,
     },
     Cell {
         name: "password-legacy-ticket",
         run: cell_password_legacy_ticket,
+        producer: Peer::Native,
+        consumer: Peer::Native,
+        transport: Transport::Quic,
         precheck: None,
     },
     Cell {
         name: "password-web-dead-right",
         run: cell_password_web_dead_right,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::None,
         precheck: None,
     },
     Cell {
         name: "password-web-persist",
         run: cell_password_web_persist,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: None,
     },
     Cell {
         name: "password-node-cli",
         run: cell_password_node_cli,
+        producer: Peer::Native,
+        consumer: Peer::Node,
+        transport: Transport::Relay,
         precheck: Some(node_datachannel_missing),
     },
     Cell {
         name: "password-web-producer",
         run: cell_password_web_producer,
+        producer: Peer::Web,
+        consumer: Peer::Native,
+        transport: Transport::Relay,
         precheck: None,
     },
     Cell {
         name: "password-web-producer-snapshot",
         run: cell_password_web_producer_snapshot,
+        producer: Peer::Web,
+        consumer: Peer::Native,
+        transport: Transport::Relay,
+        precheck: None,
+    },
+    Cell {
+        name: "web-producer-webrtc",
+        run: cell_web_producer_webrtc,
+        producer: Peer::Web,
+        consumer: Peer::Native,
+        transport: Transport::WebRtc,
         precheck: None,
     },
     Cell {
         name: "webmcp-read",
         run: cell_webmcp_read,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: Some(webmcp_unavailable),
     },
     Cell {
         name: "webmcp-failures",
         run: cell_webmcp_failures,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: Some(webmcp_unavailable),
     },
     Cell {
         name: "webmcp-ui",
         run: cell_webmcp_ui,
+        producer: Peer::Native,
+        consumer: Peer::Web,
+        transport: Transport::Dynamic,
         precheck: Some(webmcp_unavailable),
     },
 ];
@@ -249,7 +412,7 @@ pub(crate) fn run(sh: &Shell, cells: &str) -> TaskOutcome {
             &selected
                 .iter()
                 .map(|cell| Outcome {
-                    cell: cell.name,
+                    cell,
                     verdict: Verdict::Skip(reason.clone()),
                 })
                 .collect::<Vec<_>>(),
@@ -274,13 +437,13 @@ pub(crate) fn run(sh: &Shell, cells: &str) -> TaskOutcome {
             if let Some(reason) = cell.precheck.and_then(|precheck| precheck()) {
                 output::status("Skipping", cell.name);
                 return Outcome {
-                    cell: cell.name,
+                    cell,
                     verdict: Verdict::Skip(reason),
                 };
             }
             output::status("Running", cell.name);
             Outcome {
-                cell: cell.name,
+                cell,
                 verdict: match (cell.run)(&ctx) {
                     Ok(()) => Verdict::Pass,
                     Err(error) => Verdict::Fail(error.to_string()),
@@ -397,20 +560,91 @@ fn report(outcomes: &[Outcome]) -> TaskOutcome {
     let mut failed = 0;
     for outcome in outcomes {
         match &outcome.verdict {
-            Verdict::Pass => output::status("Passed", outcome.cell),
+            Verdict::Pass => output::status("Passed", outcome.cell.name),
             Verdict::Skip(reason) => {
-                output::status_warn("Skipped", &format!("{}: {reason}", outcome.cell));
+                output::status_warn("Skipped", &format!("{}: {reason}", outcome.cell.name));
             }
             Verdict::Fail(reason) => {
                 failed += 1;
-                output::error(&format!("{}: {reason}", outcome.cell));
+                output::error(&format!("{}: {reason}", outcome.cell.name));
             }
         }
     }
+    matrix(outcomes);
     if failed > 0 {
         return Err(format!("{failed} of {} e2e cells failed", outcomes.len()).into());
     }
     Ok(())
+}
+
+/// Print the matrix: every selected row, then the pairings they add up to.
+///
+/// On stdout, unlike the per-cell status lines above — this is the part worth
+/// redirecting into `docs/testing.md`, and it is markdown so it pastes there
+/// unchanged.
+///
+/// Every selected cell appears, whatever its verdict. A run that quietly
+/// dropped its skips would report a matrix that reads as covered when it is
+/// not, which is the failure the counts below exist to make visible.
+fn matrix(outcomes: &[Outcome]) {
+    if outcomes.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("## Coverage matrix");
+    println!();
+    println!("| cell | producer | consumer | transport | verdict |");
+    println!("|---|---|---|---|---|");
+    for outcome in outcomes {
+        let (verdict, note) = match &outcome.verdict {
+            Verdict::Pass => ("pass", String::new()),
+            Verdict::Skip(reason) => ("skip", format!(" — {}", first_line(reason))),
+            Verdict::Fail(reason) => ("**fail**", format!(" — {}", first_line(reason))),
+        };
+        println!(
+            "| `{}` | {} | {} | {} | {verdict}{note} |",
+            outcome.cell.name,
+            outcome.cell.producer.label(),
+            outcome.cell.consumer.label(),
+            outcome.cell.transport.label(),
+        );
+    }
+
+    // The pairing grid. A square reads `passed/total`, and an empty one is a
+    // pairing nothing selected here covers — stated as `—` rather than left
+    // blank, because a blank cell in a coverage table reads as a zero someone
+    // already thought about.
+    println!();
+    println!("| producer \\ consumer | native | web | node |");
+    println!("|---|---|---|---|");
+    for producer in Peer::ALL {
+        let mut row = format!("| **{}** |", producer.label());
+        for consumer in Peer::ALL {
+            let pairing: Vec<&Outcome> = outcomes
+                .iter()
+                .filter(|outcome| {
+                    outcome.cell.producer == producer && outcome.cell.consumer == consumer
+                })
+                .collect();
+            if pairing.is_empty() {
+                row.push_str(" — |");
+                continue;
+            }
+            let passed = pairing
+                .iter()
+                .filter(|outcome| matches!(outcome.verdict, Verdict::Pass))
+                .count();
+            let _ = write!(row, " {passed}/{} |", pairing.len());
+        }
+        println!("{row}");
+    }
+    println!();
+}
+
+/// A reason's first line, so a multi-line failure does not break the table.
+fn first_line(reason: &str) -> &str {
+    reason.lines().next().unwrap_or(reason).trim()
 }
 
 // ---------------------------------------------------------------------------
@@ -509,18 +743,11 @@ impl Page {
         reap::track_browser(ctx.folder);
         let browser = Browser::new(ctx.folder.to_owned());
 
-        // `scripts/dev.ts` serves the wasm straight from the crate's dist, so a
-        // copy cached before the last `cargo task web-wasm` could survive a
-        // plain reload. Clearing is
-        // a one-shot effect that outlives the short-lived CDP session asking
-        // for it, which `setCacheDisabled` would not be.
-        run_browse(&[
-            "cdp",
-            "Network.clearBrowserCache",
-            "{}",
-            "--folder",
-            ctx.folder,
-        ])?;
+        // Before any CDP: an unready window answers neither, and the two calls
+        // below used to be the first thing aimed at it. See `await_window`.
+        await_window(ctx.folder)?;
+
+        clear_cache(ctx.folder);
         run_browse(&[
             "cdp",
             "Page.reload",
@@ -766,8 +993,22 @@ impl Attempt {
 /// no privileges, exits on its own, and exercises the same `redeem_auth` gate
 /// every consumer path goes through.
 fn mirror_attempt(ctx: &Ctx<'_>, ticket: &str, password: Option<&str>) -> Res<(Attempt, TempDir)> {
+    mirror_attempt_over(ctx, ticket, password, None)
+}
+
+/// [`mirror_attempt`], with the data path pinned.
+///
+/// `Some("webrtc")` is the only way a native consumer reaches the browser lane
+/// — it fails rather than settling elsewhere — so a row that passes with it is
+/// proof the lane carried the bytes, and needs no separate assertion.
+fn mirror_attempt_over(
+    ctx: &Ctx<'_>,
+    ticket: &str,
+    password: Option<&str>,
+    transport: Option<&str>,
+) -> Res<(Attempt, TempDir)> {
     let dest = TempDir::new("e2e-mirror")?;
-    let attempt = mirror_run(ctx, ticket, dest.path(), password)?;
+    let attempt = mirror_run(ctx, ticket, dest.path(), password, transport)?;
     Ok((attempt, dest))
 }
 
@@ -778,7 +1019,7 @@ fn mirror_attempt(ctx: &Ctx<'_>, ticket: &str, password: Option<&str>) -> Res<(A
 /// destination twice — the second run reads the sidecar and asks for the
 /// difference.
 fn mirror_into(ctx: &Ctx<'_>, ticket: &str, dest: &Path) -> Res<()> {
-    let attempt = mirror_run(ctx, ticket, dest, None)?;
+    let attempt = mirror_run(ctx, ticket, dest, None, None)?;
     if !attempt.ok {
         return Err(format!(
             "mirroring into {} failed:\n{}",
@@ -792,11 +1033,20 @@ fn mirror_into(ctx: &Ctx<'_>, ticket: &str, dest: &Path) -> Res<()> {
 
 /// The one place a `mirror` is spawned. Both callers differ only in who owns
 /// the destination and whether a failure is fatal.
-fn mirror_run(ctx: &Ctx<'_>, ticket: &str, dest: &Path, password: Option<&str>) -> Res<Attempt> {
+fn mirror_run(
+    ctx: &Ctx<'_>,
+    ticket: &str,
+    dest: &Path,
+    password: Option<&str>,
+    transport: Option<&str>,
+) -> Res<Attempt> {
     let mut cmd = Command::new(ctx.binary);
     cmd.arg("mirror").arg(ticket).arg(dest);
     if let Some(password) = password {
         cmd.args(["--password", password]);
+    }
+    if let Some(transport) = transport {
+        cmd.args(["--transport", transport]);
     }
     // A dead producer means a long discovery retry, and that wait is precisely
     // what several rows measure.
@@ -1056,15 +1306,7 @@ fn cell_password_web_persist(ctx: &Ctx<'_>) -> Res<()> {
     wait_for_listing()?;
 
     run_browse(&["cdp", "Page.reload", "{}", "--folder", ctx.folder])?;
-    run_browse(&[
-        "wait",
-        "--selector",
-        "body",
-        "--timeout",
-        "60000",
-        "--folder",
-        ctx.folder,
-    ])?;
+    await_window(ctx.folder)?;
     // Straight back to the listing. If the gate returns, the tab forgot.
     wait_for_listing()?;
     if evaluate("String(/Password required/.test(document.body.innerText))")?.trim() == "true" {
@@ -1146,7 +1388,8 @@ fn node_datachannel_missing() -> Option<String> {
         Ok(output) if output.status.success() => None,
         Ok(_) => Some(
             "node-datachannel does not load — Node has no built-in RTCPeerConnection, and \
-             the native addon is missing or not built for this Node (cd node && npm install)"
+             the native addon is missing or not built for this Node \
+             (cd packages/agent-share-node && npm install)"
                 .to_owned(),
         ),
         Err(error) => Some(format!("node is not runnable: {error}")),
@@ -1167,7 +1410,7 @@ fn cell_password_web_producer(ctx: &Ctx<'_>) -> Res<()> {
     // Stated, not inferred: a Chrome without OPFS must fail this row with the
     // reason, never pass it. The `precheck` hook cannot help — it runs before
     // any browser exists.
-    web_producer_over(ctx, "opfs", |_| {
+    web_producer_over(ctx, "opfs", None, |_| {
         let opfs = evaluate("String(typeof navigator.storage?.getDirectory === 'function')")?;
         if opfs.trim() != "true" {
             return Err(
@@ -1190,11 +1433,34 @@ fn cell_password_web_producer(ctx: &Ctx<'_>) -> Res<()> {
 /// Runs in headless Chrome like every other row, so it proves the *branch*, not
 /// Safari. It needs no OPFS, which is why it carries no precheck of its own.
 fn cell_password_web_producer_snapshot(ctx: &Ctx<'_>) -> Res<()> {
-    web_producer_over(ctx, "snapshot", |_| Ok(()))
+    web_producer_over(ctx, "snapshot", None, |_| Ok(()))
+}
+
+/// **The same pairing, forced onto the WebRTC data channel.**
+///
+/// The other two web-producer rows take the relay, because that is what a
+/// native consumer picks by default against a ticket a tab minted — a tab has
+/// no mDNS, no DHT and no loopback peers, so its ticket advertises a relay URL
+/// and the native side dials it. That leaves the lane `README.md` names for
+/// this pairing — WebRTC — never dialled by any row with a real file share.
+/// `cargo task bench`'s `browser-produce-webrtc` covers it only for the
+/// synthetic `BenchProducer`, which serves a generated stream rather than a
+/// manifest, a nested directory and a zero-byte file.
+///
+/// `--transport webrtc` is what closes that: it strips the alternatives rather
+/// than preferring the channel, and asserts the selected path afterwards, so
+/// this row passing *is* the lane assertion.
+fn cell_web_producer_webrtc(ctx: &Ctx<'_>) -> Res<()> {
+    web_producer_over(ctx, "opfs", Some("webrtc"), |_| Ok(()))
 }
 
 /// Drive `/lab`'s share panel in `mode`, then open what it serves from the CLI.
-fn web_producer_over(ctx: &Ctx<'_>, mode: &str, ready: impl Fn(&Browser) -> Res<()>) -> Res<()> {
+fn web_producer_over(
+    ctx: &Ctx<'_>,
+    mode: &str,
+    transport: Option<&str>,
+    ready: impl Fn(&Browser) -> Res<()>,
+) -> Res<()> {
     let browser = open_window(ctx, &format!("{}lab", ctx.url))?;
     ready(&browser)?;
 
@@ -1238,11 +1504,14 @@ fn web_producer_over(ctx: &Ctx<'_>, mode: &str, ready: impl Fn(&Browser) -> Res<
     wrong.says("does not open this share")?;
     wrong.faster_than(Duration::from_secs(10))?;
 
-    // And the right one reads the tree the tab is serving.
-    let (right, dest) = mirror_attempt(ctx, &ticket, Some(PASSWORD))?;
+    // And the right one reads the tree the tab is serving. With `transport`
+    // pinned this is also the lane assertion: the binary refuses to settle
+    // anywhere else, so arriving bytes are bytes that took that path.
+    let (right, dest) = mirror_attempt_over(ctx, &ticket, Some(PASSWORD), transport)?;
     if !right.ok {
         return Err(format!(
-            "the native CLI could not open a browser-produced share:\n{}",
+            "the native CLI could not open a browser-produced share{}:\n{}",
+            transport.map_or(String::new(), |lane| format!(" over {lane}")),
             right.output
         )
         .into());
@@ -1326,15 +1595,7 @@ fn open_window_in(folder: &str, target: &str) -> Res<Browser> {
     run_browse(&["launch", "--headless", folder, target])?;
     reap::track_browser(folder);
     let browser = Browser::new(folder.to_owned());
-    run_browse(&[
-        "wait",
-        "--selector",
-        "body",
-        "--timeout",
-        "60000",
-        "--folder",
-        folder,
-    ])?;
+    await_window(folder)?;
     Ok(browser)
 }
 
@@ -1853,7 +2114,7 @@ fn cell_reconnect(ctx: &Ctx<'_>) -> Res<()> {
     // `reconnecting` is rendered in exactly one place — `TechInfo`'s status —
     // because the breadcrumb deliberately never says it ("redialing is the
     // app's permanent background posture … naming it in the chrome would label
-    // the normal state of the world", `packages/agent-share-app/src/pages/files/index.tsx`). This
+    // the normal state of the world", `packages/agent-share-web/src/pages/files/index.tsx`). This
     // cell used to close the panel first and then wait for a word only the
     // panel renders.
     wait_for_true(
@@ -2026,15 +2287,7 @@ fn cell_password_no_producer(ctx: &Ctx<'_>) -> Res<()> {
     run_browse(&["launch", "--headless", ctx.folder, &target])?;
     reap::track_browser(ctx.folder);
     let _browser = Browser::new(ctx.folder.to_owned());
-    run_browse(&[
-        "wait",
-        "--selector",
-        "body",
-        "--timeout",
-        "60000",
-        "--folder",
-        ctx.folder,
-    ])?;
+    await_window(ctx.folder)?;
 
     wait_for_true(
         "/Password required/.test(document.body.innerText)",

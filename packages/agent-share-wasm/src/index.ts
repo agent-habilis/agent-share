@@ -9,12 +9,16 @@
  * The path is content-addressed and generated — see `scripts/wasm-asset.ts`
  * for why a fixed name was not survivable.
  *
- * The glue is imported from `./glue/`, a generated mirror of the
- * crate's `dist/web/`, not from `dist/` itself: the dev bundler only
- * invalidates modules inside `packages/`, so glue imported from outside it went
- * stale across `cargo task web-wasm` and met the fresh binary as
- * `LinkError: … function import requires a callable`. `wasm-asset.ts`'s
- * `syncGlue` keeps the mirror current.
+ * The glue in `./glue/` is wasm-bindgen's browser-target output, written there
+ * by `scripts/build-wasm.ts` rather than into the crate's own build directory.
+ * The dev bundler only invalidates modules inside `packages/`, so glue built
+ * outside it went stale across `cargo task web-wasm` and met the fresh binary as
+ * `LinkError: … function import requires a callable`. Building into the package
+ * puts it where the watcher already looks.
+ *
+ * The CommonJS half of the same build lands in `../node/`, which
+ * `agent-share-node` imports as `agent-share-wasm/node`. It needs no loader:
+ * that target reads its `.wasm` sibling synchronously at import time.
  */
 
 import type * as WasmExports from './glue/agent_share_wasm_client.js'

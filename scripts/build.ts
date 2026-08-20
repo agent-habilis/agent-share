@@ -11,7 +11,7 @@
 
 import { buildWasm } from './build-wasm.ts'
 import { APP_HTML, LAB_HTML, SW_ENTRY } from './entrypoints.ts'
-import { brotli, syncGlue, wasmAsset, writeWasmPath } from './wasm-asset.ts'
+import { brotli, wasmAsset, writeWasmPath } from './wasm-asset.ts'
 
 await Bun.$`rm -rf dist`
 
@@ -22,12 +22,11 @@ await Bun.$`rm -rf dist`
 // prevent.
 await buildWasm()
 
-// Before the bundle: `agent-share-wasm` imports the generated path and the
-// glue mirror, so both have to be correct on disk by the time Bun reads the
-// entrypoints.
+// Before the bundle: `agent-share-wasm` imports the generated path, so it has to
+// be correct on disk by the time Bun reads the entrypoints. The glue needs no
+// step of its own — `buildWasm()` above wrote it into the package directly.
 const asset = await wasmAsset()
 await writeWasmPath(asset)
-await syncGlue()
 
 const result = await Bun.build({
   entrypoints: [APP_HTML, LAB_HTML],
@@ -73,25 +72,23 @@ await Bun.write(`./dist${asset.path}.gz`, Bun.gzipSync(asset.bytes, { level: 9 }
 // No `<link rel="preload">` for the binary, deliberately: Safari does not
 // match an `as="fetch"` preload to the glue's later `fetch()` (measured —
 // two resource-timing entries, `link` then `fetch`), so on a cold cache it
-// downloads the binary twice. The eager `loadWasm()` in `agent-share-app`'s `main.tsx`
+// downloads the binary twice. The eager `loadWasm()` in `agent-share-web`'s `main.tsx`
 // starts the real fetch within ~25 ms of where the preload would, in every
 // browser, with nothing to mismatch.
 //
-// Bun writes chunk URLs relative to the page, but the SPA shell is served
-// for every route — under `/files/<ticket>` a `./chunk-…` resolves to
-// `/files/chunk-…` and 404s, which is a blank page. Absolute URLs cost
-// nothing and hold on any route depth. Lab keeps its `../` (it is only ever
-// served at `/lab`).
-{
-  const page = './dist/index.html'
-  const html = await Bun.file(page).text()
-  await Bun.write(
-    page,
-    html.replaceAll('src="./', 'src="/').replaceAll('href="./', 'href="/'),
-  )
-}
-
+// Bun writes chunk URLs relative to the page, and no page is served from the
+// depth its file sits at: the SPA shell answers every route, so under
+// `/files/<ticket>` a `./chunk-…` resolves to `/files/chunk-…` and 404s into a
+// blank page, and `/lab` is served a level up from `dist/lab/`. Every chunk
+// lands at the root of `dist/`, so collapsing a leading `../` run to `/` is
+// right for any page — which is why this walks the outputs rather than naming
+// one. (`publicPath: '/'` looks like the config-level answer but prepends
+// rather than replaces, leaving `/../chunk-…` for anything below the root.)
 for (const output of result.outputs) {
+  if (output.path.endsWith('.html')) {
+    const html = await Bun.file(output.path).text()
+    await Bun.write(output.path, html.replace(/(src|href)="(?:\.\.?\/)+/g, '$1="/'))
+  }
   console.log(`  ${output.path}`)
 }
 console.log(`  dist${asset.path} (+.br, +.gz)`)

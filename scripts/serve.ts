@@ -10,9 +10,9 @@
  * wrong somewhere, which is why an nginx config is not what runs in front of
  * this.
  *
- * Nothing here reads the crate's `dist/`, deliberately: `wasmAsset()` needs
- * `crates/agent-share-wasm-client/dist/web/`, which the runtime image does not
- * have. That absence is the whole reason this is separate from `start.ts`.
+ * Nothing here reads the wasm build output, deliberately: `wasmAsset()` needs
+ * `packages/agent-share-wasm/src/glue/`, which the runtime image does not have.
+ * That absence is the whole reason this is separate from `start.ts`.
  *
  * `PORT` picks the port. `DIST_DIR` overrides the directory served and is only
  * needed if this file is ever separated from its `dist/` sibling — the default
@@ -22,7 +22,7 @@
 
 import { pathToFileURL } from 'node:url'
 
-import { STREAM_PREFIX } from 'agent-share-core/stream/protocol'
+import { STREAM_PREFIX } from '../packages/agent-share-web/src/lib/stream/protocol.ts'
 
 /** The directory served. See the header. */
 export const DIST_ROOT = process.env.DIST_DIR
@@ -86,10 +86,6 @@ export function createFetch(root: URL = DIST_ROOT) {
   return async function fetch(req: Request): Promise<Response> {
     const { pathname } = new URL(req.url)
 
-    if (pathname === '/lab' || pathname === '/lab/') {
-      return new Response(file('/lab/index.html'), { headers: NO_CACHE })
-    }
-
     // Answered explicitly, matching the dev server. These URLs exist only while
     // a service worker is controlling the page, so reaching the network means
     // there is none — and the SPA fallback below would hand `index.html` to a
@@ -144,6 +140,15 @@ export function createFetch(root: URL = DIST_ROOT) {
     }
 
     if (!looksLikeAsset(pathname)) {
+      // A directory's own index before the SPA shell, the way a static host
+      // resolves one. Every page bundles to `dist/<name>/index.html` and is
+      // served at `/<name>`, so this is what answers `/lab` — as a rule rather
+      // than by name, which is what keeps a second page from needing a second
+      // branch here.
+      const index = file(`${pathname.replace(/\/$/, '')}/index.html`)
+      if (await index.exists()) {
+        return new Response(index, { headers: NO_CACHE })
+      }
       return new Response(shell, { headers: NO_CACHE })
     }
 

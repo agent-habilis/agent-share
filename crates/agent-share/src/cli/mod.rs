@@ -8,6 +8,25 @@ use anyhow::Result;
 
 use args::{Cli, MountAction, OutputFormat};
 
+/// Read the consumer's `--transport` flag.
+///
+/// Shared by the two consumer forms — the bare `agent-share <ticket> <target>`
+/// mount and `mirror` — so a spelling the mount accepts cannot be one the mirror
+/// rejects. `webrtc` is the only thing that turns the lane on; everything else
+/// either names the default or is a usage error.
+fn webrtc_only(flag: Option<&str>) -> Result<bool> {
+    match flag.map(str::trim) {
+        None | Some("") => Ok(false),
+        Some(raw) => match raw.to_ascii_lowercase().as_str() {
+            "webrtc" | "webrtc_only" | "webrtc-only" => Ok(true),
+            "dynamic" | "default" => Ok(false),
+            other => anyhow::bail!(
+                "unknown transport {other:?}; expected webrtc (or omit for the default)"
+            ),
+        },
+    }
+}
+
 pub(crate) async fn run(cli: Cli) -> Result<()> {
     let json = matches!(cli.output, OutputFormat::Json);
     match cli.action {
@@ -31,6 +50,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             ticket,
             dest,
             only,
+            transport,
             password,
             output: mirror_output,
         }) => {
@@ -38,6 +58,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
                 &ticket,
                 &dest,
                 &only,
+                webrtc_only(transport.as_deref())?,
                 password.resolve()?.as_deref(),
                 matches!(mirror_output, OutputFormat::Json),
             )
@@ -87,22 +108,12 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             "usage: agent-share <ticket> <target>, agent-share serve <dir>, or agent-share bench"
         );
     };
-    let webrtc_only = match cli.transport.as_deref().map(str::trim) {
-        None | Some("") => false,
-        Some(raw) => match raw.to_ascii_lowercase().as_str() {
-            "webrtc" | "webrtc_only" | "webrtc-only" => true,
-            "dynamic" | "default" => false,
-            other => anyhow::bail!(
-                "unknown transport {other:?}; expected webrtc (or omit for the default)"
-            ),
-        },
-    };
     crate::mount::attach(
         &ticket,
         &mountpoint,
         cli.no_mount,
         json,
-        webrtc_only,
+        webrtc_only(cli.transport.as_deref())?,
         cli.password.resolve()?.as_deref(),
     )
     .await

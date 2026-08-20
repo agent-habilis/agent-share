@@ -1,7 +1,16 @@
 /**
  * Build `crates/agent-share-wasm-client/` into the two wasm-bindgen outputs the
- * front ends consume: `dist/web/` for this app and `dist/nodejs/` for the npx
- * CLI. One `.wasm`, two glue layers.
+ * front ends consume, both of them inside `packages/agent-share-wasm/`:
+ * `src/glue/` for this app and `node/` for the npx CLI. One `.wasm`, two glue
+ * layers.
+ *
+ * They land in the package rather than in the crate's own `dist/` because both
+ * consumers need them there. The dev bundler's watcher never leaves `packages/`,
+ * so glue built outside it went stale across a rebuild and met the fresh binary
+ * as `LinkError: … function import requires a callable`; that used to be patched
+ * up by a mirror step. And `agent-share-node` imports `agent-share-wasm/node` by
+ * name, which only resolves to something a published tarball can carry if the
+ * files are in the package to begin with.
  *
  * This lives here, rather than in the task runner, so `bun run build` is
  * self-contained — the bundle's largest input used to come from a `cargo task`
@@ -13,15 +22,27 @@
  * directory rather than from the repo root.
  */
 
+import { relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { $ } from 'bun'
 
-const CRATE = new URL('../crates/agent-share-wasm-client/', import.meta.url)
+import { GLUE_DIR, NODE_GLUE_DIR } from './wasm-asset.ts'
+
+const REPO_ROOT = new URL('../', import.meta.url)
+const CRATE = new URL('crates/agent-share-wasm-client/', REPO_ROOT)
 const CRATE_DIR = fileURLToPath(CRATE)
 
 const TARGET = 'wasm32-unknown-unknown'
 const ARTIFACT = `target/${TARGET}/release/agent_share_wasm_client.wasm`
+
+/**
+ * Where each wasm-bindgen target lands, imported rather than spelled here:
+ * `wasm-asset.ts` reads the browser binary back out of the same directory, and
+ * the two must not be able to drift. Absolute, because the commands below run
+ * from the crate's directory.
+ */
+const OUT_DIRS = { web: GLUE_DIR, nodejs: NODE_GLUE_DIR } as const
 
 function fail(message: string): never {
   console.error(message)
@@ -111,7 +132,7 @@ async function ensurePrereqs(): Promise<void> {
   }
 }
 
-/** Build the binary and both glue layers. Output goes to the crate's `dist/`. */
+/** Build the binary and both glue layers. */
 export async function buildWasm(): Promise<void> {
   await ensurePrereqs()
 
@@ -127,12 +148,20 @@ export async function buildWasm(): Promise<void> {
 
   // `--target web` for the browser (ES modules, fetch-based load) and
   // `--target nodejs` for the CLI (CommonJS, fs-based). The same binary either
-  // way; only the glue differs, so they cannot drift.
-  for (const target of ['web', 'nodejs']) {
-    const bindgen = await $`wasm-bindgen --target ${target} --out-dir dist/${target} ${ARTIFACT}`
-      .cwd(CRATE_DIR)
-      .nothrow()
-      .quiet()
+  // way; only the glue differs, so they cannot drift. Concurrent because they
+  // share nothing but a read-only input, and each run is ~0.3 s.
+  const runs = await Promise.all(
+    (['web', 'nodejs'] as const).map(async (target) => {
+      const outDir = fileURLToPath(OUT_DIRS[target])
+      const bindgen = await $`wasm-bindgen --target ${target} --out-dir ${outDir} ${ARTIFACT}`
+        .cwd(CRATE_DIR)
+        .nothrow()
+        .quiet()
+      return { outDir, bindgen }
+    }),
+  )
+
+  for (const { outDir, bindgen } of runs) {
     // wasm-bindgen checks its own schema against the binary's and says so
     // exactly, which is why nothing here compares version numbers first — a CLI
     // a patch ahead of the crate is usually fine, and guessing otherwise fails
@@ -141,19 +170,20 @@ export async function buildWasm(): Promise<void> {
     if (bindgen.exitCode !== 0) {
       fail(`${bindgen.stderr.toString().trim()}\n\ntry \`${await installHint()}\``)
     }
-    console.log(`  bindgen dist/${target}`)
+    console.log(`  bindgen ${relative(fileURLToPath(REPO_ROOT), outDir)}`)
   }
 
-  // The nodejs glue is CommonJS — `require`, `__dirname` — but it lands under a
-  // repo whose root `package.json` says `"type": "module"`, and Node resolves a
-  // `.js` file's module system from the nearest package.json upwards. Nothing
-  // stood between the two once the bun workspace root moved to the repo root,
-  // so Node parsed the glue as ESM and its `${__dirname}/…_bg.wasm` read
-  // resolved against the wrong base — surfacing through the CLI's catch as "the
-  // wasm client is missing", which sends you off to rebuild a binary that is
-  // already there. This marks the generated tree for what it is.
+  // The nodejs glue is CommonJS — `require`, `__dirname` — and Node resolves a
+  // `.js` file's module system from the nearest package.json upwards. The
+  // nearest one is now `agent-share-wasm`'s, which says `"type": "module"`, so
+  // without this marker Node parses the glue as ESM and its
+  // `${__dirname}/…_bg.wasm` read resolves against the wrong base — surfacing
+  // through the CLI's catch as "the wasm client is missing", which sends you off
+  // to rebuild a binary that is already there. That happened once when the
+  // workspace root moved; the file sitting inside an ESM package now makes it
+  // certain rather than incidental.
   await Bun.write(
-    new URL('dist/nodejs/package.json', CRATE),
+    new URL('package.json', OUT_DIRS.nodejs),
     `${JSON.stringify({ type: 'commonjs' }, null, 2)}\n`,
   )
 }

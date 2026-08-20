@@ -4,10 +4,14 @@
   "description": "Receive an agent-share folder over a direct peer-to-peer connection",
   "type": "module",
   "bin": { "agent-share": "./src/cli.js" },
-  "files": ["src", "dist"],
+  "files": ["src"],
   "engines": { "node": ">=20" },
   "scripts": {
     "typecheck": "tsc --noEmit"
+  },
+  "//": "A version range rather than `workspace:*`: the range still resolves to the workspace copy here, but it is also what a published tarball needs — the `workspace:` protocol survives packing and no registry client can resolve it. Bump both packages together.",
+  "dependencies": {
+    "agent-share-wasm": "^0.1.0"
   },
   "optionalDependencies": {
     "node-datachannel": "^0.31.0"

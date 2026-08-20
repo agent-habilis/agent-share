@@ -34,11 +34,10 @@ import { stat } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import index from '../packages/agent-share-app/src/index.html'
-import lab from '../packages/agent-share-app/src/lab/index.html'
+import index from '../packages/agent-share-web/src/pages/index.html'
+import lab from '../packages/agent-share-web/src/pages/lab/index.html'
 import { SW_ENTRY } from './entrypoints.ts'
 import {
-  syncGlue,
   tryWasmAsset,
   wasmResponse,
   withGzip,
@@ -92,10 +91,7 @@ async function writeCurrentPath(): Promise<WasmAsset | null> {
 // Before binding: `tasks/src/bench/browser.rs` reads the generated path back
 // out the moment this server reports a URL, and `agent-share-wasm` imports it.
 // Going through `writeCurrentPath` rather than a bare read leaves the cache
-// warm, so the first page load does not hash 7 MB a second time. The glue
-// mirror must be current before the first bundle for the same reason the
-// path must: `agent-share-wasm` imports both.
-await syncGlue()
+// warm, so the first page load does not hash 7 MB a second time.
 const initial = await writeCurrentPath()
 if (!initial) {
   // The same bail `wasmAsset()` makes, taken here because this is the one
@@ -175,23 +171,20 @@ const server = Bun.serve({
 // Debounced because wasm-bindgen writes in stages, and hashing a half-written
 // file would publish a path for a build that never existed.
 //
-// The sibling glue files are watched too — the LinkError this heals: the
-// glue is bundled from the `agent-share-wasm` glue mirror, and without a re-sync
-// here a rebuilt binary met glue cached at server start, failing to
-// instantiate on a binding only one side knew about.
+// Only the path is republished here. The glue beside the binary rebundles on
+// its own, because wasm-bindgen writes it inside `packages/` — see
+// `scripts/build-wasm.ts`.
 try {
   let pending: ReturnType<typeof setTimeout> | null = null
   watch(dirname(WASM_PATH), (_event, filename) => {
     // `null` filename (some platforms report only that *something* changed) is
     // taken as a maybe and re-checked.
-    if (filename && filename !== WASM_NAME && !filename.startsWith('agent_share_wasm_client.'))
-      return
+    if (filename && filename !== WASM_NAME) return
     if (pending) clearTimeout(pending)
     pending = setTimeout(() => {
       pending = null
-      void Promise.all([writeCurrentPath(), syncGlue()]).then(([asset, glueMoved]) => {
+      void writeCurrentPath().then((asset) => {
         console.log(asset ? `  wasm ${asset.name}` : '  wasm missing')
-        if (glueMoved) console.log('  glue re-synced into packages/agent-share-wasm/src/glue/')
       })
     }, 150)
   }).unref()

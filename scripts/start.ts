@@ -5,7 +5,7 @@
  * so a local run and a deployed one answer identically. What is left here is
  * the pair of checks that only mean anything in a checkout: `dist/` exists, and
  * the wasm inside it is the one the current crate build produced. Both read
- * `crates/agent-share-wasm-client/dist/`, which the image does not carry — that
+ * `packages/agent-share-wasm/src/glue/`, which the image does not carry — that
  * is why this is a wrapper rather than a flag.
  *
  * `PORT` picks the port, so this can run alongside `bun run dev` instead of

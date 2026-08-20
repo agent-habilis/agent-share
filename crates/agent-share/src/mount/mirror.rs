@@ -39,7 +39,7 @@ use fofoca_chunks::ChunkMap;
 use super::MountTicket;
 use super::consume::RemoteClient;
 use crate::file::human_bytes;
-use crate::lookup::{add_peer_addr, build_endpoint};
+use crate::lookup::add_peer_addr;
 
 /// One file's outcome, for the summary line.
 #[derive(Default)]
@@ -139,6 +139,7 @@ pub(crate) async fn mirror(
     ticket: &str,
     dest: &Path,
     only: &[String],
+    webrtc_only: bool,
     password: Option<&str>,
     json: bool,
 ) -> Result<()> {
@@ -157,9 +158,14 @@ pub(crate) async fn mirror(
     // The creator's public key, so the copy names the same author. Public: this
     // is what a copy is *given*, unlike the key that would let it publish.
     let author = ticket.author;
-    let endpoint = build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false).await?;
+    // The same endpoint the mount form builds, for the same reason: it carries
+    // the WebRTC handle, without which `--transport webrtc` has no lane to be
+    // forced onto.
+    let (endpoint, webrtc) = super::consume::consumer_endpoint(&ticket, webrtc_only).await?;
     add_peer_addr(&endpoint, ticket.addr.clone())?;
-    let client = RemoteClient::new(endpoint.clone(), ticket, auth);
+    let client = RemoteClient::new(endpoint.clone(), ticket, auth)
+        .with_webrtc(webrtc.clone())
+        .webrtc_only(webrtc_only);
 
     // Whatever happens below, close the endpoint. Dropping it instead aborts
     // ungracefully and prints an iroh error over the top of ours, which buries

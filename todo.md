@@ -243,7 +243,7 @@ the roster forever — 100 churned consumers read as "(100 reading)".
 
 ## Nothing observably breaks when the zip entries are built eagerly
 
-`packages/agent-share-core/src/download/index.ts` builds its ZIP entries from a generator, and the comment
+`packages/agent-share-web/src/lib/download/index.ts` builds its ZIP entries from a generator, and the comment
 there says an eager `.map()` "would have stalled on the first tick" past the
 producer's 100-stream ceiling. `cargo task e2e` says otherwise: reverting to
 `.map()` passed `web-download-zip` at 301 files and again at 1201. quinn queues
@@ -278,10 +278,11 @@ regardless of timer drift.
   `LinkError: … __wbg_connectionState… function import requires a callable`
   (caught 2026-08-07 while validating the channel-health watcher; the error
   names whichever binding only one side knows about, not the real problem).
-  The glue is now mirrored into `src/wasm-glue/` (generated, gitignored) by
-  `scripts/wasm-asset.ts:syncGlue`, `src/wasm.ts` imports the mirror, and
-  `dev.ts`'s rebuild watcher re-syncs it beside the wasm re-hash — a rebuild
-  heals the whole pair without a server restart.
+  Fixed first by mirroring the glue into the package; since superseded by
+  `scripts/build-wasm.ts` pointing wasm-bindgen at
+  `packages/agent-share-wasm/src/glue/` directly (generated, gitignored), so the
+  glue is built where the watcher already looks and there is no mirror to keep
+  current — a rebuild heals the pair without a server restart.
 
 - **`cargo task ci` being red at HEAD**, in two independent places, both
   pre-existing rather than regressions. The clippy errors in

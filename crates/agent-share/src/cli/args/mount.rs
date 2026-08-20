@@ -65,6 +65,14 @@ pub(crate) enum MountAction {
         /// the origin says, with the files it does not hold answered as absent.
         #[arg(long = "only", value_name = "PATH")]
         only: Vec<String>,
+        /// Data path for the copy: `webrtc` forces the data channel and fails
+        /// if the connection settles anywhere else. Omit for the default, which
+        /// prefers iroh's own paths. Same flag, same meaning, as on the mount
+        /// form — it exists here so the browser lane can be exercised against a
+        /// share a tab is producing, which is the one pairing that otherwise
+        /// only ever takes the relay.
+        #[arg(long)]
+        transport: Option<String>,
         /// Password for a protected share. The copy records what it needs to
         /// re-serve, so `agent-share serve` on the result asks for nothing.
         #[command(flatten)]

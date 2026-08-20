@@ -9,7 +9,7 @@ binary; `npx agent-share` needs the `node-datachannel` addon, because Node has
 no `RTCPeerConnection`. A browser already has WebRTC, a sandbox and storage. The
 tab becomes the runtime.
 
-Registration lives in `packages/agent-share-core/src/agentTools/`. It is feature-detected, so on a
+Registration lives in `packages/agent-share-web/src/lib/agentTools/`. It is feature-detected, so on a
 browser without WebMCP — which today is every browser by default — it reads one
 property and does nothing.
 
@@ -148,7 +148,7 @@ first time any tool is called and stays green; while a call is running, or for
 ten seconds after one, its characters shimmer between full and dimmed green.
 Hovering gives the sentence — which tool, how many times, how long ago — and
 before anything has happened it says how many tools are published, or that this
-browser has no WebMCP at all. See `packages/agent-share-ui/src/Brand`.
+browser has no WebMCP at all. See `packages/agent-share-web/src/components/Brand`.
 
 The wording is careful, because **the thing you would want to show cannot be
 observed**. WebMCP lets a page publish tools; it never tells the page that

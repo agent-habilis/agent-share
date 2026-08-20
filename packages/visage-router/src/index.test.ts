@@ -1,4 +1,4 @@
-import { test, expect, beforeEach } from 'bun:test'
+import { test, expect, afterEach, beforeEach } from 'bun:test'
 import { component, disposable, flushSync, render, signal, tags } from 'visage-dom'
 import type { Child } from 'visage-dom'
 import {
@@ -18,10 +18,25 @@ const { div, span, button, ul, li } = tags
 
 let host: HTMLElement
 
+/**
+ * Every router mounted by a test, so it can be torn down when the test ends.
+ *
+ * Clearing `document.body` is not enough: it detaches the DOM but leaves the
+ * render root live, so a route's async generator keeps running into whichever
+ * test comes next. That is cross-test contamination, and it was measurable —
+ * `a revisited lazy route…` failed about one run in eight under load, throwing
+ * a "resolved to nothing" error that belongs to a *later* test's route.
+ */
+const mounted: Array<() => void> = []
+
 beforeEach(() => {
   document.body.innerHTML = ''
   host = document.createElement('div')
   document.body.appendChild(host)
+})
+
+afterEach(() => {
+  while (mounted.length > 0) mounted.pop()?.()
 })
 
 const tick = (ms = 0): Promise<void> =>
@@ -41,7 +56,9 @@ function mount(
   })
   const root = render(App(), host)
   flushSync()
-  return { history, unmount: () => root.unmount() }
+  const unmount = () => root.unmount()
+  mounted.push(unmount)
+  return { history, unmount }
 }
 
 /** Navigate and settle, so assertions read against the committed DOM. */

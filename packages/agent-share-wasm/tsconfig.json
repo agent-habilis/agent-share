@@ -1,6 +1,8 @@
-// `path.ts` and `glue/` are generated into `src/` by `scripts/wasm-asset.ts`,
-// so a clean checkout has to run `bun scripts/gen-wasm-path.ts` before this
-// program resolves. The root `typecheck` script does exactly that first.
+// Both of this program's inputs under `src/` are generated, from two different
+// places: `path.ts` by `scripts/wasm-asset.ts` (which the root `typecheck`
+// script runs first, via `gen-wasm-path.ts`), and `glue/` by wasm-bindgen
+// through `scripts/build-wasm.ts`. Only the first is automatic, so a clean
+// checkout has to run `cargo task web-wasm` before this resolves.
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "types": [], "exactOptionalPropertyTypes": false },

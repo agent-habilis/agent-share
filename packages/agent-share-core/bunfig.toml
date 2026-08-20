@@ -1,4 +1,0 @@
-# Bun does not walk up for a bunfig, so `cd packages/agent-share-core && bun test`
-# would otherwise run with no DOM registered. The root run picks up the root one.
-[test]
-preload = ["../../scripts/test-setup.ts"]

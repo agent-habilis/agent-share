@@ -38,8 +38,11 @@ use row::{BenchReport, Provenance, Report, Row, SPREAD_WARN_PCT};
 const LOOPBACK_SWARM_ID: &str = "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2Msw3sco";
 
 /// The built artifact the browser leg serves, and the size finding #4 tracks.
+/// `scripts/build-wasm.ts` writes wasm-bindgen's output into the package that
+/// consumes it, so this is where the browser target lands rather than the
+/// crate's own `dist/`.
 pub(crate) const WASM_ARTIFACT: &str =
-    "crates/agent-share-wasm-client/dist/web/agent_share_wasm_client_bg.wasm";
+    "packages/agent-share-wasm/src/glue/agent_share_wasm_client_bg.wasm";
 
 /// How long to wait for a producer to print its ticket.
 const TICKET_TIMEOUT: Duration = Duration::from_mins(1);

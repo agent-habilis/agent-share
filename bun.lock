@@ -7,29 +7,8 @@
       "devDependencies": {
         "@happy-dom/global-registrator": "^20.11.1",
         "@types/bun": "^1.3.14",
-        "agent-share-core": "workspace:*",
         "portless": "^0.15.5",
         "typescript": "^7.0.2",
-      },
-    },
-    "packages/agent-share-app": {
-      "name": "agent-share-app",
-      "version": "0.0.0",
-      "dependencies": {
-        "agent-share-core": "workspace:*",
-        "agent-share-ui": "workspace:*",
-        "agent-share-wasm": "workspace:*",
-        "moonspace-dom": "workspace:*",
-        "visage-dom": "workspace:*",
-        "visage-router": "workspace:*",
-      },
-    },
-    "packages/agent-share-core": {
-      "name": "agent-share-core",
-      "version": "0.0.0",
-      "dependencies": {
-        "agent-share-wasm": "workspace:*",
-        "client-zip": "^2.4.5",
       },
     },
     "packages/agent-share-node": {
@@ -38,6 +17,9 @@
       "bin": {
         "agent-share": "./src/cli.js",
       },
+      "dependencies": {
+        "agent-share-wasm": "workspace:*",
+      },
       "devDependencies": {
         "@types/node": "^22.0.0",
       },
@@ -45,22 +27,22 @@
         "node-datachannel": "^0.31.0",
       },
     },
-    "packages/agent-share-ui": {
-      "name": "agent-share-ui",
+    "packages/agent-share-wasm": {
+      "name": "agent-share-wasm",
+      "version": "0.1.0",
+    },
+    "packages/agent-share-web": {
+      "name": "agent-share-web",
       "version": "0.0.0",
       "dependencies": {
-        "agent-share-core": "workspace:*",
         "agent-share-wasm": "workspace:*",
+        "client-zip": "^2.4.5",
         "moonspace": "workspace:*",
         "moonspace-dom": "workspace:*",
         "visage-dom": "workspace:*",
         "visage-router": "workspace:*",
         "visage-style": "workspace:*",
       },
-    },
-    "packages/agent-share-wasm": {
-      "name": "agent-share-wasm",
-      "version": "0.0.0",
     },
     "packages/moonspace": {
       "name": "moonspace",
@@ -167,13 +149,9 @@
 
     "agent-share": ["agent-share@workspace:packages/agent-share-node"],
 
-    "agent-share-app": ["agent-share-app@workspace:packages/agent-share-app"],
-
-    "agent-share-core": ["agent-share-core@workspace:packages/agent-share-core"],
-
-    "agent-share-ui": ["agent-share-ui@workspace:packages/agent-share-ui"],
-
     "agent-share-wasm": ["agent-share-wasm@workspace:packages/agent-share-wasm"],
+
+    "agent-share-web": ["agent-share-web@workspace:packages/agent-share-web"],
 
     "base64-js": ["base64-js@1.5.1", "", {}, "sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA=="],
 

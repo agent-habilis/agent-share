@@ -37,17 +37,28 @@
 /** The repo root, so paths below read as they do from a shell there. */
 const REPO_ROOT = new URL('../', import.meta.url)
 
-/** Where `cargo task web-wasm` leaves the binary, relative to the repo root. */
-const WASM_SOURCE =
-  'crates/agent-share-wasm-client/dist/web/agent_share_wasm_client_bg.wasm'
+/**
+ * Where each wasm-bindgen target lands, spelled once for the script that writes
+ * them and the ones that read them back.
+ *
+ * `build-wasm.ts` points wasm-bindgen at these; this module hashes the browser
+ * binary out of {@link GLUE_DIR}. Split across two files, moving the output
+ * would leave a build that succeeds and a `wasmAsset()` that then says "run
+ * `cargo task web-wasm`" about the build that just ran — and `dev.ts`, which
+ * derives its watch directory from {@link WASM_FILE}, would quietly stop
+ * hot-reloading.
+ */
+export const GLUE_DIR = new URL('packages/agent-share-wasm/src/glue/', REPO_ROOT)
+export const NODE_GLUE_DIR = new URL('packages/agent-share-wasm/node/', REPO_ROOT)
 
 /**
- * The binary, resolved. Exported already-resolved rather than as a relative
- * string: the string only means anything against the repo root, and a caller
- * that re-resolves it against its own module URL silently addresses a path that
- * never exists — which reads as "wasm missing" rather than as a bad base.
+ * The browser binary, resolved. Exported already-resolved rather than as a
+ * relative string: the string only means anything against the repo root, and a
+ * caller that re-resolves it against its own module URL silently addresses a
+ * path that never exists — which reads as "wasm missing" rather than as a bad
+ * base.
  */
-export const WASM_FILE = new URL(WASM_SOURCE, REPO_ROOT)
+export const WASM_FILE = new URL('agent_share_wasm_client_bg.wasm', GLUE_DIR)
 
 /**
  * Module holding the generated path, imported by `agent-share-wasm`'s
@@ -56,7 +67,7 @@ export const WASM_FILE = new URL(WASM_SOURCE, REPO_ROOT)
 const GENERATED = new URL('packages/agent-share-wasm/src/path.ts', REPO_ROOT)
 
 /** URL directory the binary is served from. See the header. */
-export const WASM_DIR = '/wasm'
+const WASM_DIR = '/wasm'
 
 export interface WasmAsset {
   bytes: Uint8Array
@@ -168,52 +179,6 @@ export function wasmResponse(
     headers['content-encoding'] = 'gzip'
   }
   return new Response(body as unknown as BodyInit, { headers })
-}
-
-/** The glue files wasm-bindgen leaves beside the binary. The `.d.ts` rides
- * along so the type-only import in `agent-share-wasm` resolves against the same
- * mirror the runtime import uses. */
-const GLUE_SOURCES = ['agent_share_wasm_client.js', 'agent_share_wasm_client.d.ts'] as const
-
-/** Where the glue lands inside `agent-share-wasm` — generated, gitignored. */
-const GLUE_DIR = new URL('packages/agent-share-wasm/src/glue/', REPO_ROOT)
-
-/** The directory the glue is mirrored from. */
-const DIST_DIR = new URL('./', WASM_FILE)
-
-/**
- * Mirror the JS glue into the package, if it changed. Returns whether it wrote.
- *
- * The binary heals itself through the content-addressed URL, but the glue
- * used to be imported straight out of the crate's `dist/` — which sits outside
- * `packages/`, where the dev bundler's watcher never looks. `cargo task
- * web-wasm` mid-session therefore produced a page whose *wasm* was fresh and
- * whose *glue* was whatever the bundler cached at server start; the mismatch
- * surfaces as `LinkError: … function import requires a callable` naming a
- * binding only one side knows about. Mirroring into the package puts the glue
- * where the watcher already is, the same move `writeWasmPath` makes for the
- * path. Content-guarded for the same reason: an unconditional write would
- * rebundle on every start.
- */
-export async function syncGlue(): Promise<boolean> {
-  let wrote = false
-  for (const name of GLUE_SOURCES) {
-    const source = Bun.file(new URL(name, DIST_DIR))
-    let text: string
-    try {
-      if (!(await source.exists())) continue
-      text = await source.text()
-    } catch {
-      // Mid-rebuild, like the binary: wasm-bindgen replaces these files in
-      // stages, and a half-written glue must not take the mirror down.
-      continue
-    }
-    const target = Bun.file(new URL(name, GLUE_DIR))
-    if ((await target.exists()) && (await target.text()) === text) continue
-    await Bun.write(new URL(name, GLUE_DIR), text)
-    wrote = true
-  }
-  return wrote
 }
 
 /**

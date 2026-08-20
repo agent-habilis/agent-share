@@ -2,7 +2,7 @@
 
 Six of the members of `packages/` are copies of upstream libraries, not code
 written here. Nothing in the directory layout says so — they sit beside
-`agent-share-core` and the rest as equals — so this file is the list, and each
+`agent-share-web` and the rest as equals — so this file is the list, and each
 one's `package.json` carries a `description` pointing back at it.
 
 They were copied from the two visage-ui repos on 2026-08-06 (working trees, not
@@ -35,7 +35,14 @@ Re-apply these when re-vendoring:
    container instead of a fixed cell width), plus test.
 6. `moonspace-dom/src/components/MiddleTruncate/MiddleTruncate.tsx` —
    migrated to the `this`-based component context (upstream had not yet).
-7. `moonspace-dom/src/components/Button/` — forked back to the boxed
+7. `visage-router/src/index.test.ts` — routers mounted by a test are torn
+   down in an `afterEach`. Clearing `document.body` leaves the render root
+   live, so a route's async generator runs on into the next test; measured,
+   `a revisited lazy route…` failed ~3 runs in 8 under CPU saturation and ~1
+   in 8 without it. The teardown takes that to ~1 in 12, so it is an
+   improvement rather than a cure — see the feedback note in
+   `~/Notes/projects/agent-share/feedback/`.
+8. `moonspace-dom/src/components/Button/` — forked back to the boxed
    presentation the app shipped with before the re-vendor (one-row chrome:
    1ch padding + inset transparent outline, per-variant fills, lowercase
    labels, fill-step hover, focus recolours the outline), replacing
@@ -53,7 +60,8 @@ Re-apply these when re-vendoring:
   ignores `extends` for any tsconfig it reads through a `node_modules` symlink,
   so a package whose non-test `.tsx` is bundled that way has to state those two
   options itself or compile against `react/jsx-dev-runtime` and fail to
-  resolve. `packages/agent-share-ui` carries the same pair for the same reason.
+  resolve. `moonspace-dom` is the only member in that position — the first-party
+  `.tsx` all lives in `agent-share-web`, which the bundler reaches by real path.
 - Per-package `bunfig.toml` files preload `../../scripts/test-setup.ts`, which
   is `scripts/test-setup.ts` — upstream's, plus a `beforeEach` that resets the
   happy-dom URL. The whole run shares one document and `visage-router`'s link

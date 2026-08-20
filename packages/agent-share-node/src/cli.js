@@ -70,18 +70,17 @@ async function installWebRtc() {
   }
 }
 
-/** Load the wasm client built by `cargo task web-wasm`. */
+/**
+ * Load the wasm client built by `cargo task web-wasm`.
+ *
+ * A package name rather than a path: it resolves through `node_modules` from a
+ * checkout and from an installed tarball alike, so there is one spelling rather
+ * than one per world. The catch turns a checkout that never built the wasm into
+ * an instruction rather than a bare module-not-found.
+ */
 async function loadClient() {
-  // Three levels up: `packages/agent-share-node/src/` → the repo root. Only
-  // resolvable from a checkout — a published tarball carries no `crates/` — and
-  // the catch below is what turns that into the "run cargo task web-wasm"
-  // message rather than a bare module-not-found.
-  const url = new URL(
-    '../../../crates/agent-share-wasm-client/dist/nodejs/agent_share_wasm_client.js',
-    import.meta.url,
-  )
   try {
-    return await import(url.href)
+    return await import('agent-share-wasm/node')
   } catch (cause) {
     throw new Error(
       'the wasm client is missing — build it with `cargo task web-wasm`',

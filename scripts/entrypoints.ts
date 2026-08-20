@@ -12,6 +12,6 @@
  * for it alone.
  */
 
-export const APP_HTML = './packages/agent-share-app/src/index.html'
-export const LAB_HTML = './packages/agent-share-app/src/lab/index.html'
-export const SW_ENTRY = './packages/agent-share-app/src/service-worker/index.ts'
+export const APP_HTML = './packages/agent-share-web/src/pages/index.html'
+export const LAB_HTML = './packages/agent-share-web/src/pages/lab/index.html'
+export const SW_ENTRY = './packages/agent-share-web/src/service-worker/index.ts'

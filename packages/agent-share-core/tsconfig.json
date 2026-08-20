@@ -1,9 +1,0 @@
-// `../../types` carries the ambient globals this package leans on: the File
-// System Access pickers missing from some lib.dom builds, and the WebMCP
-// `Document.modelContext` surface `agentTools/` feature-detects.
-{
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "types": [], "exactOptionalPropertyTypes": false },
-  "include": ["src", "../../types"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
-}

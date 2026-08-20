@@ -72,7 +72,7 @@ use fofoca::net::MAX_DIRECT_PEERS;
 ///
 /// The two strings are a vocabulary shared with the browser peer — `role` on
 /// the meta card, rendered per peer by the web Info panel (`PeerRole` in
-/// `packages/agent-share-core/src/peerCard/index.ts`). An enum rather than a `&str` argument so a typo is a
+/// `packages/agent-share-web/src/lib/peerCard/index.ts`). An enum rather than a `&str` argument so a typo is a
 /// compile error instead of a peer that renders as an unknown role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
@@ -845,6 +845,29 @@ mod tests {
     use agent_share_proto::roster::{Roster, entries_from_meta};
     use std::collections::BTreeSet;
 
+    /// How long a roster may take to converge before a test calls it stuck.
+    ///
+    /// A loopback mesh converges in well under a second; the headroom is for a
+    /// loaded machine. Every loop below breaks the moment it converges, so a
+    /// healthy run pays none of it.
+    const CONVERGE: std::time::Duration = std::time::Duration::from_mins(1);
+
+    /// Held by every test that binds real endpoints, so only one mesh is alive
+    /// at a time.
+    ///
+    /// Four tests here stand up two or three engines each, and `cargo test`
+    /// runs them alongside each other and ~125 other tests. Measured, that
+    /// oversubscription made `peers_publish_the_tree_they_are_on` — the only
+    /// three-engine row — miss its deadline about once in five workspace runs,
+    /// with the code fine either way. Raising the deadline did not help: the
+    /// failing run burned the whole 120 s, so the roster was not slow to
+    /// converge, it never converged at all while starved.
+    ///
+    /// A tokio mutex rather than a `std` one because it is held across the
+    /// awaits that drive the mesh. It also needs no poison handling: a test that
+    /// panics is already a failure, and poisoning would turn one into four.
+    static MESH_SLOT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// A meta document shaped the way `publish_card` writes one.
     fn meta_with(peers: &[(&str, serde_json::Value)]) -> serde_json::Value {
         let mut map = serde_json::Map::new();
@@ -1074,6 +1097,7 @@ mod tests {
         use rand::RngCore;
         use std::time::{Duration, Instant};
 
+        let _slot = MESH_SLOT.lock().await;
         // One secret, so both peers derive the same mesh — the invariant the
         // whole design rests on.
         let mut secret = [0u8; super::SECRET_LEN];
@@ -1090,7 +1114,7 @@ mod tests {
 
         // Poll rather than sleep a fixed time: gossip convergence is not
         // bounded, and a fixed sleep is either flaky or slow.
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + CONVERGE;
         let seen = loop {
             let producer_sees_consumer = cards_from_book(&producer.book)
                 .iter()
@@ -1153,6 +1177,7 @@ mod tests {
             }
         }
 
+        let _slot = MESH_SLOT.lock().await;
         let shared = manifest_of(&["a.txt", "b.txt"]).fingerprint();
         let diverged = manifest_of(&["a.txt", "c.txt"]).fingerprint();
         assert_ne!(
@@ -1170,7 +1195,7 @@ mod tests {
         let stale =
             join_as_on_tree(&secret, &lookups, Role::Consumer, Some(diverged.clone())).await;
 
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + CONVERGE;
         let converged = loop {
             let seen = cards_from_book(&origin.book);
             let on_our_tree = seen
@@ -1217,6 +1242,7 @@ mod tests {
         use rand::RngCore;
         use std::time::{Duration, Instant};
 
+        let _slot = MESH_SLOT.lock().await;
         let mut secret = [0u8; super::SECRET_LEN];
         rand::rng().fill_bytes(&mut secret);
         let lookups = LookupOpts::loopback();
@@ -1228,7 +1254,7 @@ mod tests {
 
         // Wait until the watcher can see the late peer at all, so the assertion
         // below is about the *tree* rather than about roster convergence.
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + CONVERGE;
         while cards_from_book(&watcher.book)
             .iter()
             .all(|card| card.role.as_deref() != Some("consumer"))
@@ -1245,7 +1271,7 @@ mod tests {
 
         late.set_tree(fingerprint.clone()).await;
 
-        let publish_deadline = Instant::now() + Duration::from_secs(30);
+        let publish_deadline = Instant::now() + CONVERGE;
         let seen = loop {
             if cards_from_book(&watcher.book)
                 .iter()
@@ -1282,6 +1308,7 @@ mod tests {
         use crate::protocol::swarm::LookupOpts;
         use rand::RngCore;
 
+        let _slot = MESH_SLOT.lock().await;
         let mut secret = [0u8; super::SECRET_LEN];
         rand::rng().fill_bytes(&mut secret);
         let mesh = join_as_on_tree(

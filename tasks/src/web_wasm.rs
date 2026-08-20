@@ -1,6 +1,6 @@
 //! Build `crates/agent-share-wasm-client/` into the two wasm-bindgen outputs
-//! the front ends consume: `dist/web/` for the browser UI and `dist/nodejs/`
-//! for the npx CLI.
+//! the front ends consume, both inside `packages/agent-share-wasm/`:
+//! `src/glue/` for the browser UI and `node/` for the npx CLI.
 //!
 //! The build itself moved to `scripts/build-wasm.ts`, so that `bun run
 //! build` is self-contained rather than depending on this task having been run
@@ -30,9 +30,6 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     let _guard = sh.push_dir(repo_root());
     cmd!(sh, "bun scripts/build-wasm.ts").run()?;
 
-    output::status(
-        "Finished",
-        "crates/agent-share-wasm-client/dist/{web,nodejs}",
-    );
+    output::status("Finished", "packages/agent-share-wasm/{src/glue,node}");
     Ok(())
 }

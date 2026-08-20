@@ -1,9 +1,9 @@
 //! The browser cells: a real headless Chrome driving `/lab`.
 //!
 //! No application code changes to make this drivable. `/lab` is click-driven,
-//! but it is built on stable committed DOM ids (`packages/agent-share-app/src/lab/consumer.tsx`,
-//! `packages/agent-share-app/src/lab/producer.tsx`) and `runBench` already ends with
-//! `log('report', report)` — and the log writer (`packages/agent-share-app/src/lab/parts.tsx`)
+//! but it is built on stable committed DOM ids (`packages/agent-share-web/src/pages/lab/consumer.tsx`,
+//! `packages/agent-share-web/src/pages/lab/producer.tsx`) and `runBench` already ends with
+//! `log('report', report)` — and the log writer (`packages/agent-share-web/src/pages/lab/parts.tsx`)
 //! `JSON.stringify`s any non-string. So the `BenchReport` is already sitting in
 //! `#rx-log` as JSON; nobody had read it.
 //!
@@ -150,26 +150,15 @@ fn prepare() -> Result<(Proc, Browser), String> {
         folder: folder.clone(),
     };
 
-    // Drop Chrome's HTTP cache, then reload.
-    //
-    // `scripts/dev.ts` serves the `.wasm` straight from the crate's dist, so a
-    // rebuilt binary Chrome has already fetched can come back from its cache —
-    // while Bun re-bundles the JS glue fresh. A stale wasm
-    // against new glue fails instantiation on a mismatched
-    // `__wbindgen_cast_*` import, which is how the opt-level canary caught it.
-    //
-    // `clearBrowserCache`, not `setCacheDisabled`: the latter is scoped to the
-    // CDP *session*, and each `agent-browse cdp` call is its own short-lived
-    // session, so it is undone before the reload in the next call. Clearing is
-    // a one-shot effect that outlives the session that asked for it.
-    run_browse(&[
-        "cdp",
-        "Network.clearBrowserCache",
-        "{}",
-        "--folder",
-        &folder,
-    ])
-    .map_err(|error| format!("clearing the browser cache failed: {error}"))?;
+    // Before any CDP, for the reason `await_window` gives.
+    await_window(&folder).map_err(|error| error.to_string())?;
+
+    // Drop Chrome's HTTP cache, then reload with `ignoreCache`. A binary Chrome
+    // already fetched could otherwise come back from cache while Bun re-bundles
+    // the glue fresh, and a stale wasm against new glue fails instantiation on a
+    // mismatched `__wbindgen_cast_*` import — how the opt-level canary caught
+    // it. See `clear_cache` for why losing that clear is survivable.
+    clear_cache(&folder);
     run_browse(&[
         "cdp",
         "Page.reload",
@@ -463,6 +452,57 @@ fn evaluate_at(expression: &str, folder: Option<&str>) -> Res<String> {
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_owned())
+}
+
+/// Drop Chrome's HTTP cache for `folder`'s window. Best-effort, on purpose.
+///
+/// A timeout here must not fail a cell. Measured across three full suites, this
+/// one CDP call timed out on 4, then 1, then more rows — always
+/// `Network.clearBrowserCache`, never anything after it — which is a flaky call,
+/// not a flaky app.
+///
+/// Losing it costs nothing that matters: the binary is served from a
+/// content-addressed URL (`…_bg.<hash>.wasm`, see `scripts/wasm-asset.ts`), so a
+/// stale entry is unreachable by construction rather than by cache-clearing —
+/// the hash moves when the bytes do. The reload that follows also passes
+/// `ignoreCache`. And if the browser really is wedged rather than slow, the very
+/// next call says so against a step whose failure means something.
+pub(crate) fn clear_cache(folder: &str) {
+    for attempt in 0..2 {
+        if run_browse(&["cdp", "Network.clearBrowserCache", "{}", "--folder", folder]).is_ok() {
+            return;
+        }
+        if attempt == 0 {
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+    output::warn(&format!(
+        "could not clear the browser cache for {folder}; continuing — the wasm URL is \
+         content-addressed, so a stale copy cannot be served under the current name"
+    ));
+}
+
+/// Block until the window for `folder` will answer, before anything drives it.
+///
+/// `launch` returning does not mean the window is drivable. That was already
+/// known for `evaluate` — an unready window answers "no window for this folder"
+/// — but the CDP calls that clear the cache and reload were being issued
+/// *before* the first readiness wait, against the same not-yet-ready window.
+/// Measured: `Network.clearBrowserCache` timed out and took 15 browser cells of
+/// one run down with it, all with the identical error. Waiting first costs a
+/// few milliseconds when the window is already up, which is the normal case.
+pub(crate) fn await_window(folder: &str) -> Res<()> {
+    run_browse(&[
+        "wait",
+        "--selector",
+        "body",
+        "--timeout",
+        "60000",
+        "--folder",
+        folder,
+    ])
+    .map_err(|error| format!("the browser window never became drivable: {error}"))?;
+    Ok(())
 }
 
 pub(crate) fn run_browse(args: &[&str]) -> Res<String> {

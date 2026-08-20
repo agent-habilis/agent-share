@@ -1,0 +1,20 @@
+{
+  "name": "agent-share-web",
+  "version": "0.0.0",
+  "description": "The browser half: share domain logic under lib/, the UI kit under components/, and the routes, service worker and lab that bundle them.",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "agent-share-wasm": "workspace:*",
+    "client-zip": "^2.4.5",
+    "moonspace": "workspace:*",
+    "moonspace-dom": "workspace:*",
+    "visage-dom": "workspace:*",
+    "visage-router": "workspace:*",
+    "visage-style": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  }
+}

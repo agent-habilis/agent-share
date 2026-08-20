@@ -1,0 +1,14 @@
+// The bundler reaches these files by real path rather than through a
+// `node_modules` symlink, so the base's `jsx` pair is inherited — see
+// `tsconfig.base.json`.
+//
+// `../../types` carries the ambient globals: the File System Access pickers
+// `lib/` and `pages/home` call, the WebMCP `Document.modelContext` surface
+// `lib/agentTools` feature-detects, and the `declare module '*.css'` that lets
+// `main.tsx` and `pages/lab` import `app.css`.
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "types": [], "exactOptionalPropertyTypes": false },
+  "include": ["src", "../../types"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
+}

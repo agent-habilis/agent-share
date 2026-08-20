@@ -338,7 +338,7 @@ pub(crate) async fn attach(
 ///
 /// # Errors
 /// The endpoint cannot bind, or the producer address is unusable.
-async fn consumer_endpoint(
+pub(super) async fn consumer_endpoint(
     ticket: &MountTicket,
     webrtc_only: bool,
 ) -> Result<(Endpoint, WebRtcHandle)> {

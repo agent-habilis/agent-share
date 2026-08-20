@@ -1,6 +1,7 @@
-// Shared compiler options for the `packages/` Bun workspace — the four
-// first-party members and the vendored `visage-*` ones. Adapted from visage's
-// tsconfig.base.json.
+// Shared compiler options for the `packages/` Bun workspace — the first-party
+// members that extend it (`agent-share-web`, `agent-share-wasm`; the node
+// receiver carries a standalone config) and the vendored `visage-*` ones.
+// Adapted from visage's tsconfig.base.json.
 //
 // Deliberately no `references` and no `composite`. Project references would
 // force `declaration: true`, and cross-package imports would then resolve
@@ -8,8 +9,8 @@
 //
 // The `jsx`/`jsxImportSource` pair below does NOT reach a package whose `.tsx`
 // the bundler loads through a `node_modules` symlink — it ignores `extends`
-// there. Such a package must repeat the two options itself; see
-// `packages/agent-share-ui/tsconfig.json` and `docs/vendoring.md`.
+// there. Such a package must repeat the two options itself; `moonspace-dom` is
+// the only one, and `docs/vendoring.md` says why it must not be normalized.
 {
   "compilerOptions": {
     "target": "esnext",
