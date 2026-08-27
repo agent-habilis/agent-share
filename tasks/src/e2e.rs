@@ -22,7 +22,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use xshell::{Shell, cmd};
+use xshell::Shell;
 
 use crate::TaskOutcome;
 use crate::bench::browser::{
@@ -419,7 +419,7 @@ pub(crate) fn run(sh: &Shell, cells: &str) -> TaskOutcome {
         );
     }
 
-    let binary = build_binary(sh)?;
+    let binary = util::build_binary(sh, util::Profile::Ci)?;
     // Starting the server also asserts it is serving the wasm that is on disk,
     // so a stale process holding the port fails here rather than quietly
     // colouring every cell below.
@@ -543,17 +543,6 @@ fn has_network() -> bool {
         ])
         .status()
         .is_ok_and(|status| status.success())
-}
-
-fn build_binary(sh: &Shell) -> Res<String> {
-    output::status("Building", "agent-share (release)");
-    cmd!(sh, "cargo build --release -p agent-share")
-        .quiet()
-        .run()?;
-    Ok(util::repo_root()
-        .join("target/release/agent-share")
-        .display()
-        .to_string())
 }
 
 fn report(outcomes: &[Outcome]) -> TaskOutcome {

@@ -71,7 +71,7 @@ pub(crate) fn run(sh: &Shell, opts: &Options) -> TaskOutcome {
     // A signal kills this process without running destructors, so the previous
     // run — not this one — is where an interrupted teardown gets finished.
     reap::reap_stale();
-    let binary = build_binary(sh)?;
+    let binary = util::build_binary(sh, util::Profile::Release)?;
 
     let mut rows = Vec::new();
     for transport in ["quic", "webrtc", "relay"] {
@@ -129,20 +129,6 @@ fn unwrap_row(result: Result<Row, (String, String, String, String)>) -> Row {
 /// `--cells all` or a comma-separated subset.
 fn wants(selector: &str, cell: &str) -> bool {
     selector == "all" || selector.split(',').any(|want| want.trim() == cell)
-}
-
-/// Build the binary under test at `--release`. A debug build would measure the
-/// optimizer, not the protocol.
-fn build_binary(sh: &Shell) -> Res<String> {
-    output::status("Building", "agent-share (release)");
-    cmd!(sh, "cargo build --release -p agent-share")
-        .quiet()
-        .run()?;
-    let binary = util::repo_root().join("target/release/agent-share");
-    if !binary.exists() {
-        return Err(format!("release binary missing at {}", binary.display()).into());
-    }
-    Ok(binary.display().to_string())
 }
 
 // ---------------------------------------------------------------------------

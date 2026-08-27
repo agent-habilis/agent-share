@@ -48,3 +48,45 @@ pub(crate) fn sweep_stale_artifacts(sh: &Shell) {
     output::status("Pruning", "build artifacts older than 7 days");
     let _ = cmd!(sh, "cargo sweep --time 7").quiet().run();
 }
+
+/// A cargo profile `build_binary` may build under. Cargo writes a profile's
+/// output to `target/<profile>/`, so the name is the only input the path
+/// needs. `dev` (which writes to `target/debug`) is deliberately absent: a
+/// debug build would measure the optimizer rather than the protocol, so both
+/// variants optimize — and *which* one a caller takes is deliberate.
+#[derive(Clone, Copy)]
+pub(crate) enum Profile {
+    /// Thin LTO over 16 codegen units (see `[profile.ci]` in the root
+    /// manifest). For `e2e`, which asserts pass/fail and only pays for the
+    /// link.
+    Ci,
+    /// Full release. For `bench`: a throughput number is comparable only to
+    /// others measured under the same inlining.
+    Release,
+}
+
+impl Profile {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Ci => "ci",
+            Self::Release => "release",
+        }
+    }
+}
+
+/// Build the `agent-share` binary under `profile` and return its path.
+pub(crate) fn build_binary(
+    sh: &Shell,
+    profile: Profile,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let profile = profile.name();
+    output::status("Building", &format!("agent-share ({profile})"));
+    cmd!(sh, "cargo build --profile {profile} -p agent-share")
+        .quiet()
+        .run()?;
+    let binary = repo_root().join("target").join(profile).join("agent-share");
+    if !binary.exists() {
+        return Err(format!("{profile} binary missing at {}", binary.display()).into());
+    }
+    Ok(binary.display().to_string())
+}
