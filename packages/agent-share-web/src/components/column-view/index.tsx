@@ -407,10 +407,19 @@ function Column({
  * `<style>`'s parent and a column renders every child the directory has.
  * Matching `"false"` rather than negating `"true"` keeps the hover off every
  * descendant that carries no state at all.
+ *
+ * Focus takes the hover fill instead of the browser's ring, which the scroll
+ * body clips to two lines. While the pointer is on any row that row is the
+ * current one, so the focused row gives its fill up until the pointer leaves.
  */
 const ROWS = css({
   '[data-active="true"]': { background: t.bgSelected },
   '[data-active="false"]:hover': { background: t.bgRaised },
+  '[data-active]:focus': { outline: 'none' },
+  '[data-active="false"]:focus-visible': { background: t.bgRaised },
+  '&:has([data-active]:hover) [data-active="false"]:focus-visible:not(:hover)': {
+    background: 'transparent',
+  },
 })
 
 /*
