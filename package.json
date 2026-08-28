@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "portless run bun --hot scripts/dev.ts",
     "start": "bun scripts/start.ts",
+    "dev:docker": "bun scripts/dev-docker.ts",
     "build": "bun scripts/build.ts",
     "typecheck": "bun scripts/gen-wasm-path.ts && bun run --filter '*' typecheck",
     "test": "bun scripts/gen-wasm-path.ts && bun test"

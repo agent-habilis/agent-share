@@ -184,6 +184,7 @@ routing the deployed image uses (`scripts/serve.ts`).
 ### Deploying
 
 ```
+bun run dev:docker           # build the image and run it here, on :3000
 cargo task web-image         # build linux/arm64, push to the Gitea registry
 ```
 
