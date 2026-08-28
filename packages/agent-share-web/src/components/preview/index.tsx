@@ -116,7 +116,7 @@ function Centered({ children }: { children: Child }) {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: '0 2ch',
+        padding: 'var(--ms-row)',
       }}
     >
       {/*
@@ -126,8 +126,24 @@ function Centered({ children }: { children: Child }) {
         its own box, the measured width is the width of the string, and the name
         overflows the pane instead of truncating. Measured at 1746px inside a
         520px window before this.
+
+        A definite height too, for the media below: a percentage `max-height`
+        against an auto-height parent is `none`, so a tall photo painted over
+        the top bar and past the bottom of the pane.
       */}
-      <div style={{ width: '100%', minWidth: 0 }}>{children}</div>
+      <div
+        style={{
+          width: '100%',
+          minWidth: 0,
+          height: '100%',
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+        }}
+      >
+        {children}
+      </div>
     </div>
   )
 }
@@ -350,7 +366,7 @@ export const Preview = component<PreviewProps>(function* (props) {
               flex: 1,
               minHeight: 0,
               overflow: 'auto',
-              padding: '0 2ch',
+              padding: 'var(--ms-row)',
               // The file decides its own line breaks; wrapping the rest keeps a
               // long line readable without a horizontal scrollbar under it.
               whiteSpace: 'pre-wrap',
@@ -374,7 +390,13 @@ export const Preview = component<PreviewProps>(function* (props) {
               src={src}
               alt={node.name}
               onerror={onerror}
-              style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+              style={{
+                display: 'block',
+                alignSelf: 'center',
+                maxWidth: '100%',
+                maxHeight: '100%',
+                objectFit: 'contain',
+              }}
             />
           </Centered>
         )
@@ -386,7 +408,7 @@ export const Preview = component<PreviewProps>(function* (props) {
               src={src}
               controls
               onerror={onerror}
-              style={{ maxWidth: '100%', maxHeight: '100%' }}
+              style={{ display: 'block', alignSelf: 'center', maxWidth: '100%', maxHeight: '100%' }}
             />
           </Centered>
         )
