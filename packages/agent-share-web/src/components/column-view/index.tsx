@@ -18,6 +18,7 @@
 import { Button, Stack, Text, MiddleTruncate, t } from 'moonspace-dom'
 import { glyphs } from 'moonspace'
 import { component, keyed, signal } from 'visage-dom'
+import { Style, css } from 'visage-style'
 
 import { seedLabel, seedState } from '../../lib/seeding/index.ts'
 import { humanBytes, type DirNode, type Node } from '../../lib/tree.ts'
@@ -373,6 +374,7 @@ function Column({
       }}
     >
       <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
+        {Style(ROWS)}
         {dir.children.length === 0 ? (
           <div style={{ padding: `0 ${padX}ch` }}>
             <Text color="fgSubtle">(empty)</Text>
@@ -397,6 +399,30 @@ function Column({
     </div>
   )
 }
+
+/*
+ * A rule rather than an inline `background`, which would beat `:hover`; a row
+ * is an unfilled control on the page background, so it takes the fill a ghost
+ * button takes. Hung on the column, not the row, because `@scope` binds to the
+ * `<style>`'s parent and a column renders every child the directory has.
+ * Matching `"false"` rather than negating `"true"` keeps the hover off every
+ * descendant that carries no state at all.
+ */
+const ROWS = css({
+  '[data-active="true"]': { background: t.bgSelected },
+  '[data-active="false"]:hover': { background: t.bgRaised },
+})
+
+/*
+ * Written through `dataset`, which stringifies, rather than as a bare
+ * `data-active`: visage-dom gives a raw attribute HTML boolean semantics and
+ * writes `true` as the empty string, which `[data-active="true"]` never
+ * matches. Two constants rather than a fresh object, so a row whose state has
+ * not moved is `Object.is` to its last render and skips the dataset diff —
+ * every open row re-renders on the one-second holdings repaint.
+ */
+const ACTIVE = Object.freeze({ active: 'true' })
+const INACTIVE = Object.freeze({ active: 'false' })
 
 function Row({
   node,
@@ -464,10 +490,8 @@ function Row({
         // folder's by construction.
         paddingLeft: `${padX}ch`,
         paddingRight: `${gutter}ch`,
-        // `t.bgSelected` is the CSS var, not a hex — it has to be, or the
-        // active row would not follow the light/dark scheme switch.
-        background: active ? t.bgSelected : 'transparent',
       }}
+      dataset={active ? ACTIVE : INACTIVE}
     >
       <div style={{ minWidth: 0, flex: 1, overflow: 'hidden' }}>
         <Text weight={node.kind === 'dir' ? 'bold' : 'regular'}>
