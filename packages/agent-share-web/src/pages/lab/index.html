@@ -2,19 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>agent-share lab</title>
     <!--
       First-paint guard, the same one `src/index.html` carries: pick the
       light/dark half of the page chrome before any JavaScript runs, so a hard
-      reload never flashes the wrong colors. The page paints its chrome with
-      --bg-sunken (see app.css), hence that pair here. color-scheme goes on html
+      reload never flashes the wrong colors. The page ground is --bg;
+      the top bar and the iOS status strip get --bg-sunken from body's
+      background-color (see app.css). color-scheme goes on html
       only — never body, which would pin it.
     -->
     <style>
       html {
         color-scheme: light dark;
-        background: light-dark(#f6f6f6, #1e1d1e);
+        background: light-dark(#ffffff, #272727);
         color: light-dark(#272727, #ffffff);
       }
     </style>

@@ -1,18 +1,49 @@
 /*
- * Page chrome sits below the file browser surface (darker in dark mode,
- * dimmer in light).
- *
- * moonspace-dom's GlobalStyle puts `body { background: var(--bg) }` in
- * `@layer reset`; this file is unlayered author CSS, so it wins regardless
- * of order. `html body` keeps the extra specificity for good measure.
+ * iOS 26 Safari tints its status bar and toolbar from the background-color of
+ * a `position: fixed` element flush against that edge (body is the fallback;
+ * html and theme-color are ignored). The fixed top bar in Chrome covers the
+ * top. `.edge-tint-bottom` exists only to be sampled for the bottom: it must
+ * sit at `bottom: 0` (a negative offset was not picked up), span the width,
+ * be at least 12px tall, opaque, and rendered. See
+ * https://jahir.dev/blog/safari-toolbar
  */
 html body {
-  background: var(--bg-sunken);
+  background: var(--bg);
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/*
+ * How far the page runs under browser chrome at the bottom: the toolbar band
+ * (large minus small viewport), the home-indicator inset, and one row so the
+ * last row of a scrolling pane sits clear of the floating toolbar above it.
+ */
+:root {
+  --bottom-inset: calc(
+    100lvh - 100dvh + env(safe-area-inset-bottom, 0px) + var(--ms-row)
+  );
+}
+
+/* The page never scrolls; this also turns off Safari's pull-to-refresh. */
+html,
+body {
+  overscroll-behavior: none;
+}
+
+.edge-tint-bottom {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 12px;
+  background-color: var(--bg);
+  pointer-events: none;
 }
 
 #root {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 /*

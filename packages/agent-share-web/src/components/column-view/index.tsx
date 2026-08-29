@@ -373,7 +373,7 @@ function Column({
         borderRight: `2px solid ${SURFACE_BORDER}`,
       }}
     >
-      <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
+      <div style={{ overflowY: 'auto', flex: 1, minHeight: 0, paddingBottom: 'var(--bottom-inset)' }}>
         {Style(ROWS)}
         {dir.children.length === 0 ? (
           <div style={{ padding: `0 ${padX}ch` }}>
@@ -585,7 +585,7 @@ function Detail({
         borderRight: `2px solid ${SURFACE_BORDER}`,
       }}
     >
-      <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
+      <div style={{ overflowY: 'auto', flex: 1, minHeight: 0, paddingBottom: 'var(--bottom-inset)' }}>
         <Stack direction="column" gap={1}>
           <Text weight="bold">
             <MiddleTruncate value={node.name} />

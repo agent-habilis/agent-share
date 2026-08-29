@@ -34,6 +34,7 @@ import {
   peerCounts,
   type TransferSnapshot,
 } from '../../lib/transfer-stats/index.ts'
+import { NARROW_PX } from '../../lib/breakpoints.ts'
 import { humanBytes } from '../../lib/tree.ts'
 
 export interface TransferStatusProps {
@@ -145,7 +146,9 @@ const READOUT = css({
   alignItems: 'center',
   gap: raw('1ch'),
   whiteSpace: 'nowrap',
-  '@media (max-width: 1200px)': { display: 'none' },
+  // Hidden where it would fight the actions for one row; on a phone it has a
+  // row of its own (see Chrome), so it comes back below NARROW_PX.
+  [`@media (min-width: ${NARROW_PX + 1}px) and (max-width: 1200px)`]: { display: 'none' },
 })
 
 /**
