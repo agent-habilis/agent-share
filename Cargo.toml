@@ -36,13 +36,14 @@ rust-version = "1.93"
 # the member manifests, so the rev is stated once -- four crates x two members
 # restating it is the drift this pin exists to prevent.
 #
-# The cost is deliberate: an engine change is now push-then-bump here, where a
-# path dep to a sibling checkout needed no round trip. Keep this rev in step
-# with agent-gossip's.
-fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "4de2f85d41e2f6f7accee920f54916486dbfe09e" }
-fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", rev = "4de2f85d41e2f6f7accee920f54916486dbfe09e", default-features = false }
-fofoca-blobs = { git = "https://github.com/fofoca-network/fofoca", rev = "4de2f85d41e2f6f7accee920f54916486dbfe09e" }
-fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "4de2f85d41e2f6f7accee920f54916486dbfe09e" }
+# The cost is deliberate: an engine change is now release-then-bump here, where
+# a path dep to a sibling checkout needed no round trip. fofoca cuts tags
+# (vX.Y.Z); name the tag, never a raw rev, and keep it in step with
+# agent-gossip's.
+fofoca = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
+fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0", default-features = false }
+fofoca-blobs = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
+fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

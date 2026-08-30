@@ -49,7 +49,7 @@ futures = "0.3"
 # false` cannot override workspace's `default-features`"), so inheritance cannot
 # express what this crate needs.
 #
-# The rev must stay in step with the workspace root and with
+# The tag must stay in step with the workspace root and with
 # `agent-share-wasm-client`, which restates it for the same reason. Three copies
 # is the cost of a dependency that means different things on two targets.
-fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b", default-features = false }
+fofoca = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0", default-features = false }
