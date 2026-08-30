@@ -49,7 +49,7 @@ version = "0.1.0"
 dependencies = [
  "agent-share-proto",
  "anyhow",
- "fofoca",
+ "fofoca 0.6.0",
  "fofoca-chunks",
  "futures",
 ]
@@ -60,7 +60,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bs58",
- "fofoca-protocol",
+ "fofoca-protocol 0.6.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -74,9 +74,9 @@ dependencies = [
  "agent-share-proto",
  "anyhow",
  "console_error_panic_hook",
- "fofoca",
+ "fofoca 0.5.0",
  "fofoca-chunks",
- "fofoca-iroh-webrtc-transport",
+ "fofoca-iroh-webrtc-transport 0.5.0",
  "futures",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
@@ -1187,12 +1187,44 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "fofoca-directory",
- "fofoca-doc",
- "fofoca-iroh-webrtc-transport",
- "fofoca-logging",
- "fofoca-protocol",
+ "fofoca-doc 0.5.0",
+ "fofoca-iroh-webrtc-transport 0.5.0",
+ "fofoca-logging 0.5.0",
+ "fofoca-protocol 0.5.0",
  "fofoca-reassembly",
- "fofoca-util",
+ "fofoca-util 0.5.0",
+ "futures-util",
+ "iroh",
+ "iroh-gossip",
+ "n0-future",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "uuid",
+ "web-time",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "fofoca"
+version = "0.6.0"
+source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "bs58",
+ "bytes",
+ "chacha20poly1305",
+ "fofoca-doc 0.6.0",
+ "fofoca-iroh-webrtc-transport 0.6.0",
+ "fofoca-logging 0.6.0",
+ "fofoca-protocol 0.6.0",
+ "fofoca-util 0.6.0",
  "futures-util",
  "iroh",
  "iroh-gossip",
@@ -1211,7 +1243,8 @@ dependencies = [
 
 [[package]]
 name = "fofoca-chunks"
-version = "0.1.0"
+version = "0.6.0"
+source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1227,8 +1260,8 @@ version = "0.5.0"
 source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b#a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b"
 dependencies = [
  "anyhow",
- "fofoca-protocol",
- "fofoca-util",
+ "fofoca-protocol 0.5.0",
+ "fofoca-util 0.5.0",
  "serde",
  "serde_json",
  "tracing",
@@ -1243,12 +1276,37 @@ dependencies = [
  "automerge",
  "bs58",
  "chacha20poly1305",
- "fofoca-protocol",
- "fofoca-util",
+ "fofoca-protocol 0.5.0",
+ "fofoca-util 0.5.0",
  "serde",
  "serde_json",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "fofoca-doc"
+version = "0.6.0"
+source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "bs58",
+ "chacha20poly1305",
+ "fofoca-protocol 0.6.0",
+ "fofoca-util 0.6.0",
+ "serde",
+ "serde_json",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "fofoca-iroh-transport-util"
+version = "0.6.0"
+source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+dependencies = [
+ "iroh",
 ]
 
 [[package]]
@@ -1278,13 +1336,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "fofoca-iroh-webrtc-transport"
+version = "0.6.0"
+source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "fofoca-iroh-transport-util",
+ "futures",
+ "if-addrs",
+ "iroh",
+ "iroh-base",
+ "js-sys",
+ "n0-watcher",
+ "noq-udp",
+ "rand 0.9.5",
+ "serde",
+ "str0m",
+ "str0m-aws-lc-rs",
+ "tokio",
+ "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "fofoca-logging"
 version = "0.5.0"
 source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b#a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b"
 dependencies = [
  "anyhow",
- "fofoca-protocol",
- "fofoca-util",
+ "fofoca-protocol 0.5.0",
+ "fofoca-util 0.5.0",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "fofoca-logging"
+version = "0.6.0"
+source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+dependencies = [
+ "anyhow",
+ "fofoca-protocol 0.6.0",
+ "fofoca-util 0.6.0",
  "serde_json",
  "tracing",
 ]
@@ -1299,7 +1395,32 @@ dependencies = [
  "bs58",
  "bytes",
  "chacha20poly1305",
- "fofoca-util",
+ "fofoca-util 0.5.0",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "iroh-base",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "fofoca-protocol"
+version = "0.6.0"
+source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "bs58",
+ "bytes",
+ "chacha20poly1305",
+ "fofoca-util 0.6.0",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
@@ -1321,8 +1442,8 @@ source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7
 dependencies = [
  "anyhow",
  "bytes",
- "fofoca-protocol",
- "fofoca-util",
+ "fofoca-protocol 0.5.0",
+ "fofoca-util 0.5.0",
  "serde",
  "serde_json",
  "tracing",
@@ -1332,6 +1453,17 @@ dependencies = [
 name = "fofoca-util"
 version = "0.5.0"
 source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b#a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b"
+dependencies = [
+ "tokio",
+ "tracing",
+ "vergen-gitcl",
+ "web-time",
+]
+
+[[package]]
+name = "fofoca-util"
+version = "0.6.0"
+source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
 dependencies = [
  "tokio",
  "tracing",

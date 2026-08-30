@@ -43,12 +43,11 @@ agent-share-mount = { path = "../agent-share-mount" }
 # `agent-share` knows about `fofoca-chunks`, and `fofoca-chunks` knows nothing
 # about shares — enforced on its side by `tests/isolation.rs`.
 #
-# Developed here and named for `fofoca-network/fofoca`, where it is meant to
-# land once it settles; the move is then a `git mv` plus a path edit. It
+# It grew up in this repo and moved to `fofoca-network/fofoca` at v0.6.0. It
 # replaces `fofoca-blobs`, whose bao outboards prove *placement* rather than
 # content and therefore can never dedup or be served by a peer that does not
 # know the file.
-fofoca-chunks = { path = "../fofoca-chunks" }
+fofoca-chunks.workspace = true
 # The gossip engine. A share joins a mesh derived from its own ticket secret, so
 # everyone holding the link becomes a peer of everyone else rather than only of
 # the producer. Note this pulls the vendored mesh into `default-members`, which

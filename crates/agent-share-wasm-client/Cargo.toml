@@ -68,10 +68,10 @@ web-sys = { version = "0.3", features = [
 # `.cargo/config.toml`, and note the feature alone is NOT enough.
 # The chunk layer. Kept as a separate crate so nothing about addressing or
 # storage leaks into the share protocol — see `fofoca-chunks`'s isolation
-# tests. Developed in this workspace and named for `fofoca-network/fofoca`,
-# where it is meant to land; the path dep becomes a rev-pinned git dependency
-# after the move.
-fofoca-chunks = { path = "../fofoca-chunks" }
+# tests. It grew up in this workspace and moved to `fofoca-network/fofoca` at
+# v0.6.0; restated here rather than inherited because this workspace stands
+# alone. The tag must stay in step with the root workspace's.
+fofoca-chunks = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }

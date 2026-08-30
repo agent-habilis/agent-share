@@ -44,6 +44,9 @@ fofoca = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
 fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0", default-features = false }
 fofoca-blobs = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
 fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
+# The content-addressed chunk store, a member of the same monorepo since
+# v0.6.0 (it grew up in this repo under crates/fofoca-chunks and moved).
+fofoca-chunks = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

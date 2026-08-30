@@ -30,7 +30,7 @@ path = "src/lib.rs"
 # somebody else opened lives here instead.
 [dependencies]
 agent-share-proto = { path = "../agent-share-proto" }
-fofoca-chunks = { path = "../fofoca-chunks" }
+fofoca-chunks.workspace = true
 anyhow.workspace = true
 # Channels for the seeder's watch feed. Wasm-clean and runtime-agnostic, which
 # is why the feed is a `futures` mpsc on both sides rather than each platform's
