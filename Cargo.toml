@@ -42,7 +42,6 @@ rust-version = "1.93"
 # agent-gossip's.
 fofoca = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
 fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0", default-features = false }
-fofoca-blobs = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
 fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
 # The content-addressed chunk store, a member of the same monorepo since
 # v0.6.0 (it grew up in this repo under crates/fofoca-chunks and moved).
@@ -51,13 +50,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 anyhow = "1"
-bytes = "1"
 anstyle = "1"
 anstream = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 async-trait = "0.1.89"
-uuid = { version = "1", features = ["v4"] }
 # NOTE: no `iroh` entry, and no `[patch.crates-io]` anywhere in this repo. The
 # iroh family is reached through `fofoca::iroh` / `fofoca_protocol::iroh_base`,
 # and `fofoca` owns which fork and revision that is. Declaring iroh here would
@@ -66,13 +63,8 @@ uuid = { version = "1", features = ["v4"] }
 # entry used to say 1.0.1 while every other manifest said 1.0.2; deleting the
 # declaration is the only fix for that class of drift that cannot regress.
 bs58 = "0.5"
-automerge = "0.10"
 sha2 = "0.10"
 rand = "0.9"
-libc = "0.2"
-proptest = "1.6"
-insta = "1"
-divan = "0.1"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
