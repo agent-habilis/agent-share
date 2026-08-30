@@ -39,10 +39,10 @@ rust-version = "1.93"
 # The cost is deliberate: an engine change is now push-then-bump here, where a
 # path dep to a sibling checkout needed no round trip. Keep this rev in step
 # with agent-gossip's.
-fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b" }
-fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", rev = "a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b", default-features = false }
-fofoca-blobs = { git = "https://github.com/fofoca-network/fofoca", rev = "a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b" }
-fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b" }
+fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "4de2f85d41e2f6f7accee920f54916486dbfe09e" }
+fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", rev = "4de2f85d41e2f6f7accee920f54916486dbfe09e", default-features = false }
+fofoca-blobs = { git = "https://github.com/fofoca-network/fofoca", rev = "4de2f85d41e2f6f7accee920f54916486dbfe09e" }
+fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "4de2f85d41e2f6f7accee920f54916486dbfe09e" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
