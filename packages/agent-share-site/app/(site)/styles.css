@@ -1,29 +1,24 @@
-/* The landing page is set in monospace, like agent-gossip's. TX-02 is
-   proprietary and ships no font file, so the fallback is what nearly everyone
-   sees — the design is built for it. Docs keep Nextra's own typography
-   untouched, so the scope is the landing page's own content; the dot band is
-   the one element only it has, which makes it the hook. Scoping to main rather
-   than body deliberately leaves out the navbar and footer, which are shared
-   chrome and must read the same on every page. */
-main:has(.dots) {
-  font-family: 'TX-02', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-
-/* The navbar and the footer inset their contents by 1.5rem inside the shared
-   content width; the theme's article uses a wider gutter, which left the hero a
-   step inboard of the logo above it. The same expression as the chrome, not a
-   copied 24px, so the two cannot drift apart. */
-article:has(.dots) {
-  padding-left: max(env(safe-area-inset-left), 1.5rem);
-  padding-right: max(env(safe-area-inset-right), 1.5rem);
-}
+/* Warm paper, serif headings, and a grain overlay instead of the dot grid.
+   The palette is one set of tokens per theme and nothing else: every rule below
+   reads them, so light and dark stay in step by construction rather than by
+   two rules being edited together. `.dark` is the class next-themes puts on
+   <html>, which is also how the docs chrome switches. */
 
 :root {
+  --serif: ui-serif, 'Iowan Old Style', Georgia, 'Times New Roman', serif;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+
   --accent: hsl(var(--nextra-primary-hue) var(--nextra-primary-saturation) var(--nextra-primary-lightness));
-  --tile-bg: #f7f7f7;
-  --line: #d8d8d8;
-  --muted: #595859;
-  --dot: #c9c9c9;
+  --bg: #faf9f5;
+  --tile-bg: #f2f0e8;
+  --line: #ddd8ca;
+  --ink: #141413;
+  --muted: #6e695e;
+  /* Grain reads as ink on paper in light and as film grain in dark, so the two
+     need different blend modes as well as different strengths. */
+  --grain-opacity: 0.5;
+  --grain-blend: multiply;
+
   /* Section rhythm: 64 / 96 / 128px by viewport. */
   --section: 4rem;
   --gap: 1rem;
@@ -44,10 +39,66 @@ article:has(.dots) {
 }
 
 .dark {
-  --tile-bg: #161616;
-  --line: #2e2e2e;
-  --muted: #a6a5a6;
-  --dot: #333;
+  --tile-bg: #1e1c19;
+  --line: #332f29;
+  --ink: #f5f2ea;
+  --muted: #a39c8f;
+  --grain-opacity: 0.28;
+  --grain-blend: screen;
+}
+
+/* ------------------------------------------------------------------- grain */
+
+/* Static SVG noise rather than a canvas or an image file: it is ~300 bytes
+   inline, needs no request, and tiles without a seam because feTurbulence is
+   generated per tile from the same seed.
+   Negative z-index puts it over the body background and under the content, so
+   it never intercepts a click and never has to be excluded from anything. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: var(--grain-opacity);
+  mix-blend-mode: var(--grain-blend);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23g)' opacity='0.55'/%3E%3C/svg%3E");
+  /* Drawn smaller than the tile so the speckle lands nearer 2 CSS pixels: at
+     1:1 it disappeared into the ground on a retina screen. */
+  background-size: 120px 120px;
+}
+
+/* ---------------------------------------------------------------- headings */
+
+/* Serif across the whole site, docs included, so the two halves read as one
+   thing. Body copy stays in the UI sans, which is what keeps long docs pages
+   comfortable — the serif is for the voice, not the paragraphs. */
+h1,
+h2,
+h3,
+h4,
+.hero-title,
+.tile-title {
+  font-family: var(--serif);
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  /* The theme's own heading color is a cool slate, which on a cream ground
+     reads as the one thing that did not get the memo. */
+  color: var(--ink);
+}
+
+main:has(.grain) {
+  font-family: var(--sans);
+  color: var(--ink);
+}
+
+/* The navbar and the footer inset their contents by 1.5rem inside the shared
+   content width; the theme's article uses a wider gutter, which left the hero a
+   step inboard of the logo above it. The same expression as the chrome, not a
+   copied 24px, so the two cannot drift apart. */
+article:has(.grain) {
+  padding-left: max(env(safe-area-inset-left), 1.5rem);
+  padding-right: max(env(safe-area-inset-right), 1.5rem);
 }
 
 .foot-links {
@@ -67,27 +118,15 @@ article:has(.dots) {
   clip: rect(0 0 0 0);
 }
 
-/* Retro-tech label: small caps, tracked. */
-.chip {
-  font-size: 0.75rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
+/* ------------------------------------------------------- hero and its band */
 
-/* ------------------------------------------------------------ dot band */
-
-/* The grid runs edge to edge behind the hero and the install line only. The
-   band lives inside the article, so it bleeds out with a viewport-wide
-   pseudo-element rather than a margin that would have to match Nextra's
-   padding; it also reaches up under the navbar, which is transparent. */
-.dots {
+/* One screen tall: the hero ends at the fold. svh, not vh, so a phone's
+   browser chrome does not push the fold below the screen. The navbar is sticky
+   above it, so its height comes off the top; the 1rem is the theme article's
+   own top padding (x:pt-4), pulled in so the bottom edge lands on the fold
+   rather than 16px past it. */
+.grain {
   position: relative;
-  /* One screen tall: the band ends at the fold. svh, not vh, so a phone's
-     browser chrome does not push the fold below the screen. The navbar is
-     sticky above the band, so its height comes off the top; the 1rem is the
-     theme article's own top padding (x:pt-4), pulled into the band so the
-     bottom edge lands on the fold rather than 16px past it. */
   margin-top: -1rem;
   min-height: calc(100svh - var(--nextra-navbar-height));
   display: flex;
@@ -95,26 +134,30 @@ article:has(.dots) {
   justify-content: center;
 }
 
-.dots::before {
+/* Two soft washes of accent behind the hero, bleeding past the article's
+   gutter. Blurred and clipped rather than a gradient on the band itself, so
+   the edges stay irregular — a straight-edged tint reads as a panel, which is
+   the opposite of what this is for. */
+.grain::before {
   content: '';
   position: absolute;
   z-index: -1;
   top: calc(-1 * var(--nextra-navbar-height));
-  bottom: 0;
+  bottom: -10%;
   left: 50%;
   width: 100vw;
   translate: -50%;
-  background-image: radial-gradient(var(--dot) 1px, transparent 1px);
-  background-size: 16px 16px;
+  background:
+    radial-gradient(40% 50% at 18% 30%, color-mix(in oklab, var(--accent) 22%, transparent), transparent 70%),
+    radial-gradient(45% 45% at 82% 70%, color-mix(in oklab, var(--accent) 14%, transparent), transparent 70%);
+  filter: blur(40px);
 }
 
 /* 100vw counts a classic scrollbar's width; clip so it cannot add a
    horizontal one. */
-body:has(.dots) {
+body:has(.grain) {
   overflow-x: clip;
 }
-
-/* ------------------------------------------------------------------- hero */
 
 .hero {
   display: grid;
@@ -131,30 +174,46 @@ body:has(.dots) {
   }
 }
 
+/* A version pill rather than a boxed chip: the one hard-edged element left in
+   the hero was the thing that dated it. */
 .chip {
   display: inline-block;
   border: 1px solid var(--line);
-  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  padding: 0.3rem 0.85rem;
+  font-family: var(--sans);
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
   text-decoration: none;
+  background: color-mix(in oklab, var(--tile-bg) 70%, transparent);
+}
+
+.chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .hero-title {
-  font-size: clamp(2.5rem, 6vw, 4.5rem);
-  line-height: 1.05;
-  font-weight: 700;
-  letter-spacing: -0.03em;
+  font-size: clamp(2.75rem, 6.5vw, 5rem);
+  line-height: 1.02;
   margin: 1.5rem 0 1.25rem;
 }
 
+/* Italic, not just colored: the serif's italic is the most organic shape on
+   the page, and it carries the emphasis without a second color doing all the
+   work. */
 .hero-accent {
   color: var(--accent);
+  font-style: italic;
 }
 
 .hero-sub {
   font-size: 1.125rem;
-  line-height: 1.6;
+  line-height: 1.65;
   color: var(--muted);
-  max-width: 36ch;
+  max-width: 38ch;
   margin: 0;
 }
 
@@ -169,14 +228,20 @@ body:has(.dots) {
 .btn {
   display: inline-block;
   border: 1px solid var(--accent);
-  padding: 0.75rem 1.25rem;
+  border-radius: 999px;
+  padding: 0.7rem 1.5rem;
   text-decoration: none;
   color: inherit;
+  transition: translate 0.15s ease;
 }
 
 .btn-primary {
   background: var(--accent);
   color: #fff;
+}
+
+.btn:hover {
+  translate: 0 -1px;
 }
 
 .hero-link {
@@ -190,23 +255,29 @@ body:has(.dots) {
   text-underline-offset: 0.3em;
 }
 
+/* The mark sits in a soft disc rather than floating: it gives the emoji a
+   shape to belong to, which is what keeps it from reading as clip art. */
 .hero-mark {
-  display: block;
+  display: grid;
+  place-items: center;
   justify-self: center;
+  aspect-ratio: 1;
+  width: min(23vw, 20rem);
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, color-mix(in oklab, var(--accent) 16%, transparent), transparent 72%);
   /* 23vw, not more: the mark shares a 2fr track with the copy's 3fr, and at the
      768px breakpoint 24vw already overruns that track. An overrun would be
-     clipped by body:has(.dots), never scrolled, so it would fail silently. */
-  font-size: clamp(8rem, 23vw, 20rem);
+     clipped by body:has(.grain), never scrolled, so it would fail silently. */
+  font-size: clamp(5rem, 13vw, 11rem);
   line-height: 1;
-  padding: 2rem;
 }
 
 @media (width < 768px) {
   .hero-mark {
     order: -1;
-    font-size: 7.5rem;
+    width: 9rem;
+    font-size: 5rem;
     justify-self: start;
-    padding: 1.5rem;
   }
 }
 
@@ -217,6 +288,10 @@ body:has(.dots) {
   margin: 0 auto;
   padding-block: 0 var(--section);
   text-align: center;
+}
+
+.install pre {
+  border-radius: 12px;
 }
 
 /* The one-line command is longer than a phone; a scrollbar would hide the
@@ -234,40 +309,48 @@ body:has(.dots) {
 
 /* ------------------------------------------------------------------ bento */
 
-/* Nextra's Cards auto-fills columns; a bento wants fixed tracks to span. */
-/* The same gap above the grid as between its tiles, so the dot band ends one
-   tile-gap away from the first row. The grid is the last thing on the page,
-   so it carries the section's bottom padding down to the footer. */
+/* Nextra's Cards auto-fills columns; a bento wants fixed tracks to span.
+   The same gap above the grid as between its tiles, so the band ends one
+   tile-gap away from the first row. The grid is the last thing on the page, so
+   it carries the section's bottom padding down to the footer. */
 .bento {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--gap);
   margin: var(--gap) 0 var(--section);
 }
 
-/* Nextra renders a card's children above its icon + title row; the tiles
-   read icon → title → text. One rule flips it and the component stays
-   Nextra's. Square corners and a hairline instead of the rounded, shadowed
-   default: retro, and it matches the tiles that are not cards. */
+/* Nextra renders a card's children above its icon + title row; the tiles read
+   icon → title → text. One rule flips it and the component stays Nextra's. */
 .bento .nextra-card {
   flex-direction: column-reverse;
   justify-content: flex-end;
-  border-radius: 2px;
+  border-radius: 14px;
   border-color: var(--line);
-  background: var(--tile-bg);
+  background: color-mix(in oklab, var(--tile-bg) 80%, transparent);
   box-shadow: none;
   padding: 1.75rem;
-  min-height: 16rem;
+  min-height: 15rem;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.bento .nextra-card:hover {
+  border-color: color-mix(in oklab, var(--accent) 45%, var(--line));
+  background: var(--tile-bg);
 }
 
 .bento .nextra-card > span {
   padding: 0;
-  font-size: 1.25rem;
+  font-family: var(--serif);
+  font-size: 1.3rem;
+  font-weight: 500;
 }
 
 .bento p {
   margin: 0.75rem 0 0;
   font-size: 0.9375rem;
-  line-height: 1.6;
+  line-height: 1.65;
   color: var(--muted);
 }
 
@@ -294,22 +377,40 @@ body:has(.dots) {
   }
 }
 
-/* A tile that holds a play button cannot be a Cards.Card, which renders an
-   <a>; it borrows the card's surface instead. */
+/* A tile holding a code block cannot be a Cards.Card, which renders an <a>;
+   it borrows the card's surface instead. */
 .tile {
   display: flex;
   flex-direction: column;
   padding: 1.75rem;
   border: 1px solid var(--line);
-  border-radius: 2px;
-  background: var(--tile-bg);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--tile-bg) 80%, transparent);
 }
 
 .tile-title {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  margin: 1.5rem 0 0;
-  font-size: 1.25rem;
-  font-weight: 600;
+  gap: 0.6rem;
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.tile p {
+  color: var(--muted);
+  line-height: 1.65;
+  margin: 0.75rem 0 0;
+}
+
+.tile pre {
+  border-radius: 12px;
+}
+
+/* Pushed to the floor of the tile rather than sitting under the text: the tile
+   spans two rows of the grid, so with the code block tight under the prose the
+   bottom half was empty. On the code block's own wrapper, not on the `pre` —
+   the wrapper is the tile's child, so an auto margin on the `pre` inside it has
+   nothing to push against. */
+.tile > :last-child {
+  margin-top: auto;
 }
