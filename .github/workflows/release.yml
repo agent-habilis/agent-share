@@ -1,0 +1,185 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          manifest=$(cargo pkgid -p agent-share | sed -E 's/.*[@#]//')
+          if [ "$tag" != "$manifest" ]; then
+            echo "Tag v$tag does not match Cargo.toml version $manifest" >&2
+            exit 1
+          fi
+
+  create-release:
+    needs: verify-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the GitHub Release (idempotent)
+        run: gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # The roff man pages are target-independent, so build them once here
+  # (`cargo task man` generates them in-process via `clap_mangen`) and hand
+  # them to every `upload` job as an artifact, rather than recompiling the
+  # crate on each matrix runner. Keeps it off the per-target build path too,
+  # so a host toolchain hiccup can't block a binary that cross-compiles fine.
+  man-pages:
+    needs: verify-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Generate roff man pages
+        run: cargo task man
+      - uses: actions/upload-artifact@v4
+        with:
+          name: man-pages
+          path: target/man/
+
+  upload:
+    needs: [create-release, man-pages]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both Linux rows build on a runner of their own arch, so the C in
+          # the graph (`aws-lc-sys`, `ring`, `blake3`) goes
+          # through the image's own gcc. No cross-compile, so the action
+          # skips `cross` and its Docker image. The cost is a glibc floor:
+          # these are built against the runner's 2.39, so a distro older
+          # than Ubuntu 24.04 / Debian 13 cannot run them.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-26
+          # The runner is Apple silicon, so this one cross-compiles. Without
+          # it the formula has no `url` at all on an Intel Mac and `brew
+          # install` dies on Homebrew's own internals rather than on anything
+          # a user could act on.
+          - target: x86_64-apple-darwin
+            os: macos-26
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      # Pull the once-built man pages into ./man so the archive can bundle
+      # them; Homebrew installs them from there (see Formula/agent-share.rb).
+      - name: Download man pages
+        uses: actions/download-artifact@v4
+        with:
+          name: man-pages
+          path: man
+      # Pinned to a commit: this third-party action holds a token that can
+      # write to the repo, and a tag can be moved to other code.
+      - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
+        with:
+          bin: agent-share
+          # The root manifest is a virtual workspace, so the action cannot
+          # derive the package name/version from `./Cargo.toml`.
+          manifest-path: crates/agent-share/Cargo.toml
+          target: ${{ matrix.target }}
+          archive: $bin-$tag-$target
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Bundle the generated man pages alongside the binary so
+          # `brew install` can drop them into the man path.
+          include: man
+          # Emit an `<archive>.sha256` sidecar per target so update-formula
+          # can read the checksums without re-downloading the tarballs.
+          checksum: sha256
+
+  update-formula:
+    needs: upload
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Two tags in flight would race to push `main` and the tap. Queue them;
+    # never cancel one, or its release ships without a formula.
+    concurrency:
+      group: update-formula
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main # commit the formula bump onto main, not the tag
+          token: ${{ secrets.GITHUB_TOKEN }}
+      # Skip only when main is strictly newer. An equal version must still run:
+      # the first release tags the version the formula already names, and a
+      # re-cut tag needs its new checksums written.
+      - name: Skip a tag older than the formula on main
+        id: guard
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          ver="${TAG#v}"
+          current=$(sed -nE 's/^  version "([^"]*)"/\1/p' Formula/agent-share.rb)
+          newest=$(printf '%s\n' "$ver" "$current" | sort -V | tail -n 1)
+          if [ "$current" != "$ver" ] && [ "$newest" = "$current" ]; then
+            echo "Formula on main is at $current, newer than $TAG. Leaving it alone." >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Bump Formula/agent-share.rb to the released version + checksums
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ver="${TAG#v}"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.sha256' --dir /tmp --clobber
+          # perl, not `sed -i -E`: BSD sed needs `-i ''` and GNU sed needs bare
+          # `-i`, so a sed rewrite here runs on the CI box but dies the moment
+          # anyone reproduces this step on macOS. perl's `-pi -e` is identical
+          # on both, and the sha256 rewrite below already uses it.
+          perl -pi -e "s/^  version \"[^\"]*\"/  version \"$ver\"/" Formula/agent-share.rb
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            sum=$(cut -d' ' -f1 "/tmp/agent-share-v$ver-$target.sha256")
+            # Replace the sha256 line immediately following this target's url line.
+            perl -0pi -e "s{(${target}\.tar\.gz\"\s*\n\s*sha256 \")[0-9a-f]{64}}{\${1}${sum}}g" Formula/agent-share.rb
+          done
+      - name: Commit the formula bump
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/agent-share.rb
+          git diff --cached --quiet || git commit -m "chore: update Homebrew formula for ${TAG}"
+          git push origin main
+      # The GITHUB_TOKEN is scoped to this repo, so mirroring into the org
+      # tap needs the TAP_PUSH_TOKEN secret (fine-grained PAT, contents
+      # read/write on homebrew-tap only).
+      - uses: actions/checkout@v5
+        if: steps.guard.outputs.skip != 'true'
+        with:
+          repository: agent-habilis/homebrew-tap
+          token: ${{ secrets.TAP_PUSH_TOKEN }}
+          path: tap
+      - name: Mirror the formula to the org tap
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          cp Formula/agent-share.rb tap/Formula/agent-share.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/agent-share.rb
+          git diff --cached --quiet || git commit -m "agent-share ${TAG}"
+          git push

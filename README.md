@@ -13,6 +13,20 @@ run `agent-share`. The ticket *framing* (Base58Check over `version ‖ type ‖
 payload`) is still shared with the rest of the agent-habilis tooling, but
 agent-share's tokens carry no glyph prefix — they are bare ASCII Base58.
 
+## Install
+
+```sh
+# Homebrew for macOS and Linux
+brew install agent-habilis/tap/agent-share
+
+# From source everywhere else
+cargo install --git https://github.com/agent-habilis/agent-share agent-share
+```
+
+Prebuilt binaries exist for macOS (Apple silicon and Intel) and Linux (x86-64
+and ARM64). The Linux binaries need glibc 2.39 or later (Ubuntu 24.04, Debian
+13).
+
 ## Usage
 
 Share a folder (producer):
@@ -71,6 +85,20 @@ The wire format is pinned by golden tests (`wire_constants_are_pinned`,
 `type_bytes_are_pinned_wire_format`, `swarm_id_wire_format_is_pinned`) — if one
 of those fails after a change, you broke compatibility with already-issued
 tickets and with peers running an older build.
+
+### Releasing
+
+```
+cargo task release minor              # dry run
+cargo task release minor --execute    # bump, commit, annotated tag — no push
+git push origin main --follow-tags
+```
+
+The tag push starts `.github/workflows/release.yml`. It builds the four
+binaries, creates the GitHub release, and updates `Formula/agent-share.rb` on
+`main`. Then it copies the formula to `agent-habilis/homebrew-tap`. That copy
+needs the `TAP_PUSH_TOKEN` Actions secret: a fine-grained PAT with contents
+read/write on the tap repo.
 
 ## The web client
 
