@@ -35,17 +35,11 @@ export default async function SiteLayout({ children }: { children: ReactNode }) 
     <html lang="en" dir="ltr" suppressHydrationWarning>
       <Head
         faviconGlyph="🗄️"
-        // Clay on paper. The accent is the one saturated thing on the page, so
-        // it is muted in light and lifted in dark to hold the same weight
-        // against each ground.
         color={{
-          hue: { light: 16, dark: 18 },
-          saturation: { light: 48, dark: 55 },
-          lightness: { light: 46, dark: 66 },
+          hue: { light: 213, dark: 210 },
+          saturation: { light: 86, dark: 94 },
+          lightness: { light: 42, dark: 67 },
         }}
-        // Also what the navbar, sidebar and search panel paint on, which is why
-        // the warm ground is set here rather than on body in styles.css.
-        backgroundColor={{ light: '#faf9f5', dark: '#141312' }}
       />
       <body>
         <Layout
