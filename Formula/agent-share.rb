@@ -1,5 +1,5 @@
 class AgentShare < Formula
-  desc "Share a folder with peers, or mount a peer's folder locally"
+  desc "Share a folder with peers"
   homepage "https://github.com/agent-habilis/agent-share"
   version "0.1.0"
   license "MIT"
