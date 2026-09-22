@@ -1,4 +1,4 @@
-//! The browser client: read a share over WebRTC and/or the iroh relay.
+//! The browser client: read a share over a WebRTC data channel.
 //!
 //! No web-specific protocol. This speaks the same `agent-share/mount/1` ALPN
 //! the CLI does, over the same `fofoca-iroh-webrtc-transport`, using the same
@@ -6,13 +6,14 @@
 //!
 //! # Transport modes
 //!
-//! [`ShareClient::connect`] takes an optional mode (`webrtc` | `relay` |
-//! `dynamic`). Omit it for the default: **both on, WebRTC preferred** — try a
-//! data channel first, then fall back to the iroh relay (ticket ladder, often
-//! `relay.agent-habilis.com`) when ICE fails. Force `webrtc` or `relay` in
-//! tests.
+//! [`ShareClient::connect`] takes an optional mode (`webrtc` | `dynamic`).
+//! Omit it for the default, `dynamic`, which races the origin's data channel
+//! against a seeder in the share's mesh. `webrtc` pins the origin lane, for
+//! tests. **Neither carries mount bytes over the iroh relay**: the relay
+//! (ticket ladder, often `relay.agent-habilis.com`) brokers signalling and
+//! gossip, and a mount that settles anywhere but the data channel fails.
 //!
-//! # The two-connection dance (WebRTC path)
+//! # The two-connection dance
 //!
 //! iroh only fans a connect's Initial out to candidate paths **while the
 //! remote has no selected path**, so a live connection cannot be upgraded onto
@@ -24,24 +25,10 @@
 //!    carrying only the `WebRTC` custom addr.
 //!
 //! When host/mDNS and NAT hairpin both fail there is no ICE path left: TURN is
-//! refused by policy, because this project already relays through its own iroh
-//! relay and running a second relay at the ICE layer would mean operating two
-//! systems for one job. Under `dynamic` a failed ICE simply uses that relay for
-//! mount bytes; under `webrtc` it fails loudly.
-//!
-//! # There is no upgrade watcher
-//!
-//! A mount that settles on the relay keeps the relay for that connection's
-//! life. Nothing promotes it to a data channel that becomes viable later —
-//! and nothing ever did; the watcher named in old comments and todo entries
-//! was never built. In-place upgrade is impossible (see above: iroh stops
-//! fanning out once the remote selects a path), so an upgrade means a redial
-//! plus a connection swap, and the only redial today is the natural
-//! reconnect, which runs the webrtc-first dial again. Whoever builds
-//! upgrade-by-redial: scope it by pairing — only browser↔browser bulk ever
-//! stalled (see `probe_read`), a relay win against a native peer is safe to
-//! retire — and reuse the waiting membership's hubs, or the redial drops
-//! every channel the membership holds.
+//! refused by policy, because this project already runs its own iroh relay for
+//! rendezvous and running a second relay at the ICE layer would mean operating
+//! two systems for one job. A failed ICE therefore fails the mount, loudly, on
+//! every mode.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -59,7 +46,7 @@ use agent_share_proto::framing::{
 use agent_share_proto::lookup::{LookupOpts, RelayChoice};
 use agent_share_proto::manifest::MountManifest;
 use agent_share_proto::mesh_key::share_mesh_key;
-use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
+use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_WEBRTC};
 use fofoca::iroh::endpoint::{Connection, presets};
 use fofoca::iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr, Watcher as _};
 use fofoca_chunks::{
@@ -204,10 +191,6 @@ pub struct ShareClient {
     /// fetch beat it — otherwise a browse-only tab's card would never carry a
     /// tree and seeder vouching would regress.
     last_tree: Rc<RefCell<Option<String>>>,
-    /// Whether the background join task still owes a `settled_path_label`
-    /// pass to firm up `data_path` / `fallback_reason`. Set only on the
-    /// dynamic WebRTC mount path; every other path knows its label at build.
-    settle_pending: bool,
     /// A manifest already in hand when the client was built or shortly after,
     /// consumed by the first [`Self::fetch_manifest`]. Two producers: the
     /// seeder fallback, which fetches and vets a manifest to pick a winner
@@ -369,7 +352,6 @@ fn new_share_client(
         _endpoint: endpoint,
         mesh: Rc::new(RefCell::new(MeshSlot::Pending)),
         last_tree: Rc::new(RefCell::new(None)),
-        settle_pending: false,
         prefetched_manifest: Rc::new(RefCell::new(None)),
         manifest_fetched: Rc::new(Cell::new(false)),
         swarm: RefCell::new(Vec::new()),
@@ -630,12 +612,7 @@ impl ShareClient {
         )]
         let cap_ms = origin_cap_ms.map_or_else(default_origin_cap_ms, |ms| (ms as i32).max(1_000));
         let dialed = match mode {
-            TransportMode::Relay => {
-                capped_origin_dial(Box::pin(connect_relay(ticket, token)), cap_ms, None).await
-            }
-            TransportMode::WebRtc => {
-                connect_webrtc(ticket, token, /*allow_relay_fallback=*/ false).await
-            }
+            TransportMode::WebRtc => connect_webrtc(ticket, token).await,
             // Race the lanes rather than sequencing them. Sequenced, a dead
             // origin cost the whole dial cap before card collection even
             // began; raced, a dead-origin connect is bounded by card
@@ -651,9 +628,7 @@ impl ShareClient {
                 // already replaced.
                 let can_serve = MeshCanServe::default();
                 let origin = Box::pin(capped_origin_dial(
-                    Box::pin(connect_webrtc(
-                        ticket, token, /*allow_relay_fallback=*/ true,
-                    )),
+                    Box::pin(connect_webrtc(ticket, token)),
                     cap_ms,
                     Some((can_serve.clone(), ORIGIN_CONCEDE_FLOOR_MS)),
                 ));
@@ -718,25 +693,9 @@ impl ShareClient {
         };
         let mut client = match dialed {
             Ok(client) => client,
-            // The origin is unreachable — dead, or gone from the relay. The
-            // share does not have to be: every holder of this link is on the
-            // mesh it derives, and a peer whose card vouches for the tree can
-            // serve it. Reached from `relay` mode only — `webrtc` mode exists
-            // to pin the transport for tests (and the seeder lane rides the
-            // relay), and `dynamic` already raced the seeder lane above.
-            Err(origin_error) if matches!(mode, TransportMode::Relay) => {
-                let mut client = connect_via_seeder(
-                    fallback_ticket,
-                    auth,
-                    mesh_password.as_deref(),
-                    card.clone(),
-                    &origin_error,
-                    None,
-                )
-                .await?;
-                client.mount_mode = mode.as_str().to_owned();
-                return Ok(client);
-            }
+            // No seeder rescue here: `webrtc` mode exists to pin the
+            // transport for tests, and `dynamic` already raced the seeder
+            // lane above.
             Err(origin_error) => return Err(origin_error),
         };
         client.mount_mode = mode.as_str().to_owned();
@@ -752,9 +711,10 @@ impl ShareClient {
             .mesh_endpoint
             .take()
             .map(|shared| (shared.endpoint, shared.webrtc));
-        // Parsed eagerly so a malformed card from JS still fails the connect,
-        // with the provisional transport label; the settle below patches it.
-        let mut card = match card.as_ref() {
+        // Parsed eagerly so a malformed card from JS still fails the connect.
+        // The transport label is already final: every mount settles its path
+        // before `connect` resolves.
+        let card = match card.as_ref() {
             Some(value) => mesh::parse_card_parts(
                 value,
                 &client.data_path.borrow(),
@@ -784,33 +744,9 @@ impl ShareClient {
                 )),
             ));
         }
-        let connection = client.connection.clone();
-        let data_path = Rc::clone(&client.data_path);
-        let fallback_reason = Rc::clone(&client.fallback_reason);
         let mesh_slot = Rc::clone(&client.mesh);
         let last_tree = Rc::clone(&client.last_tree);
-        let settle_pending = client.settle_pending;
         wasm_bindgen_futures::spawn_local(async move {
-            // Firm up the path label first: the card should advertise what the
-            // mount actually selected, and the settle wait no longer holds the
-            // connect. On a relay-free endpoint there is nothing to settle on
-            // *but* WebRTC, so a different answer is a "selection never
-            // settled" report, not a lost race.
-            if settle_pending {
-                let selected = settled_path_label(&connection).await;
-                if let Some(label) = selected.clone() {
-                    *data_path.borrow_mut() = label;
-                }
-                if selected.as_deref() != Some("webrtc") {
-                    *fallback_reason.borrow_mut() = Some(format!(
-                        "the mount reported {} rather than WebRTC on a relay-free endpoint",
-                        selected
-                            .as_deref()
-                            .unwrap_or("no path before the settle deadline"),
-                    ));
-                }
-                card.transport = data_path.borrow().clone();
-            }
             match mesh::MeshPeer::join_share(resolved_mesh, shared, protocols, card).await {
                 Ok(peer) => {
                     let peer = Rc::new(peer);
@@ -2335,11 +2271,10 @@ impl ShareClient {
         console_error_panic_hook::set_once();
         let ticket = MountTicket::decode(&ticket).map_err(|error| err("decode ticket", &error))?;
         let transport_label = match ticket.kind {
-            TICKET_KIND_BENCH_RELAY => "relay",
             TICKET_KIND_BENCH_WEBRTC => "webrtc",
             other => {
                 return Err(JsValue::from_str(&format!(
-                    "ticket has no bench transport (kind={other}); produce with --transport webrtc|relay"
+                    "ticket has no bench transport (kind={other}); produce with --transport webrtc"
                 )));
             }
         };
@@ -2349,18 +2284,9 @@ impl ShareClient {
         );
 
         let connect_start = now_ms();
-        let client = match ticket.kind {
-            // Bench relay must not fall through to direct IP (same-machine
-            // benches were reporting ~localhost numbers labeled "relay").
-            TICKET_KIND_BENCH_RELAY => {
-                let token = ticket.secret;
-                connect_relay_only(ticket, token).await?
-            }
-            TICKET_KIND_BENCH_WEBRTC => {
-                let token = ticket.secret;
-                connect_webrtc(ticket, token, /*allow_relay_fallback=*/ false).await?
-            }
-            _ => unreachable!("validated above"),
+        let client = {
+            let token = ticket.secret;
+            connect_webrtc(ticket, token).await?
         };
         let connect_ms = now_ms() - connect_start;
         emit_status(
@@ -4773,12 +4699,9 @@ async fn adopt_vetted(
     majority: &str,
     origin_error: &JsValue,
 ) -> ShareClient {
-    // Report the wire, not the intent: the settled path says whether the
-    // channel or the relay carried the win — except a demotion, which
-    // already knows it rides the relay.
-    let data_path = if vetted.demoted {
-        "relay".to_owned()
-    } else {
+    // Report the wire, not the intent: the settled path is what the
+    // connection actually carried the win on.
+    let data_path = {
         settled_path_label(&vetted.connection)
             .await
             .unwrap_or_else(|| "relay".to_owned())
@@ -4800,11 +4723,7 @@ async fn adopt_vetted(
         Some(Arc::clone(&waiting.mount_hub)),
         None,
         None,
-        if vetted.demoted {
-            waiting.endpoint.clone()
-        } else {
-            waiting.mount_endpoint.clone()
-        },
+        waiting.mount_endpoint.clone(),
     );
     client.lookups = lookups;
     client.connected_at_ms = now_ms();
@@ -4816,17 +4735,10 @@ async fn adopt_vetted(
     // outlives the origin, so it is verified rather than frozen — which is what
     // lets a change reach a peer through a seeder.
     client.pinned_tree = client.author.is_none().then(|| majority.to_owned());
-    *client.fallback_reason.borrow_mut() = Some(if vetted.demoted {
-        format!(
-            "origin unreachable ({}); reading from seeder {short} over the relay (data channel failed the bulk probe)",
-            describe(origin_error),
-        )
-    } else {
-        format!(
-            "origin unreachable ({}); reading from seeder {short}",
-            describe(origin_error),
-        )
-    });
+    *client.fallback_reason.borrow_mut() = Some(format!(
+        "origin unreachable ({}); reading from seeder {short}",
+        describe(origin_error),
+    ));
     client.seeder = waiting.seeder.clone();
     // The membership stays in the registry even as it graduates onto the
     // client: its hubs hold the live sessions, and any revival — a future
@@ -5011,10 +4923,6 @@ struct VettedSeeder {
     /// Already signature-checked: vetting is a real manifest fetch, so a
     /// candidate that could not prove authorship never became a `VettedSeeder`.
     fetched: FetchedManifest,
-    /// The data channel failed the bulk probe and `connection` is the relay
-    /// replacement: label it "relay" and home the client on the
-    /// relay-bearing endpoint.
-    demoted: bool,
 }
 
 /// Why a candidate did not serve this attempt, and the part the roster cares
@@ -5048,19 +4956,18 @@ struct VetTerms<'a> {
     /// this tab recorded for a known seeder. Only consulted for an unsigned
     /// share, which has no offline authority at all.
     tree: &'a str,
-    /// How long to wait for a data channel before conceding the relay.
+    /// How long to wait for a data channel before refusing the candidate.
     channel_wait: f64,
     /// Raised when the candidate's connection lands, if the caller is
     /// racing an origin dial that wants to know.
     can_serve: Option<&'a MeshCanServe>,
 }
 
-/// One candidate, dialled and vetted end to end. WebRTC first — the whole
-/// point of a swarm of browsers is that bytes flow tab-to-tab, not through
-/// the relay, which stays the honest fallback lane. The manifest is fetched
-/// and hashed against the card's claim, and a data-channel win is
-/// bulk-probed and demoted to a fresh relay connection if it stalls. `Err`
-/// is the refusal line for the attempt log.
+/// One candidate, dialled and vetted end to end. The data channel is the
+/// only lane — the whole point of a swarm of browsers is that bytes flow
+/// tab-to-tab, and the relay never carries them. The manifest is fetched and
+/// hashed against the card's claim, and the win is bulk-probed. `Err` is the
+/// refusal line for the attempt log.
 async fn vet_seeder_candidate(
     waiting: &WaitingMesh,
     endpoint: String,
@@ -5076,29 +4983,19 @@ async fn vet_seeder_candidate(
         can_serve,
     } = *terms;
     let short = endpoint[..8.min(endpoint.len())].to_owned();
-    // Which arm won decides whether the bulk probe below runs: only the
-    // data channel is suspect, and provenance says it more cheaply and more
-    // precisely than re-reading the settled path.
-    let (connection, via_data_channel) =
-        match seeder_webrtc_dial(waiting.lanes(), id, relays, channel_wait).await {
-            Ok(connection) => (connection, true),
-            Err(webrtc_error) => {
-                let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
-                match waiting.endpoint.connect(addr, MOUNT_ALPN).await {
-                    Ok(connection) => (connection, false),
-                    Err(error) => {
-                        return Err(Refusal {
-                            endpoint,
-                            reason: format!(
-                                "{short}: webrtc: {}; relay: {error}",
-                                describe(&webrtc_error),
-                            ),
-                            unreached: true,
-                        });
-                    }
-                }
-            }
-        };
+    // The data channel is the only lane a seeder may serve over: the relay
+    // brokers the session and never carries file bytes, so a candidate we
+    // cannot reach that way is refused rather than demoted.
+    let connection = match seeder_webrtc_dial(waiting.lanes(), id, relays, channel_wait).await {
+        Ok(connection) => connection,
+        Err(webrtc_error) => {
+            return Err(Refusal {
+                endpoint,
+                reason: format!("{short}: webrtc: {}", describe(&webrtc_error)),
+                unreached: true,
+            });
+        }
+    };
     // A mount connection to a peer that is not us: the mesh demonstrably
     // holds this share, which is the only evidence that may cut the origin
     // dial short. Raised here rather than on the card that named this
@@ -5132,53 +5029,31 @@ async fn vet_seeder_candidate(
         }
     };
     // Prove the path moves bulk before trusting it with the share; see
-    // `probe_read`. Only a data-channel connection is suspect — bulk never
-    // stalled on the relay or a direct ip, so probing those lanes would
-    // only gate healthy seeders behind a timer. A webrtc mount that stalls
-    // is closed and redialled over the relay — bytes beat purity — and that
-    // replacement is trusted the same way any relay connection is.
-    let target = if via_data_channel {
-        let target = probe_target(&fetched.manifest.files);
-        if target.is_none() {
-            // Rare enough to say out loud: an unprobed channel carrying a
-            // manifest with no readable bytes is fine today, but silence
-            // here would read as "probed and passed" in a log.
-            web_sys::console::log_1(&JsValue::from_str(
-                "[share] bulk probe skipped: the manifest holds no readable bytes",
-            ));
-        }
-        target
-    } else {
-        None
-    };
+    // `probe_read`. Every seeder connection is a data channel now, so every
+    // one is probed.
+    let target = probe_target(&fetched.manifest.files);
+    if target.is_none() {
+        // Rare enough to say out loud: an unprobed channel carrying a
+        // manifest with no readable bytes is fine today, but silence
+        // here would read as "probed and passed" in a log.
+        web_sys::console::log_1(&JsValue::from_str(
+            "[share] bulk probe skipped: the manifest holds no readable bytes",
+        ));
+    }
     if let Some((index, want)) = target
         && let Err(probe_error) = probe_read(&connection, token, index, want).await
     {
-        web_sys::console::log_1(&JsValue::from_str(&format!(
-            "[share] seeder path failed the bulk probe ({}); trying the relay",
-            describe(&probe_error)
-        )));
         connection.close(0u32.into(), b"failed the bulk probe");
-        let addr = EndpointAddr::from_parts(id, relays.iter().cloned());
-        return match waiting.endpoint.connect(addr, MOUNT_ALPN).await {
-            Ok(relay_conn) => Ok(VettedSeeder {
-                connection: relay_conn,
-                endpoint,
-                fetched,
-                demoted: true,
-            }),
-            Err(error) => Err(Refusal {
-                endpoint,
-                reason: format!("{short}: relay redial after failed probe: {error}"),
-                unreached: false,
-            }),
-        };
+        return Err(Refusal {
+            endpoint,
+            reason: format!("{short}: failed the bulk probe: {}", describe(&probe_error)),
+            unreached: false,
+        });
     }
     Ok(VettedSeeder {
         connection,
         endpoint,
         fetched,
-        demoted: false,
     })
 }
 
@@ -5237,141 +5112,6 @@ fn seeder_relays(ticket: &MountTicket) -> Vec<fofoca::iroh::RelayUrl> {
 }
 
 /// Dial mount over the ticket address (IP and/or iroh relay). No WebRTC.
-async fn connect_relay(
-    ticket: MountTicket,
-    token: [u8; SECRET_LEN],
-) -> Result<ShareClient, JsValue> {
-    ensure_reachable_addr(&ticket.addr)?;
-    let key = SecretKey::generate();
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .secret_key(key)
-        .relay_mode(relay_mode(&ticket.lookups.relay))
-        .bind()
-        .await
-        .map_err(|error| err("bind relay endpoint", &error))?;
-
-    let connection = endpoint
-        .connect(ticket.addr.clone(), MOUNT_ALPN)
-        .await
-        .map_err(|error| err("dial the mount ALPN over iroh relay/IP", &error))?;
-
-    Ok(new_share_client(
-        connection,
-        token,
-        ticket.author,
-        "relay".to_owned(),
-        None,
-        None,
-        None,
-        endpoint,
-    ))
-}
-
-/// Dial mount using **only** the ticket's relay URL(s) — no direct IP.
-async fn connect_relay_only(
-    ticket: MountTicket,
-    token: [u8; SECRET_LEN],
-) -> Result<ShareClient, JsValue> {
-    let relays: Vec<TransportAddr> = ticket
-        .addr
-        .relay_urls()
-        .cloned()
-        .map(TransportAddr::Relay)
-        .collect();
-    if relays.is_empty() {
-        return Err(JsValue::from_str(
-            "ticket has no iroh relay URL — cannot force relay transport",
-        ));
-    }
-    let relay_only = EndpointAddr::from_parts(ticket.addr.id, relays);
-    let key = SecretKey::generate();
-    // Browser endpoints have no IP transports (`clear_ip_transports` is
-    // host-only); dialing relay-only plus path assertion is enough here.
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .secret_key(key)
-        .relay_mode(relay_mode(&ticket.lookups.relay))
-        .bind()
-        .await
-        .map_err(|error| err("bind relay-only endpoint", &error))?;
-
-    let connection = dial_with_retry(&endpoint, relay_only).await?;
-    ensure_relay_selected(&connection).await?;
-
-    Ok(new_share_client(
-        connection,
-        token,
-        ticket.author,
-        "relay".to_owned(),
-        None,
-        None,
-        None,
-        endpoint,
-    ))
-}
-
-/// Retry dial for up to 90s (same policy as the native bench consumer).
-async fn dial_with_retry(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection, JsValue> {
-    let deadline = now_ms() + 90_000.0;
-    loop {
-        match endpoint.connect(addr.clone(), MOUNT_ALPN).await {
-            Ok(conn) => return Ok(conn),
-            Err(error) if now_ms() < deadline => {
-                web_sys::console::warn_1(&JsValue::from_str(&format!(
-                    "bench dial failed; retrying: {error}"
-                )));
-                wait_ms(2_000).await;
-            }
-            Err(error) => {
-                return Err(err(
-                    "could not reach bench producer over iroh relay",
-                    &error,
-                ));
-            }
-        }
-    }
-}
-
-/// Wait briefly for path selection, then require the selected path to be relay.
-async fn ensure_relay_selected(conn: &Connection) -> Result<(), JsValue> {
-    let deadline = now_ms() + 5_000.0;
-    loop {
-        if conn
-            .paths()
-            .iter()
-            .find(|p| p.is_selected())
-            .is_some_and(|p| p.is_relay())
-        {
-            return Ok(());
-        }
-        if now_ms() >= deadline {
-            let summary: Vec<String> = conn
-                .paths()
-                .iter()
-                .map(|p| {
-                    let kind = if p.is_relay() {
-                        "relay"
-                    } else if p.is_ip() {
-                        "ip"
-                    } else {
-                        "other"
-                    };
-                    if p.is_selected() {
-                        format!("*{kind}")
-                    } else {
-                        kind.to_owned()
-                    }
-                })
-                .collect();
-            return Err(JsValue::from_str(&format!(
-                "relay bench selected a non-relay path (paths={summary:?}); \
-                 producer and consumer both need clear_ip_transports \
-                 (restart producer with `bench --transport relay`)"
-            )));
-        }
-        wait_ms(50).await;
-    }
-}
-
 /// How long [`settled_path_label`] waits for the connection to pick a path.
 const PATH_SETTLE_MS: f64 = 3_000.0;
 
@@ -5381,9 +5121,8 @@ const PATH_SETTLE_MS: f64 = 3_000.0;
 /// result: a fresh connection has no selected path yet, and the mount dial runs
 /// on the same endpoint that just spoke JSEP over the relay — so the producer's
 /// relay addr is still a live candidate and can beat a data channel that is
-/// only just coming up. Same settle-then-read shape as
-/// [`ensure_relay_selected`], but it reports rather than judges: the caller
-/// decides whether the answer is acceptable for its mode.
+/// only just coming up. It reports rather than judges: the caller decides
+/// whether the answer is acceptable.
 ///
 /// `None` means nothing was selected before the deadline.
 async fn settled_path_label(conn: &Connection) -> Option<String> {
@@ -5556,10 +5295,8 @@ async fn wait_ms(millis: i32) {
 async fn connect_webrtc(
     ticket: MountTicket,
     token: [u8; SECRET_LEN],
-    allow_relay_fallback: bool,
 ) -> Result<ShareClient, JsValue> {
     let producer = ticket.addr.id;
-    // Copied out before the ticket moves into the relay fallback below.
     let author = ticket.author;
     ensure_reachable_addr(&ticket.addr)?;
 
@@ -5628,15 +5365,6 @@ async fn connect_webrtc(
     // id the signal connection came from, which is the same id either way.
     let session = match negotiate(&signal_endpoint, ticket.addr.clone(), local, &hub).await {
         Ok(session) => session,
-        Err(error) if allow_relay_fallback => {
-            let reason = format!("WebRTC signal/ICE failed: {}", describe(&error));
-            web_sys::console::warn_1(&JsValue::from_str(&format!(
-                "[agent-share] {reason}; falling back to iroh relay/IP"
-            )));
-            endpoint.close().await;
-            // The fallback needs a relay, so it runs on the signal endpoint.
-            return finish_relay_fallback(signal_endpoint, ticket, token, reason).await;
-        }
         Err(error) => {
             endpoint.close().await;
             signal_endpoint.close().await;
@@ -5650,35 +5378,28 @@ async fn connect_webrtc(
         EndpointAddr::from_parts(producer, [TransportAddr::Custom(custom_addr(producer))]);
     match endpoint.connect(webrtc_only, MOUNT_ALPN).await {
         Ok(connection) => {
-            // Pinned webrtc mode settles inline: it exists to *prove* the
-            // transport for tests and bench, so it must not resolve before
-            // the selected path is known. Dynamic mode defers the settle to
-            // the background join task — on a relay-free, IP-free endpoint
-            // there is nothing to settle on but WebRTC, so `"webrtc"` is a
-            // provisional label rather than the old unconditional guess, and
-            // the 3 s settle wait comes off the connect path.
+            // Settled inline on every mode, because there is no longer a
+            // second lane to report instead: the relay brokers the punch and
+            // never carries mount bytes, so a mount that did not settle on
+            // WebRTC has nothing to fall back to and must fail here.
             //
             // The *selected* path, not "is a WebRTC path present". Scanning
             // every path with `any()` answered a different question than the
             // one that matters — a connection can hold a WebRTC path it does
             // not send on — so it could report `webrtc` while the relay
             // carried the bytes, and the reverse.
-            let data_path = if allow_relay_fallback {
-                "webrtc".to_owned()
-            } else {
-                let selected = settled_path_label(&connection).await;
-                if selected.as_deref() != Some("webrtc") {
-                    let observed = path_labels(&connection);
-                    endpoint.close().await;
-                    signal_endpoint.close().await;
-                    return Err(JsValue::from_str(&format!(
-                        "mount connected but selected {} rather than WebRTC (paths={observed:?}), \
-                         and webrtc mode forbids a fallback",
-                        selected.as_deref().unwrap_or("no path"),
-                    )));
-                }
-                "webrtc".to_owned()
-            };
+            let selected = settled_path_label(&connection).await;
+            if selected.as_deref() != Some("webrtc") {
+                let observed = path_labels(&connection);
+                endpoint.close().await;
+                signal_endpoint.close().await;
+                return Err(JsValue::from_str(&format!(
+                    "mount connected but selected {} rather than WebRTC (paths={observed:?}); \
+                     the relay does not carry file data",
+                    selected.as_deref().unwrap_or("no path"),
+                )));
+            }
+            let data_path = "webrtc".to_owned();
             // Captured before the endpoint moves into the mesh below.
             let rendezvous_relays: Vec<String> = signal_endpoint
                 .addr()
@@ -5701,16 +5422,7 @@ async fn connect_webrtc(
                 endpoint,
             );
             client.rendezvous_relays = rendezvous_relays;
-            client.settle_pending = allow_relay_fallback;
             Ok(client)
-        }
-        Err(error) if allow_relay_fallback => {
-            let reason = format!("WebRTC mount dial failed: {error}");
-            web_sys::console::warn_1(&JsValue::from_str(&format!(
-                "[agent-share] {reason}; falling back to iroh relay/IP"
-            )));
-            endpoint.close().await;
-            finish_relay_fallback(signal_endpoint, ticket, token, reason).await
         }
         Err(error) => {
             endpoint.close().await;
@@ -5718,30 +5430,6 @@ async fn connect_webrtc(
             Err(err("dial the mount ALPN over WebRTC", &error))
         }
     }
-}
-
-async fn finish_relay_fallback(
-    endpoint: Endpoint,
-    ticket: MountTicket,
-    token: [u8; SECRET_LEN],
-    reason: String,
-) -> Result<ShareClient, JsValue> {
-    let connection = endpoint
-        .connect(ticket.addr.clone(), MOUNT_ALPN)
-        .await
-        .map_err(|error| err("dial the mount ALPN over iroh relay/IP (fallback)", &error))?;
-    let client = new_share_client(
-        connection,
-        token,
-        ticket.author,
-        "relay".to_owned(),
-        None,
-        None,
-        None,
-        endpoint,
-    );
-    *client.fallback_reason.borrow_mut() = Some(reason);
-    Ok(client)
 }
 
 /// A `JsValue` error as one line of prose, without the `JsValue("…")` wrapper

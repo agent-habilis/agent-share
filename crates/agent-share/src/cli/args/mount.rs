@@ -67,10 +67,9 @@ pub(crate) enum MountAction {
         only: Vec<String>,
         /// Data path for the copy: `webrtc` forces the data channel and fails
         /// if the connection settles anywhere else. Omit for the default, which
-        /// prefers iroh's own paths. Same flag, same meaning, as on the mount
-        /// form — it exists here so the browser lane can be exercised against a
-        /// share a tab is producing, which is the one pairing that otherwise
-        /// only ever takes the relay.
+        /// prefers iroh's own direct paths. Same flag, same meaning, as on the
+        /// mount form — it exists here so the browser lane can be exercised
+        /// against a share a tab is producing.
         #[arg(long)]
         transport: Option<String>,
         /// Password for a protected share. The copy records what it needs to
@@ -84,15 +83,15 @@ pub(crate) enum MountAction {
     },
     /// Synthetic throughput / latency bench (no real directory).
     ///
-    /// No ticket → producer; `--transport webrtc|relay|quic` is required and is
+    /// No ticket → producer; `--transport webrtc|quic` is required and is
     /// encoded in the ticket. With ticket → consumer (uses the producer's
     /// transport; no `--transport` flag).
     Bench {
         /// Ticket from a bench producer. Omit to produce.
         ticket: Option<String>,
-        /// Mount data path the producer opens: `webrtc`, `relay` or `quic`
-        /// (producer only). `quic` is plain iroh QUIC over UDP — the control
-        /// leg the wrapped transports are measured against.
+        /// Mount data path the producer opens: `webrtc` or `quic` (producer
+        /// only). `quic` is plain iroh QUIC over UDP — the control leg the
+        /// wrapped transport is measured against.
         #[arg(long)]
         transport: Option<String>,
         /// Measurement window after connect, in seconds (consumer).
@@ -177,7 +176,7 @@ mod tests {
 
     #[test]
     fn mount_bench_producer_parses() {
-        let cli = Cli::parse_from(["agent-share", "bench", "--transport", "relay"]);
+        let cli = Cli::parse_from(["agent-share", "bench", "--transport", "quic"]);
         let Some(super::MountAction::Bench {
             ticket,
             transport,
@@ -188,7 +187,7 @@ mod tests {
             panic!("expected Bench");
         };
         assert!(ticket.is_none());
-        assert_eq!(transport.as_deref(), Some("relay"));
+        assert_eq!(transport.as_deref(), Some("quic"));
         assert_eq!(
             duration,
             agent_share_proto::framing::DEFAULT_BENCH_DURATION_SECS

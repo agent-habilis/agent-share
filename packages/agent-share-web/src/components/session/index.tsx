@@ -300,16 +300,13 @@ const Session = component<{
     if (wantsPeerIps.peek() || tick.peek() % 5 === 0) {
       void current.client.refresh_peer_ips()
     }
-    // QUIC, for the whole connection — the half that answers on the relay path,
-    // where there is no candidate pair to ask.
+    // QUIC, for the whole connection — the half that answers even when
+     // there is no candidate pair to ask.
     const link = current.client.sample_link()
     sample.value = {
       link,
       gossip: current.client.peers_gossip,
       direct: current.client.peers_direct,
-      // A live mount on the relay (or IP) is a connected peer the direct
-      // count cannot see — the WebRTC-path mount is already inside it.
-      relayPeer: !current.client.closed && current.client.transport !== 'webrtc',
     }
     const moved = link.total.sent + link.total.received
     if (moved > movedBytes) lastActivityAt.value = Date.now()

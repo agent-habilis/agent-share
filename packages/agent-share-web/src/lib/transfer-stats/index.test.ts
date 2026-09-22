@@ -25,21 +25,14 @@ function lane(label: string, received: number, selected = false): Lane {
 }
 
 describe('peerCounts', () => {
-  test('a relay-carried mount peer counts as connected', () => {
-    // The producer-less topology: bytes flow from a seeder over the relay,
-    // zero data channels. `00/…` here read as "disconnected" while a
-    // download was visibly running.
-    expect(peerCounts(5, 0, true)).toEqual({ connected: 1, known: 4 })
+  test('a mount peer is already in the direct count', () => {
+    // Every mount rides a data channel, so that session sits in the
+    // registry and `direct` carries it; counting it again would double it.
+    expect(peerCounts(2, 1)).toEqual({ connected: 1, known: 1 })
   })
 
-  test('a webrtc-path mount adds nothing extra', () => {
-    // That session already sits in the registry, so `direct` carries it;
-    // counting it again would double the one peer.
-    expect(peerCounts(2, 1, false)).toEqual({ connected: 1, known: 1 })
-  })
-
-  test('the relay peer keeps known from dropping below connected', () => {
-    expect(peerCounts(0, 0, true)).toEqual({ connected: 1, known: 1 })
+  test('known never drops below connected', () => {
+    expect(peerCounts(0, 1)).toEqual({ connected: 1, known: 1 })
   })
 
 
@@ -185,8 +178,8 @@ describe('field widths', () => {
 
 describe('laneSummary', () => {
   test('names each lane and marks the selected one', () => {
-    expect(laneSummary([lane('webrtc', 2048, true), lane('relay', 0)])).toBe(
-      'webrtc* 2.0 KB · relay 0 B',
+    expect(laneSummary([lane('webrtc', 2048, true), lane('ip', 0)])).toBe(
+      'webrtc* 2.0 KB · ip 0 B',
     )
   })
 

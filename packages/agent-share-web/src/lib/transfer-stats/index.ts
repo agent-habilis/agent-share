@@ -8,7 +8,7 @@
  * and formatting.
  *
  * These are **wire** bytes on the mount connection, counted by the QUIC state
- * machine below the transport split, so they answer identically on the relay
+ * machine below the transport split, so they answer identically on the data
  * path and the WebRTC one. They are not payload: a download reads slightly
  * higher than the file, and they exclude mesh/gossip traffic, which rides
  * connections this client cannot reach.
@@ -27,7 +27,7 @@ export interface Meter {
 
 /** One network path of the mount connection. */
 export interface Lane extends Meter {
-  /** `webrtc` / `relay` / `ip`. */
+  /** `webrtc` / `ip`. */
   label: string
   /** Whether this path is carrying application data right now. */
   selected: boolean
@@ -52,16 +52,6 @@ export interface TransferSnapshot {
   gossip: number
   /** `peers_direct` — peers we hold a data channel with. */
   direct: number
-  /**
-   * A live mount connection riding a non-WebRTC path (relay or IP).
-   *
-   * That peer is invisible to `direct` — the session registry only counts
-   * data channels — yet it is the most connected peer this tab has: it is
-   * the one serving the bytes. Without it a producer-less share read
-   * `00/04` while actively downloading, which is how this field earned its
-   * place.
-   */
-  relayPeer: boolean
 }
 
 /**
@@ -109,10 +99,10 @@ export interface PeerCounts {
  * with the mesh down `peers_gossip` is 0 while a direct producer session may
  * still exist, and reporting `2/0` connected-of-known would be nonsense.
  */
-export function peerCounts(gossip: number, direct: number, relayPeer = false): PeerCounts {
-  // A mount on a WebRTC path already sits in the session registry and so in
-  // `direct`; only the relay/IP-carried mount peer needs adding by hand.
-  const connected = Math.max(direct, 0) + (relayPeer ? 1 : 0)
+export function peerCounts(gossip: number, direct: number): PeerCounts {
+  // Every mount rides a data channel, so the mount peer is already in the
+  // session registry and so in `direct`.
+  const connected = Math.max(direct, 0)
   const known = Math.max(gossip - 1, connected, 0)
   return { connected, known }
 }
@@ -200,7 +190,7 @@ export function formatSampledRate(bytesPerSecond: number): string {
 }
 
 /**
- * The per-lane split, for the tooltip: `webrtc 41.2 MB · relay 0 B`.
+ * The per-lane split, for the tooltip: `webrtc* 41.2 MB · ip 0 B`.
  *
  * Received rather than sent, because that is the number a reader is checking
  * when they want to know which lane actually carried the share. The selected
