@@ -17,5 +17,5 @@ export default {
   // The webapp is not part of this Next build: it is a separate Bun bundle that
   // scripts/build.ts puts under dist/app/. An href, so the navbar does a full
   // document load into it instead of a soft navigation Next cannot serve.
-  app: { type: 'page', title: 'Open the app', href: '/app/' },
+  app: { type: 'page', title: 'Webapp', href: '/app/' },
 }

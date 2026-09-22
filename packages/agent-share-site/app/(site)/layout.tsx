@@ -70,6 +70,19 @@ export default async function SiteLayout({ children }: { children: ReactNode }) 
         >
           {children}
         </Layout>
+        {/*
+          The webapp opens in its own tab. Every link in the content says so in
+          its own markup; the navbar's cannot, because it comes from
+          `content/_meta.ts`, and a page item there carries a title and an href
+          and nothing else. Hence this, rather than rebuilding the nav item by
+          hand to hang two attributes off it. Without JavaScript the link still
+          works — it opens in the same tab.
+        */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `document.querySelectorAll('a[href^="/app"]').forEach(function(a){a.target="_blank";a.rel="noopener"})`,
+          }}
+        />
       </body>
     </html>
   )

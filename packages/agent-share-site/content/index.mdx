@@ -4,7 +4,6 @@ title: Share a folder. Mount it anywhere.
 
 import { Cards } from 'nextra/components'
 import { Hero } from '@/components/hero'
-import { BrowserIcon, DriveIcon, LazyIcon, LiveIcon, LockIcon, TerminalIcon } from '@/components/icons'
 
 <div className="dots">
 
@@ -16,16 +15,16 @@ import { BrowserIcon, DriveIcon, LazyIcon, LiveIcon, LockIcon, TerminalIcon } fr
 brew install agent-habilis/tap/agent-share
 ```
 
-<p className="install-more">Cargo, prebuilt binaries, or no install at all — see <a href="/docs/getting-started">Getting started</a>.</p>
+<p className="install-more">Cargo and prebuilt binaries: see <a href="/docs/getting-started">Getting started</a>. Nothing to install: <a href="/app/" target="_blank" rel="noopener">open a share in the webapp</a>.</p>
 
 </section>
 
 </div>
 
 <Cards num={3} className="bento">
-  <div className="bento-2 bento-tall tile">
-    <h2 className="tile-title"><TerminalIcon /> Two commands</h2>
-    <p>One machine serves a folder. It prints a ticket. The other machine mounts the folder with that ticket.</p>
+  <div className="bento-2 tile">
+    <h2 className="tile-title"><span className="tile-emoji">🗄️</span> Two commands</h2>
+    <p>One machine serves the folder and prints a ticket. The other mounts it with that ticket.</p>
 
 ```sh
 # producer
@@ -36,19 +35,25 @@ agent-share <ticket> ~/mnt
 ```
 
   </div>
-  <Cards.Card icon={<LazyIcon />} title="Lazy, ranged reads" href="/docs/concepts#lazy-reads">
-    <p>Serve scans metadata only. Peers fetch only the bytes they read.</p>
+  <Cards.Card icon={<span className="tile-emoji">🔒</span>} title="Nothing goes to a cloud" href="/docs/concepts">
+    <p>The files stay on the machine that serves them. Peers connect straight to each other over encrypted QUIC. No bucket, no account, nobody else holding the data.</p>
   </Cards.Card>
-  <Cards.Card icon={<LiveIcon />} title="Live" href="/docs/concepts#live-changes">
-    <p>Edits, new files and deletions reach connected peers without a remount.</p>
+  <Cards.Card icon={<span className="tile-emoji">📂</span>} title="It mounts as a real folder" href="/docs/concepts#the-nfs-bridge">
+    <p>grep it, open it in an editor, build against it. The OS's own NFS client does the mounting, so there is no FUSE, no kernel extension and no daemon.</p>
   </Cards.Card>
-  <Cards.Card icon={<DriveIcon />} title="The OS's own NFS client" href="/docs/concepts#the-nfs-bridge">
-    <p>A loopback NFSv3 bridge. No FUSE, no kernel extension, no daemon.</p>
+  <Cards.Card icon={<span className="tile-emoji">⚡</span>} title="Only the bytes you read" href="/docs/concepts#lazy-reads">
+    <p>Serving scans names and sizes, nothing else. Open one file in a 10 GB folder and one file is what crosses the wire.</p>
   </Cards.Card>
-  <Cards.Card icon={<LockIcon />} title="Password-protected" href="/docs/commands#passwords">
-    <p>The ticket finds the share but does not open it. Post the link where the password is not.</p>
+  <Cards.Card icon={<span className="tile-emoji">🔄</span>} title="Always the current version" href="/docs/concepts#live-changes">
+    <p>The producer watches the folder. Edits, new files and deletions reach everyone connected, with no remount.</p>
   </Cards.Card>
-  <Cards.Card icon={<BrowserIcon />} title="Open it in a browser" href="/docs/browser">
-    <p>The webapp connects straight to the producer. No backend, no signalling server.</p>
+  <Cards.Card icon={<span className="tile-emoji">🌍</span>} title="It finds the other machine" href="/docs/networking">
+    <p>The same room over mDNS, anywhere else over the DHT and relays. It holes through NAT, so there is no port to forward and no VPN to join.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🔑</span>} title="Safe to share" href="/docs/commands#passwords">
+    <p>A password-protected ticket addresses the share without opening it. Post the link where the password is not.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🌐</span>} title="Nothing to install" href="/app/" target="_blank" rel="noopener">
+    <p>Open the ticket in the webapp, or run <code>npx agent-share</code>. Neither needs the binary.</p>
   </Cards.Card>
 </Cards>

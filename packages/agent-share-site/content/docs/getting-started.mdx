@@ -9,7 +9,7 @@ import { Callout, Steps, Tabs } from 'nextra/components'
 
 ## Install
 
-<Tabs items={['brew', 'cargo']}>
+<Tabs items={['brew', 'cargo', 'npx', 'browser']}>
   <Tabs.Tab>
 
 Homebrew, for macOS and Linux:
@@ -26,6 +26,23 @@ From source, everywhere else:
 ```sh
 cargo install --git https://github.com/agent-habilis/agent-share agent-share
 ```
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+
+No install. Node writes the files into a folder instead of mounting them:
+
+```sh
+npx agent-share <ticket> [destination]
+```
+
+The destination defaults to `./share`. To serve a folder, use the binary.
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+
+No install and no terminal. Open the <a href="/app/" target="_blank" rel="noopener">webapp</a> and paste a ticket, or
+share a folder straight from the tab.
 
   </Tabs.Tab>
 </Tabs>
