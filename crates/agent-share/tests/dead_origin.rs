@@ -21,9 +21,11 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Instant;
 
-mod common;
 use agent_share_proto::ticket::MountTicket;
-use common::{CONNECT_TIMEOUT, LOOPBACK_SWARM_ID, POLL, test_cmd};
+
+use self::common::{CONNECT_TIMEOUT, LOOPBACK_SWARM_ID, POLL, test_cmd};
+
+mod common;
 
 /// A spawned `agent-share` child killed when the test ends (or panics).
 struct ChildGuard(Child);

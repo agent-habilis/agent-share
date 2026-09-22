@@ -1,9 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
-
 use agent_share_proto::manifest::{DirEntry, FileEntry, MountManifest};
+use anyhow::{Context, Result, bail};
 
 /// The relative path is length-prefixed with a `u16` on the wire; refuse to
 /// serve anything longer so the count can never disagree with the bytes.

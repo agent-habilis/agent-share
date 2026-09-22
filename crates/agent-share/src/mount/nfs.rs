@@ -8,10 +8,9 @@ use nfsserve::nfs::{
 };
 use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
 
-use crate::file::walk::safe_component;
-
 use super::MAX_READ_LEN;
 use super::MountManifest;
+use crate::file::walk::safe_component;
 
 /// Where the file bytes come from — a seam so [`RemoteFs`] unit-tests against
 /// an in-memory source instead of a live iroh connection.
@@ -610,12 +609,13 @@ impl<S: ByteSource + 'static> NFSFileSystem for RemoteFs<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ByteSource, Node, ROOT_ID, RemoteFs, TreeIds, build_tree, node_name};
     use agent_share_proto::manifest::{DirEntry as WireDir, FileEntry, MountManifest};
     use anyhow::Result;
     use async_trait::async_trait;
     use nfsserve::nfs::nfsstat3;
     use nfsserve::vfs::NFSFileSystem;
+
+    use super::{ByteSource, Node, ROOT_ID, RemoteFs, TreeIds, build_tree, node_name};
 
     /// An in-memory byte source: one buffer per manifest file index.
     struct MemSource {

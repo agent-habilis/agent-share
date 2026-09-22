@@ -65,6 +65,7 @@
 //! Without that, losing the race cost a full JSEP round and then dropped the
 //! mount to relay — with a perfectly good `WebRTC` channel sitting unused.
 
+pub(crate) use agent_share_proto::framing::WEBRTC_SIGNAL_ALPN;
 use anyhow::{Context, Result};
 use fofoca::iroh::endpoint::Connection;
 use fofoca::iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
@@ -72,8 +73,6 @@ use fofoca_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, NegotiatedSession, SignalEnvelope, WebRtcHandle, answer_with,
     custom_addr, offer_with,
 };
-
-pub(crate) use agent_share_proto::framing::WEBRTC_SIGNAL_ALPN;
 
 /// How long to let a JSEP negotiation run before giving up.
 ///

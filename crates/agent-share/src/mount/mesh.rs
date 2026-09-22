@@ -845,10 +845,12 @@ pub(crate) async fn join(opts: JoinOpts) -> Result<ShareMesh> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Role, cards_from_book, roles_suffix};
+    use std::collections::BTreeSet;
+
     use agent_share_proto::PeerCard;
     use agent_share_proto::roster::{Roster, entries_from_meta};
-    use std::collections::BTreeSet;
+
+    use super::{Role, cards_from_book, roles_suffix};
 
     /// How long a roster may take to converge before a test calls it stuck.
     ///
@@ -1098,9 +1100,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_peers_of_one_share_see_each_other_on_the_mesh() {
-        use crate::protocol::swarm::LookupOpts;
-        use rand::RngCore;
         use std::time::{Duration, Instant};
+
+        use rand::RngCore;
+
+        use crate::protocol::swarm::LookupOpts;
 
         let _slot = MESH_SLOT.lock().await;
         // One secret, so both peers derive the same mesh — the invariant the
@@ -1162,10 +1166,12 @@ mod tests {
     /// strings, the guard would be built on sand.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn peers_publish_the_tree_they_are_on() {
-        use crate::protocol::swarm::LookupOpts;
+        use std::time::{Duration, Instant};
+
         use agent_share_proto::manifest::{FileEntry, MountManifest};
         use rand::RngCore;
-        use std::time::{Duration, Instant};
+
+        use crate::protocol::swarm::LookupOpts;
 
         fn manifest_of(paths: &[&str]) -> MountManifest {
             MountManifest {
@@ -1243,9 +1249,11 @@ mod tests {
     /// candidate source.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_peer_can_publish_its_tree_after_joining_without_one() {
-        use crate::protocol::swarm::LookupOpts;
-        use rand::RngCore;
         use std::time::{Duration, Instant};
+
+        use rand::RngCore;
+
+        use crate::protocol::swarm::LookupOpts;
 
         let _slot = MESH_SLOT.lock().await;
         let mut secret = [0u8; super::SECRET_LEN];
@@ -1310,8 +1318,9 @@ mod tests {
     /// peer, forever.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn setting_the_same_tree_twice_is_silent() {
-        use crate::protocol::swarm::LookupOpts;
         use rand::RngCore;
+
+        use crate::protocol::swarm::LookupOpts;
 
         let _slot = MESH_SLOT.lock().await;
         let mut secret = [0u8; super::SECRET_LEN];

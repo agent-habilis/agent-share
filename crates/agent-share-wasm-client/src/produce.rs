@@ -9,6 +9,7 @@
 //! answerer) and the mount ALPN (manifest / read / watch).
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -25,6 +26,9 @@ use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
 use fofoca::iroh::endpoint::{Connection, presets};
 use fofoca::iroh::{Endpoint, SecretKey};
+use fofoca_chunks::{
+    CHUNK_BYTES, ChunkHash, ChunkMap, ChunkMapBuilder, Coverage, Root, chunk_hash,
+};
 use fofoca_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle,
     browser_answer, log_signal_sdps,
@@ -37,11 +41,6 @@ use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{File, FileSystemFileHandle};
-
-use fofoca_chunks::{
-    CHUNK_BYTES, ChunkHash, ChunkMap, ChunkMapBuilder, Coverage, Root, chunk_hash,
-};
-use std::collections::HashMap;
 
 use crate::live_state::LiveState;
 

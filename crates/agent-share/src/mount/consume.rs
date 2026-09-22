@@ -3,16 +3,20 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_share_proto::PeerCard;
+use agent_share_proto::auth::ShareAuth;
+use agent_share_proto::authorship::SignedManifest;
 use agent_share_proto::framing::decode_response_header;
+use agent_share_proto::framing::{
+    MAX_MANIFEST_SINCE_BYTES, MAX_SIGNED_MANIFEST_BYTES, ManifestSince, OP_MANIFEST_SINCE,
+};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fofoca::iroh::Endpoint;
 use fofoca::iroh::endpoint::{Connection, RecvStream, SendStream};
+use fofoca_chunks::{ChunkHash, ChunkMap};
+use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
 use nfsserve::tcp::{NFSTcp, NFSTcpListener};
 use tokio::sync::Mutex;
-
-use crate::file::wire::read_u32;
-use crate::lookup::{add_peer_addr, build_endpoint};
 
 use super::MountTicket;
 use super::mesh::ShareMesh;
@@ -22,16 +26,11 @@ use super::{
     MAX_CHUNK_MAP_BYTES, MAX_MANIFEST_BYTES, MOUNT_ALPN, OP_CHUNK, OP_CHUNK_MAP, OP_MANIFEST,
     OP_READ, OP_WATCH,
 };
-use agent_share_proto::authorship::SignedManifest;
-use agent_share_proto::framing::{
-    MAX_MANIFEST_SINCE_BYTES, MAX_SIGNED_MANIFEST_BYTES, ManifestSince, OP_MANIFEST_SINCE,
-};
 // The root type comes from the store, not from this crate: `agent-share` names
 // what `fofoca-blobs` verifies against rather than defining a second one.
 use super::{MountManifest, ReadStatus};
-use agent_share_proto::auth::ShareAuth;
-use fofoca_chunks::{ChunkHash, ChunkMap};
-use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
+use crate::file::wire::read_u32;
+use crate::lookup::{add_peer_addr, build_endpoint};
 
 /// How long to keep retrying the dial while the producer's address propagates
 /// (mDNS is instant on a LAN; the DHT fallback can take tens of seconds).
@@ -1430,8 +1429,9 @@ fn chunk_cache_dir() -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::TimeZone;
+
+    use super::*;
 
     #[test]
     fn mount_folder_name_is_iso_local_minute() {
@@ -1467,9 +1467,10 @@ mod tests {
 
     /// The three things a signature has to do here, and one it must not.
     mod authorship {
-        use super::super::accept_manifest;
         use agent_share_proto::authorship::{SecretKey, SignedManifest, sign_manifest};
         use agent_share_proto::ticket::MountTicket;
+
+        use super::super::accept_manifest;
 
         fn creator() -> SecretKey {
             SecretKey::from_bytes(&[11u8; 32])

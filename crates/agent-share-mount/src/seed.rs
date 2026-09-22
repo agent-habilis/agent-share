@@ -496,10 +496,12 @@ impl<S: ChunkSource + 'static> ServeSource for Seeder<S> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use fofoca_chunks::{ChunkMap, MemStore, Root, chunk_hash};
+
     use super::Seeder;
     use crate::ServeSource as _;
-    use fofoca_chunks::{ChunkMap, MemStore, Root, chunk_hash};
-    use std::sync::Arc;
 
     /// Typed once so every case names the same store. `MemStore` rather than a
     /// real backend on purpose: these are about what a seeder *refuses*, which

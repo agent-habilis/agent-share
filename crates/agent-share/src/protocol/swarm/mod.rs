@@ -9,13 +9,13 @@
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-mod id;
-mod lookup;
-
-pub(crate) use id::SwarmId;
-pub(crate) use lookup::{
+pub(crate) use self::id::SwarmId;
+pub(crate) use self::lookup::{
     LookupOpts, LookupSet, RelayChoice, RelayLadder, RelaySelection, resolve_transfer_lookups,
 };
+
+mod id;
+mod lookup;
 
 /// Version byte leading the id payload; bumped on incompatible layout changes.
 const VERSION: u8 = 1;

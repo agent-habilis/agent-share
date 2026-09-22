@@ -15,21 +15,21 @@
 //! RTT is *measured*, not injected: every row carries its own
 //! `latency_ms.median`, which is why this needs no `dnctl`/`pfctl` and no root.
 
-pub(crate) mod browser;
-pub(crate) mod mount;
-pub(crate) mod proc;
-pub(crate) mod reap;
-pub(crate) mod row;
-
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use xshell::{Shell, cmd};
 
+use self::proc::{Proc, Res, run_capture, spawn_piped};
+use self::row::{BenchReport, Provenance, Report, Row, SPREAD_WARN_PCT};
 use crate::TaskOutcome;
 use crate::util::{self, output};
-use proc::{Proc, Res, run_capture, spawn_piped};
-use row::{BenchReport, Provenance, Report, Row, SPREAD_WARN_PCT};
+
+pub(crate) mod browser;
+pub(crate) mod mount;
+pub(crate) mod proc;
+pub(crate) mod reap;
+pub(crate) mod row;
 
 /// A swarm id with loopback lookups (no mDNS/DHT/relay), so a loopback cell
 /// stays on this host. Same constant the subprocess tests pin

@@ -76,10 +76,19 @@ fails). Other platforms can still `serve`.
 
 ```
 cargo build
+cargo task fmt
 cargo clippy --all-targets
 cargo test                          # includes a subprocess bridge test, no OS mount
 cargo test --test mount -- --ignored  # the real OS-mount round trip, run by hand
 ```
+
+Imports form one block at the top of the file, before any `mod`, in three
+groups: std, then external crates (the workspace crates included), then
+`self`/`super`/`crate`. Write a child-module import as `self::child::…` so that
+it sorts into the last group. `cargo task fmt` runs nightly rustfmt (pinned in
+`tasks/src/fmt.rs`) for the `group_imports` option in `rustfmt.toml`, and
+`cargo task ci` fails on drift. rustfmt does not move a `use` that comes after
+a `mod`.
 
 The wire format is pinned by golden tests (`wire_constants_are_pinned`,
 `type_bytes_are_pinned_wire_format`, `swarm_id_wire_format_is_pinned`) — if one

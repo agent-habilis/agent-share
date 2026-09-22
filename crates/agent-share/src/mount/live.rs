@@ -23,14 +23,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use agent_share_proto::authorship::SecretKey;
+use agent_share_proto::authorship::{SIGNATURE_LEN, SignedManifest};
+use agent_share_proto::manifest::{DirEntry, FileEntry, ManifestDelta, MountManifest};
 use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher as _};
 use tokio::sync::broadcast;
 
 use super::{MAX_DELTA_BYTES, WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
-use agent_share_proto::authorship::SecretKey;
-use agent_share_proto::authorship::{SIGNATURE_LEN, SignedManifest};
-use agent_share_proto::manifest::{DirEntry, FileEntry, ManifestDelta, MountManifest};
 
 /// How long the tree must sit still before a rescan.
 ///
@@ -667,9 +667,11 @@ pub(super) fn spawn_watcher(tree: Arc<LiveTree>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LiveTree, SIGNATURE_LEN, SecretKey, SignedManifest, seal};
-    use agent_share_proto::manifest::{FileEntry, ManifestDelta, MountManifest};
     use std::path::PathBuf;
+
+    use agent_share_proto::manifest::{FileEntry, ManifestDelta, MountManifest};
+
+    use super::{LiveTree, SIGNATURE_LEN, SecretKey, SignedManifest, seal};
 
     /// A throwaway directory holding a partial copy of a share.
     struct TempTree(PathBuf);

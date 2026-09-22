@@ -263,6 +263,8 @@ impl MountTicket {
 
 #[cfg(test)]
 mod tests {
+    use fofoca_protocol::iroh_base::{EndpointAddr, SecretKey};
+
     use super::{
         MountTicket, SECRET_LEN, TICKET_FLAG_PASSWORD, TICKET_KIND_BENCH_QUIC,
         TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC, TICKET_KIND_SHARE,
@@ -270,7 +272,6 @@ mod tests {
     use crate::lookup::LookupOpts;
     use crate::peer_addr::endpoint_addr_to_json;
     use crate::token::{self, TokenType};
-    use fofoca_protocol::iroh_base::{EndpointAddr, SecretKey};
 
     fn sample() -> MountTicket {
         let id = SecretKey::from_bytes(&[7u8; 32]).public();
@@ -456,11 +457,12 @@ mod tests {
 
 #[cfg(test)]
 mod author_tests {
+    use fofoca_protocol::iroh_base::{EndpointAddr, SecretKey};
+
     use super::{
         MountTicket, SECRET_LEN, TICKET_FLAG_PASSWORD, TICKET_FLAG_SIGNED, TICKET_KIND_SHARE,
     };
     use crate::lookup::LookupOpts;
-    use fofoca_protocol::iroh_base::{EndpointAddr, SecretKey};
 
     fn base() -> MountTicket {
         let id = SecretKey::from_bytes(&[7u8; 32]).public();

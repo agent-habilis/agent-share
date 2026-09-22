@@ -619,10 +619,10 @@ fn report(tally: &Tally, dest: &Path, json: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ORIGIN_SECRET, origin_secret_for, safe_join, sidecar_dir, write_secret};
     use std::path::Path;
 
     use super::wanted;
+    use super::{ORIGIN_SECRET, origin_secret_for, safe_join, sidecar_dir, write_secret};
 
     /// **The property that makes a copy a source rather than a rival share.**
     ///

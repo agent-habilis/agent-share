@@ -29,6 +29,23 @@
 //! The tests live beside the code they pin and must fail loudly; when a change
 //! really is intended, update them in the same commit that makes it.
 
+pub use self::auth::{MOUNT_TICKET_LABEL, ShareAuth, ct_eq, share_token};
+pub use self::client::{
+    CARD_APP, CARD_CLIENT, CARD_ENDPOINT, CARD_ROLE, CARD_RUNTIME, CARD_TRANSPORT, CARD_VERSION,
+    PRODUCT as CLIENT_PRODUCT, PeerCard, format_label as format_client_label,
+};
+pub use self::framing::{
+    BENCH_ECHO_INTERVAL_SECS, BENCH_KIND_ECHO, BENCH_KIND_FILL, CLOSE_BAD_SECRET,
+    CLOSE_UNAUTHORIZED, DEFAULT_BENCH_DURATION_SECS, MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES,
+    MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_MANIFEST, OP_READ,
+    REQUEST_HEADER_LEN, SECRET_LEN, WEBRTC_SIGNAL_ALPN,
+};
+pub use self::manifest::{DirEntry, FileEntry, MountManifest, ReadStatus};
+pub use self::ticket::{
+    MountTicket, TICKET_FLAG_PASSWORD, TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_RELAY,
+    TICKET_KIND_BENCH_WEBRTC, TICKET_KIND_SHARE,
+};
+
 pub mod auth;
 /// Who may change a share: the creator's signature over each manifest version.
 pub mod authorship;
@@ -42,21 +59,3 @@ pub mod roster;
 pub mod serving;
 pub mod ticket;
 pub mod token;
-
-pub use client::{
-    CARD_APP, CARD_CLIENT, CARD_ENDPOINT, CARD_ROLE, CARD_RUNTIME, CARD_TRANSPORT, CARD_VERSION,
-    PRODUCT as CLIENT_PRODUCT, PeerCard, format_label as format_client_label,
-};
-
-pub use auth::{MOUNT_TICKET_LABEL, ShareAuth, ct_eq, share_token};
-pub use framing::{
-    BENCH_ECHO_INTERVAL_SECS, BENCH_KIND_ECHO, BENCH_KIND_FILL, CLOSE_BAD_SECRET,
-    CLOSE_UNAUTHORIZED, DEFAULT_BENCH_DURATION_SECS, MAX_BENCH_ECHO_BYTES, MAX_BENCH_FILL_BYTES,
-    MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH, OP_MANIFEST, OP_READ,
-    REQUEST_HEADER_LEN, SECRET_LEN, WEBRTC_SIGNAL_ALPN,
-};
-pub use manifest::{DirEntry, FileEntry, MountManifest, ReadStatus};
-pub use ticket::{
-    MountTicket, TICKET_FLAG_PASSWORD, TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_RELAY,
-    TICKET_KIND_BENCH_WEBRTC, TICKET_KIND_SHARE,
-};

@@ -46,11 +46,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
-
-use fofoca_chunks::{
-    ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, Coverage, FileId, IdbStore, Root,
-    chunk_hash,
-};
 use std::sync::Arc;
 
 use agent_share_proto::PeerCard;
@@ -67,8 +62,19 @@ use agent_share_proto::mesh_key::share_mesh_key;
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
 use fofoca::iroh::endpoint::{Connection, presets};
 use fofoca::iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr, Watcher as _};
+use fofoca_chunks::{
+    ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, Coverage, FileId, IdbStore, Root,
+    chunk_hash,
+};
+use fofoca_iroh_webrtc_transport::{
+    BrowserHubTransport, BrowserSession, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope,
+    WebRtcHandle, browser_offer, custom_addr, log_signal_sdps,
+};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
+
+pub use self::mesh::MeshPeer;
+pub use self::transport_mode::TransportMode;
 
 mod link;
 mod live_state;
@@ -79,14 +85,6 @@ mod produce;
 mod seed;
 mod swarm;
 mod transport_mode;
-
-pub use mesh::MeshPeer;
-pub use transport_mode::TransportMode;
-
-use fofoca_iroh_webrtc_transport::{
-    BrowserHubTransport, BrowserSession, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope,
-    WebRtcHandle, browser_offer, custom_addr, log_signal_sdps,
-};
 
 /// The endpoint the mount rides, offered to the mesh so both share one hub.
 ///
@@ -6008,17 +6006,17 @@ fn pinned_ladder() -> Vec<fofoca::iroh::RelayUrl> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CHANNEL_DISCONNECT_GRACE_MS, PeerCard, ProbeChunkSource, RaceOutcome, SwarmView,
-        drain_with_stall_deadline, first_success, pinned_ladder, relay_mode, swarm_rows,
-    };
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
-
     // These run on wasm32, the only target this crate builds for — see the
     // dev-dependency note in `Cargo.toml`. Renaming the attribute keeps the
     // tests written as ordinary `#[test]` functions.
     use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    use super::{
+        CHANNEL_DISCONNECT_GRACE_MS, PeerCard, ProbeChunkSource, RaceOutcome, SwarmView,
+        drain_with_stall_deadline, first_success, pinned_ladder, relay_mode, swarm_rows,
+    };
 
     /// A producing tab homes on the ladder its ticket goes on to advertise.
     ///
@@ -6272,8 +6270,9 @@ mod tests {
     /// it only waits, past it the channel is declared dead.
     #[test]
     fn disconnected_gets_grace_then_dies() {
-        use super::{CHANNEL_DISCONNECT_GRACE_MS, ChannelVerdict, judge_channel};
         use web_sys::RtcPeerConnectionState as State;
+
+        use super::{CHANNEL_DISCONNECT_GRACE_MS, ChannelVerdict, judge_channel};
         assert_eq!(
             judge_channel(State::Disconnected, None),
             ChannelVerdict::Wait

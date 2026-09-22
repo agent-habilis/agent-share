@@ -113,10 +113,12 @@ impl ChunkCache {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use fofoca_chunks::{CHUNK_BYTES_USIZE, chunk_hash};
+
     use super::ChunkCache;
     use crate::mount::live::LiveTree;
-    use fofoca_chunks::{CHUNK_BYTES_USIZE, chunk_hash};
-    use std::sync::Arc;
 
     fn tree_of(root: &std::path::Path) -> Arc<LiveTree> {
         let (manifest, paths) = crate::mount::scan::scan(root).expect("scan");

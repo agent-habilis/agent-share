@@ -9,10 +9,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+pub(crate) use agent_share_proto::lookup::{LookupOpts, RelayChoice, read_u16};
 use anyhow::{Context, Result, bail};
 use fofoca::iroh::RelayUrl;
-
-pub(crate) use agent_share_proto::lookup::{LookupOpts, RelayChoice, read_u16};
 
 /// Relay intent from the CLI: absent / default / custom. Resolved into a
 /// [`RelayChoice`] by [`resolve_lookups`]. `Custom` carries the ordered

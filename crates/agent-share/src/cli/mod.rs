@@ -2,11 +2,11 @@
 //! agent-habilis/swarm's `src/cli/mod.rs`, with the `Mount` subcommand
 //! hoisted to the root command.
 
-pub(crate) mod args;
-
 use anyhow::Result;
 
-use args::{Cli, MountAction, OutputFormat};
+use self::args::{Cli, MountAction, OutputFormat};
+
+pub(crate) mod args;
 
 /// Read the consumer's `--transport` flag.
 ///

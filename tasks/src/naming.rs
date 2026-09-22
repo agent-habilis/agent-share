@@ -26,13 +26,15 @@ use crate::util::repo_root;
 /// SPDX `license` field — but renaming it would lose crates.io and GitHub
 /// detection for nothing. `CLAUDE.md`/`AGENTS.md` are here before they exist:
 /// `clippy.toml` already points at a `CLAUDE.md`, and the gate should not be
-/// what stops someone committing one.
+/// what stops someone committing one. `Formula` is the folder Homebrew reads
+/// in a tap, and the release workflow copies ours into the tap as-is.
 const ALLOWED: &[&str] = &[
     "AGENTS.md",
     "CLAUDE.md",
     "Cargo.lock",
     "Cargo.toml",
     "Dockerfile",
+    "Formula",
     "LICENSE",
     "README.md",
 ];
@@ -231,8 +233,9 @@ fn suggest(name: &str, zone: Zone) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Zone, is_valid, suggest, zone_of};
     use std::collections::BTreeSet;
+
+    use super::{Zone, is_valid, suggest, zone_of};
 
     fn roots() -> BTreeSet<String> {
         ["crates/agent-share", "tasks"]
@@ -287,6 +290,7 @@ mod tests {
         assert!(is_valid(".cargo", Zone::Kebab));
         assert!(is_valid("Cargo.toml", Zone::Snake));
         assert!(is_valid("README.md", Zone::Snake));
+        assert!(is_valid("Formula", Zone::Kebab));
         assert!(!is_valid("..odd", Zone::Kebab));
     }
 

@@ -4,6 +4,8 @@
 //! the same ops over the same streams. They had already drifted in small ways
 //! by the time they were merged, which is the argument for merging them.
 
+use std::future::Future;
+
 use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::framing::{
     MAX_READ_LEN, ManifestSince, OP_CHUNK, OP_CHUNK_MAP, OP_HAVE, OP_MANIFEST, OP_MANIFEST_SINCE,
@@ -13,7 +15,6 @@ use agent_share_proto::manifest::ReadStatus;
 use anyhow::{Context as _, Result};
 use fofoca::iroh::endpoint::{Connection, RecvStream, SendStream};
 use fofoca_chunks::{ChunkHash, ChunkMap, Coverage, Root};
-use std::future::Future;
 
 /// A live `OP_WATCH` subscription.
 ///

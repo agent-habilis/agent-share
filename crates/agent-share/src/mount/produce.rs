@@ -5,19 +5,18 @@ use agent_share_proto::auth::ShareAuth;
 use anyhow::{Context, Result, bail};
 use fofoca::iroh::endpoint::Connection;
 use fofoca::iroh::{Endpoint, SecretKey};
+use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 use rand::RngCore;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-use crate::file::human_bytes;
-use crate::lookup::build_endpoint;
-use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 
 use super::MountTicket;
 use super::ReadStatus;
 use super::WEBRTC_SIGNAL_ALPN;
 use super::live::LiveTree;
 use super::{MAX_READ_LEN, MOUNT_ALPN, SECRET_LEN, wait_online};
-use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
+use crate::file::human_bytes;
+use crate::lookup::build_endpoint;
+use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 
 /// Producer: share `dir` read-only. Scans at startup, then rescans whenever
 /// the tree changes and publishes the difference to anyone watching, so a

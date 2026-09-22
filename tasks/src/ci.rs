@@ -11,7 +11,7 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     crate::naming::run(sh)?;
 
     output::status("Checking", "formatting");
-    cmd!(sh, "cargo fmt --check").quiet().run()?;
+    crate::fmt::check(sh)?;
 
     output::status("Running", "clippy");
     cmd!(sh, "cargo clippy --workspace --all-targets -- -D warnings")

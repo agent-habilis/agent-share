@@ -17,17 +17,16 @@ use agent_share_proto::ticket::{
 use anyhow::{Context, Result, bail};
 use fofoca::iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
 use fofoca::iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr};
+use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 use rand::RngCore;
 use serde::Serialize;
-
-use crate::lookup::{add_peer_addr, build_endpoint};
-use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 
 use super::MountTicket;
 use super::ReadStatus;
 use super::{MOUNT_ALPN, OP_BENCH, REQUEST_HEADER_LEN, SECRET_LEN, WEBRTC_SIGNAL_ALPN};
 use super::{dial_webrtc, serve_signal, wait_online};
-use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
+use crate::lookup::{add_peer_addr, build_endpoint};
+use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 
 /// Mount data path chosen by the bench producer (carried in the ticket kind).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

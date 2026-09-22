@@ -145,9 +145,10 @@ impl Roster {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{MetaEntry, Roster, entries_from_meta, live_cards};
     use crate::client::PeerCard;
-    use std::collections::BTreeSet;
 
     fn card(endpoint: &str) -> PeerCard {
         PeerCard::new(

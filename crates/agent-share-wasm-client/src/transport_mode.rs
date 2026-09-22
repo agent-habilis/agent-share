@@ -56,13 +56,13 @@ impl TransportMode {
 
 #[cfg(test)]
 mod tests {
-    use super::TransportMode;
-
     // These run on wasm32, the only target this crate builds for — see the
     // dev-dependency note in `Cargo.toml`. Renaming the attribute keeps the
     // tests written as ordinary `#[test]` functions, so nothing below has to
     // know which harness it is under.
     use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    use super::TransportMode;
 
     #[test]
     fn omitted_and_empty_default_to_dynamic() {

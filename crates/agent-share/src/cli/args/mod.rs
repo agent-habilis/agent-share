@@ -7,14 +7,14 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+pub(crate) use self::mount::MountAction;
+pub(crate) use self::output::OutputFormat;
+pub(crate) use self::password::PasswordArgs;
+
 mod lookup;
 mod mount;
 mod output;
 mod password;
-
-pub(crate) use mount::MountAction;
-pub(crate) use output::OutputFormat;
-pub(crate) use password::PasswordArgs;
 
 /// Share a folder with peers, or mount a peer's folder locally
 /// (read-only, lazy, no daemon).

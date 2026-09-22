@@ -113,12 +113,13 @@ pub(crate) fn plan(missing: &[usize], holders: &[Coverage]) -> Plan {
 
 #[cfg(test)]
 mod tests {
-    use super::{PeerPlan, plan};
     use fofoca_chunks::Coverage;
     // The crate only builds for wasm32, so its harness is wasm-bindgen's. The
     // alias keeps the tests looking like ordinary ones; `live_state` does the
     // same.
     use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    use super::{PeerPlan, plan};
 
     /// A peer holding exactly `held` of a `len`-chunk file.
     fn peer(len: usize, held: &[usize]) -> Coverage {

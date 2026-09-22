@@ -208,13 +208,11 @@ pub(crate) async fn read_ice(
     hub: &BrowserHubTransport,
     remote: &EndpointId,
 ) -> Option<(f64, f64, Option<f64>)> {
-    hub.selected_pair_stats(remote)
-        .await
-        .map(|stats| {
-            (
-                stats.bytes_sent,
-                stats.bytes_received,
-                stats.round_trip.map(|seconds| seconds * 1000.0),
-            )
-        })
+    hub.selected_pair_stats(remote).await.map(|stats| {
+        (
+            stats.bytes_sent,
+            stats.bytes_received,
+            stats.round_trip.map(|seconds| seconds * 1000.0),
+        )
+    })
 }

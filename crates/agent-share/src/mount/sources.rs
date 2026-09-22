@@ -22,13 +22,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
-use async_trait::async_trait;
-use fofoca::iroh::{Endpoint, EndpointAddr, TransportAddr};
-
 use agent_share_mount::Seeder;
 use agent_share_proto::PeerCard;
 use agent_share_proto::auth::ShareAuth;
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use fofoca::iroh::{Endpoint, EndpointAddr, TransportAddr};
 use fofoca_chunks::{ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, FsStore, chunk_hash};
 
 use super::MountTicket;
@@ -493,8 +492,9 @@ pub(super) fn seeder_addr(
 
 #[cfg(test)]
 mod tests {
-    use super::vouches;
     use agent_share_proto::PeerCard;
+
+    use super::vouches;
 
     fn card(tree: Option<&str>, serving: Option<&str>) -> PeerCard {
         PeerCard::new("endpoint-a", "0.1.0", "rust", "unicast", None)

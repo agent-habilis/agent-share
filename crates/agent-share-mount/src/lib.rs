@@ -38,8 +38,8 @@
 //! watcher; anything that touches `web_sys` or `tokio`. This crate is handed a
 //! stream that is already open and a source that already knows what it holds.
 
+pub use self::seed::{Feed, Seeder, WeakSeeder};
+pub use self::serve::{ServeSource, Watcher, serve_stream};
+
 mod seed;
 mod serve;
-
-pub use seed::{Feed, Seeder, WeakSeeder};
-pub use serve::{ServeSource, Watcher, serve_stream};

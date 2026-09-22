@@ -14,13 +14,12 @@ use fofoca::iroh::{
     endpoint::{PortmapperConfig, presets},
 };
 
+pub(crate) use self::relay::pinned_ladder;
 use crate::protocol::swarm::{LookupOpts, RelayChoice};
 
 mod dht;
 mod mdns;
 mod relay;
-
-pub(crate) use relay::pinned_ladder;
 
 /// Build an iroh endpoint for a swarm's lookups.
 ///

@@ -603,13 +603,14 @@ impl Cursor<'_> {
 
 #[cfg(test)]
 mod tests {
+    use fofoca_protocol::iroh_base::SecretKey;
+
     use super::{
         DirEntry, FileEntry, ManifestDelta, MountManifest, ReadStatus, apply_since,
         apply_watch_frame, manifest_fingerprint,
     };
     use crate::authorship::{SIGNATURE_LEN, SignedManifest, sign_manifest};
     use crate::framing::{ManifestSince, WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST};
-    use fofoca_protocol::iroh_base::SecretKey;
 
     /// The share's creator, and somebody who wishes they were.
     fn creator() -> SecretKey {

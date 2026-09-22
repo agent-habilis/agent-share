@@ -1,3 +1,25 @@
+// The mount protocol's identity, op codes, caps, manifest types and ticket
+// codec live in `agent-share-proto` so the browser client links the very same
+// bytes rather than a second implementation that drifts. Re-exported here
+// under their long-standing names; the golden pin that guards them moved with
+// them (`agent_share_proto::framing` — `wire_constants_are_pinned`).
+pub(crate) use agent_share_proto::framing::{
+    MAX_CHUNK_MAP_BYTES, MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH,
+    OP_CHUNK, OP_CHUNK_MAP, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN,
+    WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST,
+};
+pub(crate) use agent_share_proto::manifest::{MountManifest, ReadStatus};
+pub(crate) use agent_share_proto::ticket::MountTicket;
+
+pub(crate) use self::bench::{produce as produce_bench, run as run_bench};
+pub(crate) use self::consume::attach;
+pub(crate) use self::mirror::mirror;
+pub(crate) use self::produce::serve;
+pub(crate) use self::webrtc::{WEBRTC_SIGNAL_ALPN, dial_webrtc, serve_signal};
+// The pre-ticket online wait is identical for every direct off-gossip
+// command — reuse `file`'s rather than keeping a fourth copy.
+use crate::file::wait_online;
+
 mod bench;
 mod consume;
 mod handlers;
@@ -29,8 +51,14 @@ pub mod test_support {
 
     use super::hash::ChunkCache;
     use super::live::LiveTree as Tree;
-
     pub use super::live::LiveTree;
+    pub use super::scan::scan;
+    /// The two halves of the share's `WebRTC` lane, so a test can drive the real
+    /// ones rather than a hand-rolled copy. The hand-rolled copy in
+    /// `tests/webrtc_mount.rs` is what let the registry-collision bug live: it
+    /// exercised the shape of the lane, not the lane.
+    pub use super::webrtc::{dial_webrtc, serve_signal};
+
     /// Serve a mount over an established connection, from a scanned tree.
     ///
     /// Wraps the tree in a [`super::source::NativeSource`] so the integration
@@ -52,12 +80,6 @@ pub mod test_support {
         )
         .await
     }
-    pub use super::scan::scan;
-    /// The two halves of the share's `WebRTC` lane, so a test can drive the real
-    /// ones rather than a hand-rolled copy. The hand-rolled copy in
-    /// `tests/webrtc_mount.rs` is what let the registry-collision bug live: it
-    /// exercised the shape of the lane, not the lane.
-    pub use super::webrtc::{dial_webrtc, serve_signal};
 
     /// Build the producer's tree from a scan, for tests that stand a producer
     /// up by hand. `paths` must stay in the order [`scan`] returned them: a
@@ -78,29 +100,6 @@ pub mod test_support {
     #[expect(dead_code, reason = "documents the re-exported fn's argument type")]
     type Shared<T> = Arc<T>;
 }
-
-pub(crate) use bench::{produce as produce_bench, run as run_bench};
-pub(crate) use consume::attach;
-pub(crate) use mirror::mirror;
-pub(crate) use produce::serve;
-
-// The mount protocol's identity, op codes, caps, manifest types and ticket
-// codec live in `agent-share-proto` so the browser client links the very same
-// bytes rather than a second implementation that drifts. Re-exported here
-// under their long-standing names; the golden pin that guards them moved with
-// them (`agent_share_proto::framing` — `wire_constants_are_pinned`).
-pub(crate) use agent_share_proto::framing::{
-    MAX_CHUNK_MAP_BYTES, MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH,
-    OP_CHUNK, OP_CHUNK_MAP, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN,
-    WATCH_FRAME_DELTA, WATCH_FRAME_MANIFEST,
-};
-pub(crate) use agent_share_proto::manifest::{MountManifest, ReadStatus};
-pub(crate) use agent_share_proto::ticket::MountTicket;
-pub(crate) use webrtc::{WEBRTC_SIGNAL_ALPN, dial_webrtc, serve_signal};
-
-// The pre-ticket online wait is identical for every direct off-gossip
-// command — reuse `file`'s rather than keeping a fourth copy.
-use crate::file::wait_online;
 
 /// Quote one word of a printed, copy-pastable command: plain when every
 /// character is clearly shell-safe, single-quoted (embedded `'` escaped
@@ -135,13 +134,15 @@ fn announce(json: bool, serving: &str, command: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use agent_share_proto::auth::{ShareAuth, share_token};
+    use rand::RngCore as _;
+
     use super::consume::RemoteClient;
     use super::{MAX_READ_LEN, MountTicket, SECRET_LEN, produce};
     use crate::lookup::{add_peer_addr, build_endpoint};
     use crate::protocol::swarm::LookupOpts;
-    use agent_share_proto::auth::{ShareAuth, share_token};
-    use rand::RngCore as _;
-    use std::sync::Arc;
 
     /// Stand up a loopback producer serving `root` and a client connected to
     /// it. The producer task accepts connections until its endpoint closes.

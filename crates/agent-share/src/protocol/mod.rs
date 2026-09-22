@@ -14,6 +14,6 @@
 //! `agent_share_proto::ticket` rather than re-exported here — nothing in the
 //! binary touches them directly any more.
 
-pub(crate) mod swarm;
+pub(crate) use self::swarm::SwarmId;
 
-pub(crate) use swarm::SwarmId;
+pub(crate) mod swarm;
