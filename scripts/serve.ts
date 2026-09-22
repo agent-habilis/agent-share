@@ -64,12 +64,14 @@ function looksLikeAsset(pathname: string): boolean {
 }
 
 /**
- * Bun names every chunk it emits `<name>-<hash>.<ext>`, so a cached copy is
+ * Names that change whenever their contents do, so a cached copy is
  * unreachable once the contents change — the trade the wasm's
  * content-addressed name makes, and the only one that makes a far-future
- * expiry safe.
+ * expiry safe. Bun names chunks `<name>-<hash>.<ext>`; Next puts only hashed or
+ * build-id-scoped files under `/_next/static/`; Pagefind names its index files
+ * `<lang>_<hash>.pf_<kind>`.
  */
-const HASHED = /-[a-z0-9]{8,}\.[a-z0-9]+$/
+const HASHED = /-[a-z0-9]{8,}\.[a-z0-9]+$|^\/_next\/static\/|_[0-9a-f]{7,}\.pf_[a-z]+$/
 
 const IMMUTABLE = { 'cache-control': 'public, max-age=31536000, immutable' }
 
@@ -85,6 +87,62 @@ const IMMUTABLE = { 'cache-control': 'public, max-age=31536000, immutable' }
  * real host in front of the image would not.
  */
 const NO_CACHE = { 'cache-control': 'no-cache' }
+
+/**
+ * A fixed name that is not a page: `sw.js`, the favicon, Pagefind's runtime.
+ * Cloudflare holds these for five minutes, which keeps the origin out of the
+ * common case without a purge on deploy. The edge TTL rides `CDN-Cache-Control`
+ * (RFC 9213) rather than `s-maxage` because browsers honor
+ * `stale-while-revalidate` too, and in a browser it would keep an old file for
+ * a day.
+ */
+const EDGE_SHORT = { ...NO_CACHE, 'cdn-cache-control': 'max-age=300, stale-while-revalidate=86400' }
+
+/**
+ * Pages, and the RSC payloads Next fetches beside them. Never held at the edge:
+ * a page names the chunks of its own build, which a deploy deletes, so a stale
+ * one renders blank.
+ */
+const PAGE = /\.(html|txt)$/
+
+function cachingFor(pathname: string) {
+  if (HASHED.test(pathname)) return IMMUTABLE
+  if (PAGE.test(pathname)) return NO_CACHE
+  return EDGE_SHORT
+}
+
+/**
+ * Size and mtime, never contents: `start.ts` serves a `dist/` that a rebuild
+ * rewrites under it, and a table hashed at startup would answer 304 for bytes
+ * that changed. Weak, because Cloudflare weakens a strong tag whenever it
+ * re-encodes a response. `variant` separates the precompressed siblings, which
+ * share a URL.
+ */
+function etagOf(file: ReturnType<typeof Bun.file>, variant = '') {
+  return `W/"${file.size.toString(36)}-${file.lastModified.toString(36)}${variant}"`
+}
+
+/** `If-None-Match` uses the weak comparison, so the `W/` prefix is ignored. */
+function matches(ifNoneMatch: string | null, etag: string) {
+  if (!ifNoneMatch) return false
+  if (ifNoneMatch.trim() === '*') return true
+  const opaque = etag.replace(/^W\//, '')
+  return ifNoneMatch.split(',').some((tag) => tag.trim().replace(/^W\//, '') === opaque)
+}
+
+function fileResponse(
+  req: Request,
+  file: ReturnType<typeof Bun.file>,
+  headers: Record<string, string>,
+  variant = '',
+): Response {
+  const etag = etagOf(file, variant)
+  const all = { ...headers, etag }
+  if (matches(req.headers.get('if-none-match'), etag)) {
+    return new Response(null, { status: 304, headers: all })
+  }
+  return new Response(file, { headers: all })
+}
 
 export function createFetch(root: URL = DIST_ROOT) {
   const file = (pathname: string) => distFile(pathname, root)
@@ -111,14 +169,19 @@ export function createFetch(root: URL = DIST_ROOT) {
     // Root scope from a root-served script is the default, but stating it keeps
     // the answer true if the script ever moves, as `dev.ts` does.
     if (pathname === '/sw.js') {
-      return new Response(file('/sw.js'), {
-        headers: { ...NO_CACHE, 'service-worker-allowed': '/' },
+      return fileResponse(req, file('/sw.js'), {
+        ...EDGE_SHORT,
+        'service-worker-allowed': '/',
       })
     }
 
     // The wasm negotiates its precompressed siblings, like a static host
     // with precompressed-asset support would. `content-type` stays
-    // `application/wasm` so `instantiateStreaming` engages.
+    // `application/wasm` so `instantiateStreaming` engages. The file is named
+    // `.bin` (see `wasm-asset.ts`) because Cloudflare picks what to cache by
+    // extension alone and `.wasm` is not on its list; that also means turning
+    // on its Cache Deception Armor would stop caching it, since the extension
+    // and the content type disagree.
     if (pathname.startsWith('/wasm/') && (await file(pathname).exists())) {
       const accepted = req.headers.get('accept-encoding') ?? ''
       const headers: Record<string, string> = {
@@ -134,17 +197,15 @@ export function createFetch(root: URL = DIST_ROOT) {
         const compressed = file(pathname + suffix)
         if (!(await compressed.exists())) continue
         headers['content-encoding'] = token
-        return new Response(compressed, { headers })
+        return fileResponse(req, compressed, headers, `-${token}`)
       }
-      return new Response(file(pathname), { headers })
+      return fileResponse(req, file(pathname), headers)
     }
 
     const candidate = pathname === '/' ? '/index.html' : pathname
     const target = file(candidate)
     if (await target.exists()) {
-      return new Response(target, {
-        headers: HASHED.test(candidate) ? IMMUTABLE : NO_CACHE,
-      })
+      return fileResponse(req, target, cachingFor(candidate))
     }
 
     if (!looksLikeAsset(pathname)) {
@@ -155,10 +216,10 @@ export function createFetch(root: URL = DIST_ROOT) {
       // from needing a second branch here.
       const index = file(`${pathname.replace(/\/$/, '')}/index.html`)
       if (await index.exists()) {
-        return new Response(index, { headers: NO_CACHE })
+        return fileResponse(req, index, NO_CACHE)
       }
       if (APP_ROUTE.test(pathname)) {
-        return new Response(shell, { headers: NO_CACHE })
+        return fileResponse(req, shell, NO_CACHE)
       }
     }
 

@@ -462,7 +462,7 @@ fn evaluate_at(expression: &str, folder: Option<&str>) -> Res<String> {
 /// not a flaky app.
 ///
 /// Losing it costs nothing that matters: the binary is served from a
-/// content-addressed URL (`…_bg.<hash>.wasm`, see `scripts/wasm-asset.ts`), so a
+/// content-addressed URL (`…_bg.<hash>.bin`, see `scripts/wasm-asset.ts`), so a
 /// stale entry is unreachable by construction rather than by cache-clearing —
 /// the hash moves when the bytes do. The reload that follows also passes
 /// `ignoreCache`. And if the browser really is wedged rather than slow, the very
