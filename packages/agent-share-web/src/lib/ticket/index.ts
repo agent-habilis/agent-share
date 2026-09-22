@@ -44,6 +44,19 @@ export interface ShareRoute {
 
 const VIEW_RE = /^(files|info|preview)$/
 
+/**
+ * Where the webapp is mounted. The site's landing page and docs own `/`. The
+ * router is built with this base, so router paths never carry it — only a
+ * link that leaves the app, and a pathname read straight off the address bar.
+ */
+export const APP_BASE = '/app'
+
+/** Split a pathname into segments, dropping the app base when it leads. */
+function routeSegments(pathname: string): string[] {
+  const parts = pathname.replace(/\/+$/, '').split('/').filter(Boolean)
+  return parts[0] === APP_BASE.slice(1) ? parts.slice(1) : parts
+}
+
 const TRANSPORT_MODES: readonly TransportMode[] = ['webrtc', 'relay', 'dynamic']
 
 /**
@@ -106,7 +119,7 @@ export function sharePath(
  * pane on every peer who receives it is the intent.
  */
 export function shareUrl(ticket: string, view: ShareView = 'files'): string {
-  return `${window.location.origin}${sharePath(ticket, view)}`
+  return `${window.location.origin}${APP_BASE}${sharePath(ticket, view)}`
 }
 
 /**
@@ -122,8 +135,7 @@ export function parseRoute(
   pathname: string = window.location.pathname,
   search: string = window.location.search,
 ): ShareRoute | null {
-  const parts = pathname.replace(/\/+$/, '').split('/').filter(Boolean)
-  const [viewRaw, ticketRaw, ...rest] = parts
+  const [viewRaw, ticketRaw, ...rest] = routeSegments(pathname)
   if (!viewRaw || !ticketRaw || !VIEW_RE.test(viewRaw)) return null
   const view = viewRaw as ShareView
   if (rest.length > 0 && view !== 'preview') return null
@@ -151,9 +163,8 @@ export function parseRoute(
  * the wrong order — a segment holding a `%2F` would split into two.
  */
 export function previewSegments(pathname: string = window.location.pathname): string[] {
-  const parts = pathname.replace(/\/+$/, '').split('/').filter(Boolean)
   try {
-    return parts.slice(2).map(decodeURIComponent)
+    return routeSegments(pathname).slice(2).map(decodeURIComponent)
   } catch {
     return []
   }

@@ -1,0 +1,54 @@
+---
+title: Browser and npx
+description: Open a share in the webapp, or receive it with npx. No native install.
+---
+
+import { Callout } from 'nextra/components'
+
+# Browser and npx
+
+## The webapp
+
+The webapp at [/app](/app/) is a static site. It has no backend, no signalling
+server and no database. The browser connects straight to the producer.
+
+| URL | Shows |
+|---|---|
+| `/app/files/<ticket>` | The files of the share |
+| `/app/info/<ticket>` | The session and connection details |
+| `/app/preview/<ticket>/<path>` | One file |
+
+The ticket is in the path, so each view is an ordinary link that you can send.
+From the home page of the webapp you can also create a share from a folder on
+your machine. That tab then acts as the producer.
+
+<Callout type="info">
+  The webapp needs a secure context (HTTPS or localhost). Without it, media
+  previews cannot seek.
+</Callout>
+
+## npx
+
+```sh
+npx agent-share <ticket> [destination] [--password <pw>]
+```
+
+The npx receiver writes real files into `destination` (default `./share`). It
+does not mount, because NFS is native-only. `AGENT_SHARE_PASSWORD` works in
+place of `--password`.
+
+Node has no `RTCPeerConnection`, so the receiver uses the `node-datachannel`
+native addon. To produce a share, use the native binary.
+
+## How a browser reaches a peer
+
+A browser has no UDP socket and cannot speak QUIC. It reaches a native producer
+in two connections:
+
+1. It dials the producer over the iroh relay and swaps one WebRTC offer and
+   answer. The relay carries the handshake, not file data.
+2. It opens a new connection over the WebRTC data channel.
+
+If WebRTC fails, the browser falls back to the iroh relay. It connects at relay
+speed instead of failing. See [Networking](/docs/networking#transports) for the
+full table.

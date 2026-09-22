@@ -11,7 +11,7 @@
  * dependency to serve a case that does not exist: a browser without WebMCP is
  * also a browser with nothing on the other end to call it.
  *
- * See `docs/webmcp.md` for the connection setup.
+ * See `packages/agent-share-site/content/docs/webmcp.mdx` for the connection setup.
  */
 
 import { beginToolCall, markToolsRegistered } from './activity.ts'

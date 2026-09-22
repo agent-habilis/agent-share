@@ -1,5 +1,7 @@
 /**
- * The route table. One folder under `pages/` per share view.
+ * The route table. One folder under `pages/` per share view. Paths are
+ * relative to `APP_BASE` (`/app`): the router strips and adds it, so
+ * `/files/<ticket>` here is `/app/files/<ticket>` in the address bar.
  *
  * - `/` — home
  * - `/files/<ticket>` — file browser
@@ -15,9 +17,10 @@
  * this replaced did for `/garbage`, `/files/` and `/files/a/b` alike.
  */
 
-import { createRouter, type RouteDef } from 'visage-router'
+import { browserHistory, createRouter, type RouteDef } from 'visage-router'
 
 import { SessionLayout } from '../components/session/index.tsx'
+import { APP_BASE } from '../lib/ticket/index.ts'
 import { FilesPage } from './files/index.tsx'
 import { HomePage } from './home/index.tsx'
 import { InfoPage } from './info/index.tsx'
@@ -43,4 +46,9 @@ export const ROUTES: readonly RouteDef[] = [
  * `history.scrollRestoration` and `flushSync()` on every navigation to pay
  * for it.
  */
-export const App = createRouter({ routes: ROUTES, fallback: HomePage, scroll: false })
+export const App = createRouter({
+  routes: ROUTES,
+  history: browserHistory({ base: APP_BASE }),
+  fallback: HomePage,
+  scroll: false,
+})

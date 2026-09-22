@@ -111,20 +111,23 @@ read/write on the tap repo.
 
 ## The web client
 
-`share.agent-habilis.com` is a **pure static site**: no backend, no signalling
-server, no database. Open `share.agent-habilis.com/files/<ticket>` and the
+`agent-share.dev` is a **pure static site**: no backend, no signalling
+server, no database. The root is the landing page, `/docs` the docs, and
+`/app` the web client. Open `agent-share.dev/app/files/<ticket>` and the
 browser connects straight to the producer. Session info is at
-`/info/<ticket>`.
+`/app/info/<ticket>`.
 
 The ticket is a bearer capability in the path so those views are ordinary
-shareable URLs. The static host must fall back to `index.html` for deep links.
+shareable URLs. The static host must fall back to `app/index.html` for deep
+links under `/app`.
 
 ### Driving it with an agent
 
 The page publishes its own actions — open a share, list it, read a file, seed
 it, publish one — as [WebMCP](https://webmachinelearning.github.io/webmcp/)
 tools, so an agent can use the browser as its runtime and install nothing. Needs
-Chrome 150+ and `chrome-devtools-mcp`; see [docs/webmcp.md](docs/webmcp.md).
+Chrome 150+ and `chrome-devtools-mcp`; see
+[the WebMCP docs](packages/agent-share-site/content/docs/webmcp.mdx).
 
 ### How a browser reaches a peer behind NAT
 
@@ -214,7 +217,10 @@ script when only the binary is wanted.
 
 `bun run dev` serves at `https://agent-share.localhost` — a name instead of a
 contended port, via [portless](https://github.com/vercel-labs/portless) — and
-expects the wasm to exist already. `bun run build && bun run start` is the
+expects the wasm to exist already. It builds the landing page and docs
+(`packages/agent-share-site`, Next + Nextra) once, then serves them around the
+app at `/app`, which hot-reloads. For live docs editing, run `bun run dev` in
+`packages/agent-share-site`. `bun run build && bun run start` is the
 production pair: `start` serves the built `dist/` on `PORT`, with the same
 routing the deployed image uses (`scripts/serve.ts`).
 

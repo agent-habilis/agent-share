@@ -1,0 +1,27 @@
+{
+  "name": "agent-share-site",
+  "private": true,
+  "type": "module",
+  "description": "The landing page and docs, a Next + Nextra static export merged into dist/ beside the webapp at /app.",
+  "scripts": {
+    "dev": "portless run next dev",
+    "build": "next build",
+    "postbuild": "pagefind --site .next/server/app --output-path out/_pagefind",
+    "typecheck": "tsc --noEmit"
+  },
+  "portless": { "name": "agent-share-docs" },
+  "dependencies": {
+    "next": "16.0.11",
+    "nextra": "4.6.1",
+    "nextra-theme-docs": "4.6.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "pagefind": "^1.5.2",
+    "typescript": "^5.9.3"
+  }
+}

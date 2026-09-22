@@ -1,4 +1,9 @@
-# Driving the web client with an agent
+---
+title: WebMCP
+description: Drive the webapp with an agent through WebMCP tools.
+---
+
+# Driving the webapp with an agent
 
 The web client publishes its own actions as [WebMCP](https://webmachinelearning.github.io/webmcp/)
 tools, so an agent can open a share, walk it, read files, seed them and publish
@@ -9,7 +14,7 @@ binary; `npx agent-share` needs the `node-datachannel` addon, because Node has
 no `RTCPeerConnection`. A browser already has WebRTC, a sandbox and storage. The
 tab becomes the runtime.
 
-Registration lives in `packages/agent-share-web/src/lib/webmcp/`. It is feature-detected, so on a
+Registration lives in [`packages/agent-share-web/src/lib/webmcp/`](https://github.com/agent-habilis/agent-share/tree/main/packages/agent-share-web/src/lib/webmcp). It is feature-detected, so on a
 browser without WebMCP — which today is every browser by default — it reads one
 property and does nothing.
 
@@ -46,7 +51,7 @@ plugin update would overwrite them.
 ## Using it
 
 ```
-navigate_page       https://share.agent-habilis.com/files/<ticket>
+navigate_page       https://agent-share.dev/app/files/<ticket>
 list_webmcp_tools   -> the six tools below
 execute_webmcp_tool { toolName: "read", input: "{\"path\":\"src/lib.rs\"}" }
 ```
@@ -139,7 +144,7 @@ the result is an ordinary share a native peer can read:
 
 ```
 publish { files: [{ path: "notes.md", content: "# hi\n" }] }
-  -> { ticket: "SvL6pH…", url: "https://…/files/SvL6pH…", files: 1 }
+  -> { ticket: "SvL6pH…", url: "https://…/app/files/SvL6pH…", files: 1 }
 
 agent-share mirror SvL6pH… ./out     # works from the CLI
 ```

@@ -1,0 +1,5 @@
+.next/
+out/
+public/_pagefind/
+next-env.d.ts
+*.tsbuildinfo

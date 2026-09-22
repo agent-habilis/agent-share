@@ -41,7 +41,7 @@ Three implementations, and they are not interchangeable:
 - **native** — the Rust binary. The only one that can mount (loopback NFSv3) and
   the only one that can produce from a real folder.
 - **web** — the browser app. Produces through the File System Access picker,
-  which needs a user gesture; `/lab` stands the same producer up from OPFS
+  which needs a user gesture; `/app/lab` stands the same producer up from OPFS
   handles and constructed `File`s so it can be driven headlessly.
 - **node** — `npx agent-share <ticket>`. Receive-only, writes real files. It
   cannot produce a folder, by design: scan order is the read index, and that

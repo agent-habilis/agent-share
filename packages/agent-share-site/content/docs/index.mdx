@@ -1,0 +1,53 @@
+---
+title: What is agent-share
+description: Share a folder with peers, or mount a peer's folder locally. Read-only, lazy, no daemon.
+---
+
+import { Callout, Cards } from 'nextra/components'
+
+# What is agent-share
+
+agent-share shares a folder with peers. A peer mounts that folder on its own
+machine and reads it like a local directory. The mount is read-only.
+
+The producer serves file bytes on demand over an
+[iroh](https://www.iroh.computer/) QUIC connection. The consumer mounts them
+through a loopback NFSv3 bridge. The bridge uses the built-in NFS client of the
+operating system, so there is no FUSE and no kernel extension.
+
+## No server, no daemon
+
+The two peers connect directly. There is nothing to host and no account to
+create. `agent-share serve` runs until you stop it. The mount stays until you
+press Ctrl-C.
+
+## Lazy and live
+
+Serve scans the folder for metadata only. Nothing is hashed or sent before a
+peer reads it. When a peer reads a file, it fetches only the byte ranges that
+it reads.
+
+The producer watches the folder. Edits, new files and deletions reach
+connected peers without a remount.
+
+<Callout type="info">
+  Both ends must run agent-share. It uses its own QUIC ALPN, so it does not
+  mount against other tools.
+</Callout>
+
+## Three ways to consume a share
+
+- The native binary mounts the share as a filesystem on macOS and Linux.
+- The [webapp](/docs/browser) opens the share in a browser tab, with no install.
+- `npx agent-share` writes the files into a local folder, with no native binary.
+
+## Where to go next
+
+<Cards>
+  <Cards.Card title="Getting started" href="/docs/getting-started" arrow />
+  <Cards.Card title="Concepts" href="/docs/concepts" arrow />
+  <Cards.Card title="Commands" href="/docs/commands" arrow />
+  <Cards.Card title="Browser and npx" href="/docs/browser" arrow />
+  <Cards.Card title="WebMCP" href="/docs/webmcp" arrow />
+  <Cards.Card title="Networking" href="/docs/networking" arrow />
+</Cards>

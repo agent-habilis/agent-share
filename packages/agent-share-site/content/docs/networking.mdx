@@ -1,0 +1,68 @@
+---
+title: Networking
+description: How peers find each other, and which transport carries the bytes.
+---
+
+import { Callout } from 'nextra/components'
+
+# Networking
+
+## Discovery
+
+By default a share is reachable across machines. It uses three lookups:
+
+- **mDNS** finds peers on the local network.
+- **Mainline DHT** finds peers on the internet.
+- **The relay ladder** gives a rendezvous and a fallback path when a direct
+  connection fails.
+
+To restrict a share, name the lookups that you want. When you name one, only
+the named ones are used:
+
+```sh
+agent-share serve ./notes --mdns                 # local network only
+agent-share serve ./notes --dht --relay          # internet, no mDNS
+agent-share serve ./notes --relay https://relay.example.com,https://backup.example.com
+```
+
+A bare `--relay` uses the default ladder. `--relay <url>[,<url>…]` gives a
+custom ladder, in order. `--public` names the default preset explicitly.
+
+`--swarm <id>` uses the discovery config of an existing swarm id. A loopback
+swarm id keeps everything on one host. `--swarm` cannot be used with the
+lookup flags.
+
+## Transports
+
+The direction matters, so each row names a producer and a consumer.
+
+| producer → consumer | carries bytes | never |
+|---|---|---|
+| native → native | iroh QUIC, else iroh relay | **WebRTC** |
+| native → web | WebRTC, else iroh relay | — |
+| web → native | iroh relay, unless forced onto WebRTC | — |
+| web → web | WebRTC, else iroh relay | — |
+| native → node | iroh relay | — |
+
+A browser tab is either publicly reachable or not reachable. It has no mDNS, no
+DHT and no loopback peers. So the ticket of a tab gives a relay URL, and a
+native consumer dials that relay.
+
+## Why WebRTC only for browsers
+
+WebRTC exists because a browser cannot speak QUIC. It never carries bytes
+between two native peers. In a measurement where the transport was the only
+variable, the data channel gave **6× less throughput at 36× the latency** than
+plain QUIC.
+
+## When the preferred path fails
+
+- A **browser** falls back to the iroh relay when ICE fails. It connects at
+  relay speed.
+- A **native** peer does not fall back onto the data channel. If it can reach
+  the producer over neither IP nor relay, the mount fails.
+
+<Callout type="info">
+  `--transport webrtc` forces a native consumer onto the data channel. It
+  exists for tests and benchmarks.
+</Callout>

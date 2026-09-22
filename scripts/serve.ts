@@ -48,7 +48,14 @@ export function distFile(pathname: string, root: URL = DIST_ROOT) {
  * missing asset and 404 — the preview view carries its file in the path, so
  * the extension-shaped tail is the normal case rather than the odd one.
  */
-const SHARE_ROUTE = /^\/(files|info|preview)\//
+const SHARE_ROUTE = /^\/app\/(files|info|preview)\//
+
+/**
+ * The webapp's mount point. Everything else in `dist/` is the site's static
+ * export (landing page and docs), which has a real file for every page and its
+ * own `404.html` — so only paths under here fall back to the SPA shell.
+ */
+const APP_ROUTE = /^\/app(\/|$)/
 
 function looksLikeAsset(pathname: string): boolean {
   if (SHARE_ROUTE.test(pathname)) return false
@@ -81,7 +88,8 @@ const NO_CACHE = { 'cache-control': 'no-cache' }
 
 export function createFetch(root: URL = DIST_ROOT) {
   const file = (pathname: string) => distFile(pathname, root)
-  const shell = file('/index.html')
+  const shell = file('/app/index.html')
+  const notFound = file('/404.html')
 
   return async function fetch(req: Request): Promise<Response> {
     const { pathname } = new URL(req.url)
@@ -142,16 +150,21 @@ export function createFetch(root: URL = DIST_ROOT) {
     if (!looksLikeAsset(pathname)) {
       // A directory's own index before the SPA shell, the way a static host
       // resolves one. Every page bundles to `dist/<name>/index.html` and is
-      // served at `/<name>`, so this is what answers `/lab` — as a rule rather
-      // than by name, which is what keeps a second page from needing a second
-      // branch here.
+      // served at `/<name>`, so this is what answers `/app/lab` and every docs
+      // page — as a rule rather than by name, which is what keeps a second page
+      // from needing a second branch here.
       const index = file(`${pathname.replace(/\/$/, '')}/index.html`)
       if (await index.exists()) {
         return new Response(index, { headers: NO_CACHE })
       }
-      return new Response(shell, { headers: NO_CACHE })
+      if (APP_ROUTE.test(pathname)) {
+        return new Response(shell, { headers: NO_CACHE })
+      }
     }
 
+    if (await notFound.exists()) {
+      return new Response(notFound, { status: 404, headers: NO_CACHE })
+    }
     return new Response('Not Found', { status: 404 })
   }
 }

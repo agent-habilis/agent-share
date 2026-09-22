@@ -4,16 +4,17 @@
   "type": "module",
   "workspaces": ["packages/*"],
   "scripts": {
-    "dev": "portless run bun --hot scripts/dev.ts",
+    "dev": "bun run --filter agent-share-site build && portless run bun --hot scripts/dev.ts",
     "start": "bun scripts/start.ts",
     "dev:docker": "bun scripts/dev-docker.ts",
     "build": "bun scripts/build.ts",
     "typecheck": "bun scripts/gen-wasm-path.ts && bun run --filter '*' typecheck",
-    "test": "bun scripts/gen-wasm-path.ts && bun test"
+    "test": "bun scripts/gen-wasm-path.ts && bun test && bun test ./scripts"
   },
   "portless": { "name": "agent-share" },
   "//": "node-datachannel ships its native addon through an `install` script running `prebuild-install -r napi`. Bun skips lifecycle scripts unless the package is trusted, and reads this list only from the workspace root — not from the member that declares the dependency. Without it the module resolves but throws `Cannot find module …/node_datachannel.node` at import, which reads as an unsupported Node version rather than a download that never happened.",
   "trustedDependencies": ["node-datachannel"],
+  "overrides": { "nextra": { "zod": "4.3.6" }, "nextra-theme-docs": { "zod": "4.3.6" } },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.11.1",
     "@types/bun": "^1.3.14",

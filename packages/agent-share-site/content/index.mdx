@@ -1,0 +1,54 @@
+---
+title: Share a folder. Mount it anywhere.
+---
+
+import { Cards } from 'nextra/components'
+import { Hero } from '@/components/Hero'
+import { BrowserIcon, DriveIcon, LazyIcon, LiveIcon, LockIcon, TerminalIcon } from '@/components/icons'
+
+<div className="dots">
+
+<Hero />
+
+<section className="install">
+
+```sh
+brew install agent-habilis/tap/agent-share
+```
+
+<p className="install-more">Cargo, prebuilt binaries, or no install at all — see <a href="/docs/getting-started">Getting started</a>.</p>
+
+</section>
+
+</div>
+
+<Cards num={3} className="bento">
+  <div className="bento-2 bento-tall tile">
+    <h2 className="tile-title"><TerminalIcon /> Two commands</h2>
+    <p>One machine serves a folder. It prints a ticket. The other machine mounts the folder with that ticket.</p>
+
+```sh
+# producer
+agent-share serve ./notes
+
+# consumer, on any other machine
+agent-share <ticket> ~/mnt
+```
+
+  </div>
+  <Cards.Card icon={<LazyIcon />} title="Lazy, ranged reads" href="/docs/concepts#lazy-reads">
+    <p>Serve scans metadata only. Peers fetch only the bytes they read.</p>
+  </Cards.Card>
+  <Cards.Card icon={<LiveIcon />} title="Live" href="/docs/concepts#live-changes">
+    <p>Edits, new files and deletions reach connected peers without a remount.</p>
+  </Cards.Card>
+  <Cards.Card icon={<DriveIcon />} title="The OS's own NFS client" href="/docs/concepts#the-nfs-bridge">
+    <p>A loopback NFSv3 bridge. No FUSE, no kernel extension, no daemon.</p>
+  </Cards.Card>
+  <Cards.Card icon={<LockIcon />} title="Password-protected" href="/docs/commands#passwords">
+    <p>The ticket finds the share but does not open it. Post the link where the password is not.</p>
+  </Cards.Card>
+  <Cards.Card icon={<BrowserIcon />} title="Open it in a browser" href="/docs/browser">
+    <p>The webapp connects straight to the producer. No backend, no signalling server.</p>
+  </Cards.Card>
+</Cards>
