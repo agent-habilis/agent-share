@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The release workflow dispatches this on its formula-bump branch: a PR opened
+  # with GITHUB_TOKEN does not trigger `pull_request`, and `Check` is required.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # The ruleset on `main` requires this name. Rename both together.
+    name: Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Reads rust-toolchain.toml — do not duplicate the version here.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+
+      # `cargo task ci` formats with this exact nightly (tasks/src/fmt.rs).
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly-2026-06-05 --profile minimal --component rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/agent-share-wasm-client
+
+      # The CLI must match the `wasm-bindgen` crate the client links against,
+      # or the generated glue refuses to load. It also ships
+      # `wasm-bindgen-test-runner`, the runner for the wasm tests in the gate.
+      - name: Install wasm-bindgen-cli
+        run: |
+          version=$(grep -A1 '^name = "wasm-bindgen"$' crates/agent-share-wasm-client/Cargo.lock | sed -nE 's/^version = "(.*)"/\1/p')
+          echo "wasm-bindgen resolved to $version"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      # `bun run typecheck` and `bun test` in the gate import the wasm glue and
+      # exit when it has not been built (scripts/wasm-asset.ts).
+      - name: Build wasm
+        run: cargo task web-wasm
+
+      - name: Gate
+        run: cargo task ci
