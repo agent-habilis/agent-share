@@ -149,17 +149,20 @@ rather than a symmetric "↔".
 
 | producer → consumer | carries bytes | never |
 |---|---|---|
-| native → native | iroh QUIC, else iroh relay | **WebRTC** |
-| native → web | WebRTC, else iroh relay | — |
-| web → native | iroh relay, unless forced onto WebRTC | — |
-| web → web | WebRTC, else iroh relay | — |
-| native → node | iroh relay | — |
+| native → native | direct iroh QUIC | **WebRTC**, **the relay** |
+| native → web | WebRTC | the relay |
+| web → native | WebRTC | the relay |
+| web → web | WebRTC | the relay |
+| native → node | WebRTC | the relay |
 
-A browser consuming a native producer prefers the data channel. The reverse is
-not its mirror image: a tab is publicly reachable or not reachable at all — no
-mDNS, no DHT, no loopback peers — so its ticket advertises a relay URL, and a
-native consumer dials that unless `--transport webrtc` takes the alternatives
-away. The node receiver pins the relay outright.
+**The relay never carries file data.** It brokers the hole punch, carries the
+SDP exchange and gossips; the bytes go peer to peer or not at all.
+
+A browser consuming a native producer takes the data channel. So does the
+reverse: a tab is publicly reachable or not reachable at all — no mDNS, no DHT,
+no loopback peers — so its ticket advertises a relay URL and no IP address, and
+a native consumer reads that as "switch to WebRTC". `--transport webrtc` pins
+the same lane explicitly. The node receiver dials WebRTC outright.
 
 WebRTC exists because a browser has no UDP socket and cannot speak QUIC
 directly. That is the whole of its justification, so it never carries bytes
@@ -167,17 +170,15 @@ between two native peers: measured with the transport as the only variable, the
 data channel gives **6× less throughput at 36× the latency** and an order of
 magnitude more run-to-run variance than plain QUIC.
 
-The two ends behave differently when the preferred path fails, and both are
-deliberate. A **browser** falls back to the iroh relay when ICE fails, so it
-degrades rather than dying — at relay speed, but it connects. A **native** peer
-does not fall back onto the data channel: if it can reach the producer over
-neither IP nor relay, the mount fails. The pair that costs is one ICE could have
-joined while hole-punching and the relay both failed, which is narrow, since
-losing the relay usually means losing the network.
+Neither end falls back to the relay. A **browser** whose ICE fails has nowhere
+else to go and the mount fails. A **native** peer that cannot punch a direct
+path to another native peer waits out the probe deadline and then refuses,
+rather than letting the relay carry the share. A pair with no direct path
+between them is a pair this tool will not serve.
 
-`--transport webrtc` forces a native consumer onto the lane anyway. It exists to
+`--transport webrtc` pins a native consumer to the lane explicitly. It exists to
 test the browser path from a native process and to let the benchmark harness
-measure it — not as a transport to choose.
+measure it; against a tab's ticket the consumer picks it anyway.
 
 ### Building
 
@@ -231,5 +232,5 @@ is what runs on the host — read its header first: the app needs a secure conte
 (HTTPS or localhost) or media previews silently lose the ability to seek.
 
 Note `npx` needs a native WebRTC addon (`node-datachannel`), because Node has
-no `RTCPeerConnection` and the relay will not carry data. The native binary
+no `RTCPeerConnection` and the relay never carries file data. The native binary
 needs no addon and can mount the share as a filesystem.

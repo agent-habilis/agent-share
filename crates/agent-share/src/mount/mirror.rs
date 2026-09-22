@@ -144,6 +144,7 @@ pub(crate) async fn mirror(
     json: bool,
 ) -> Result<()> {
     let ticket = MountTicket::decode(ticket)?;
+    let webrtc_only = webrtc_only || super::consume::relay_only(&ticket.addr);
     // Kept so the copy can be re-served as a source for *this* share rather
     // than as a new one. See `ORIGIN_SECRET`.
     let secret = ticket.secret;

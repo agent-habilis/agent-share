@@ -9,9 +9,9 @@ use crate::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
 use crate::token::{self, TokenType};
 
 // Ticket *kind* — one byte, matched by exact value. These are mutually
-// exclusive alternatives, not bits: `2` is the relay bench, not "webrtc plus
+// exclusive alternatives, not bits: `3` is the QUIC bench, not "webrtc plus
 // something". They were once named `TICKET_FLAG_*`, which invited
-// `kind & TICKET_KIND_BENCH_WEBRTC` — a test that reads true for the relay
+// `kind & TICKET_KIND_BENCH_WEBRTC` — a test that reads true for the QUIC
 // bench and false for an ordinary share, silently.
 
 /// An ordinary file share.
@@ -20,8 +20,8 @@ pub const TICKET_KIND_SHARE: u8 = 0;
 /// Bench producer chose `WebRTC` for the mount data path.
 pub const TICKET_KIND_BENCH_WEBRTC: u8 = 1;
 
-/// Bench producer chose the iroh relay / ticket address for the mount data path.
-pub const TICKET_KIND_BENCH_RELAY: u8 = 2;
+// Kind `2` is reserved. It was the relay bench, removed when the relay stopped
+// carrying file data at all; an old kind-2 ticket now decodes to no transport.
 
 /// Bench producer chose plain iroh `QUIC` over UDP — no `WebRTC` wrapper, no
 /// forced relay. The control leg the other two are measured against.
@@ -62,7 +62,7 @@ pub const TICKET_FLAG_SIGNED: u8 = 0b0010;
 /// [`MountTicket::decode`]) rather than failing.
 ///
 /// `kind` is [`TICKET_KIND_SHARE`] for ordinary shares. Bench tickets set
-/// [`TICKET_KIND_BENCH_WEBRTC`], [`TICKET_KIND_BENCH_RELAY`] or
+/// [`TICKET_KIND_BENCH_WEBRTC`] or
 /// [`TICKET_KIND_BENCH_QUIC`] so the consumer knows which path the producer
 /// opened. Values are dense rather than bit flags, so a peer built before a
 /// value existed rejects it outright instead of misreading it.
@@ -267,7 +267,7 @@ mod tests {
 
     use super::{
         MountTicket, SECRET_LEN, TICKET_FLAG_PASSWORD, TICKET_KIND_BENCH_QUIC,
-        TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC, TICKET_KIND_SHARE,
+        TICKET_KIND_BENCH_WEBRTC, TICKET_KIND_SHARE,
     };
     use crate::lookup::LookupOpts;
     use crate::peer_addr::endpoint_addr_to_json;
@@ -376,11 +376,7 @@ mod tests {
 
     #[test]
     fn bench_kinds_round_trip() {
-        for kind in [
-            TICKET_KIND_BENCH_WEBRTC,
-            TICKET_KIND_BENCH_RELAY,
-            TICKET_KIND_BENCH_QUIC,
-        ] {
+        for kind in [TICKET_KIND_BENCH_WEBRTC, TICKET_KIND_BENCH_QUIC] {
             let mut ticket = sample();
             ticket.kind = kind;
             let decoded = MountTicket::decode(&ticket.encode()).expect("decode");

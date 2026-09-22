@@ -630,12 +630,13 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
                 <Text color="warning">last error: {props.mountError}</Text>
               ) : null}
               {/*
-                The one line that answers "why is this on the relay?". Without it
-                the fallback is a console warning nobody reading the pane can see.
+                The one line that answers "why am I reading from a seeder rather
+                than the origin?". Without it that switch is a console warning
+                nobody reading the pane can see.
               */}
               {info?.transfer.mount_fallback_reason ? (
                 <Text color="warning">
-                  fell back: {info.transfer.mount_fallback_reason}
+                  reading elsewhere: {info.transfer.mount_fallback_reason}
                 </Text>
               ) : null}
               {/*
@@ -650,15 +651,14 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
               ) : null}
               {/*
                 The mount connection's own counters, which — unlike the per-peer
-                rows above — answer on the relay path too: they come from the QUIC
-                state machine rather than a candidate pair. On a relay mount the
-                peer rows can show a kilobyte of mesh chatter while megabytes of
-                share moved right here, so this line is the one that reconciles.
+                rows above — come from the QUIC state machine rather than a
+                candidate pair. The peer rows can show a kilobyte of mesh chatter
+                while megabytes of share moved right here, so this line is the one
+                that reconciles.
 
                 Wire bytes, and a smaller unit than the peer rows: QUIC sits below
-                DTLS/SCTP on the WebRTC lane and below the relay's framing on the
-                other. The two are not addable, which is why they are separate
-                lines rather than one total.
+                DTLS/SCTP on the WebRTC lane. The two are not addable, which is why
+                they are separate lines rather than one total.
               */}
               {link ? (
                 <>

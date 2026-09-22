@@ -206,7 +206,8 @@ as a zero someone already thought about.
   a synthetic `BenchProducer` that nothing drives.
 - **web → web** is covered only by the seeder-propagation row, which starts from
   a native origin. No row has a tab produce for a tab from scratch.
-- **node has no WebRTC row**, and cannot: the receiver pins `'relay'` outright.
+- **node has no row of its own beyond `password-node-cli`**, which now dials
+  the data channel like every other consumer.
 - **node cannot produce a folder** at all — see above. That square is not a gap
   but an absence by design.
 - **Safari and Firefox are never exercised.** `password-web-producer-snapshot`

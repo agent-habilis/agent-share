@@ -193,28 +193,6 @@ async fn assert_hello_readable(
     assert_eq!(read_range(conn, secret, index, 6, 100).await, b"world");
 }
 
-/// `relay` mode: skip `WebRTC`; dial mount on the ticket address (here, direct IP).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn relay_mode_mounts_without_webrtc() {
-    let tree = temp_tree();
-    let secret = [9u8; SECRET_LEN];
-    let producer = bind_plain(vec![MOUNT_ALPN.to_vec()]).await;
-    let producer_addr = producer.addr();
-    let server = spawn_mount_server(producer.clone(), secret, tree.clone());
-
-    let consumer = bind_plain(Vec::new()).await;
-    let mount = consumer
-        .connect(producer_addr, MOUNT_ALPN)
-        .await
-        .expect("dial mount over IP (relay mode analog)");
-    assert_hello_readable(&mount, &secret).await;
-
-    mount.close(0u32.into(), b"done");
-    producer.close().await;
-    server.abort();
-    let _ = std::fs::remove_dir_all(&tree);
-}
-
 /// `webrtc` mode: mount dial uses only the custom `WebRTC` addr.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn webrtc_mode_mounts_over_data_channel_only() {

@@ -11,12 +11,10 @@ use agent_share_proto::framing::{
     MAX_BENCH_FILL_BYTES, decode_bench_request_prefix, decode_response_header,
     encode_bench_echo_request, encode_bench_fill_request,
 };
-use agent_share_proto::ticket::{
-    TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC,
-};
+use agent_share_proto::ticket::{TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_WEBRTC};
 use anyhow::{Context, Result, bail};
 use fofoca::iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
-use fofoca::iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr};
+use fofoca::iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 use rand::RngCore;
 use serde::Serialize;
@@ -32,8 +30,7 @@ use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BenchTransport {
     WebRtc,
-    Relay,
-    /// Plain iroh QUIC over UDP: no `WebRTC` wrapper, no forced relay.
+    /// Plain iroh QUIC over UDP: no `WebRTC` wrapper.
     ///
     /// The control leg. Without it the only synthetic numbers available are
     /// wrapped ones, and the wrapper's cost cannot be separated from the
@@ -45,16 +42,14 @@ impl BenchTransport {
     pub(crate) fn parse(raw: &str) -> Result<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "webrtc" | "webrtc_only" | "webrtc-only" => Ok(Self::WebRtc),
-            "relay" | "relay_only" | "relay-only" | "iroh_relay" | "iroh-relay" => Ok(Self::Relay),
             "quic" | "direct" | "udp" => Ok(Self::Quic),
-            other => bail!("unknown transport {other:?}; expected webrtc, relay or quic"),
+            other => bail!("unknown transport {other:?}; expected webrtc or quic"),
         }
     }
 
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::WebRtc => "webrtc",
-            Self::Relay => "relay",
             Self::Quic => "quic",
         }
     }
@@ -62,7 +57,6 @@ impl BenchTransport {
     const fn ticket_kind(self) -> u8 {
         match self {
             Self::WebRtc => TICKET_KIND_BENCH_WEBRTC,
-            Self::Relay => TICKET_KIND_BENCH_RELAY,
             Self::Quic => TICKET_KIND_BENCH_QUIC,
         }
     }
@@ -70,10 +64,9 @@ impl BenchTransport {
     fn from_ticket_kind(kind: u8) -> Result<Self> {
         match kind {
             TICKET_KIND_BENCH_WEBRTC => Ok(Self::WebRtc),
-            TICKET_KIND_BENCH_RELAY => Ok(Self::Relay),
             TICKET_KIND_BENCH_QUIC => Ok(Self::Quic),
             other => bail!(
-                "ticket has no bench transport (kind={other}); produce with --transport webrtc|relay|quic"
+                "ticket has no bench transport (kind={other}); produce with --transport webrtc|quic"
             ),
         }
     }
@@ -141,21 +134,6 @@ async fn bind_bench(
     let key = SecretKey::from_bytes(&key_bytes);
 
     let (endpoint, webrtc) = match transport {
-        BenchTransport::Relay => {
-            // clear_ip on *both* peers: dialing a relay-only addr is not
-            // enough — iroh still upgrades to direct once both sides have IP
-            // transports (see iroh `endpoint_two_relay_only_becomes_direct`).
-            let endpoint = build_endpoint(
-                &lookups,
-                Some(key),
-                None,
-                vec![MOUNT_ALPN.to_vec()],
-                None,
-                true,
-            )
-            .await?;
-            (endpoint, None)
-        }
         BenchTransport::Quic => {
             // Nothing forced and nothing cleared: whatever iroh would pick for
             // an ordinary share. On a loopback swarm that is a direct IP path.
@@ -216,7 +194,7 @@ async fn accept_one(
     let conn = incoming.await.context("incoming connection failed")?;
     if conn.alpn() == WEBRTC_SIGNAL_ALPN {
         let Some(webrtc) = webrtc else {
-            bail!("unexpected WebRTC signal on a relay-only bench producer");
+            bail!("unexpected WebRTC signal on a QUIC bench producer");
         };
         return serve_signal(&conn, local_id, webrtc, ice).await;
     }
@@ -358,17 +336,6 @@ async fn connect_forced(
     let key = SecretKey::from_bytes(&key_bytes);
 
     match transport {
-        BenchTransport::Relay => {
-            // Dial relay-only *and* clear IP transports locally so the path
-            // cannot upgrade to direct after connect.
-            let relay_only = relay_only_addr(&ticket.addr)?;
-            let endpoint =
-                build_endpoint(&ticket.lookups, Some(key), None, Vec::new(), None, true).await?;
-            add_peer_addr(&endpoint, relay_only.clone())?;
-            let conn = dial_with_retry(&endpoint, relay_only).await?;
-            ensure_relay_selected(&conn).await?;
-            Ok((endpoint, conn, "relay"))
-        }
         BenchTransport::Quic => {
             // The control leg, so it forces nothing — no `ensure_*_selected`
             // gate, because "whatever iroh picks" is exactly the path an
@@ -432,65 +399,6 @@ async fn connect_forced(
             Ok((endpoint, conn, "webrtc"))
         }
     }
-}
-
-/// Wait briefly for path selection, then require the selected path to be relay.
-async fn ensure_relay_selected(conn: &Connection) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        // `any` rather than `find(selected).is_some_and(relay)`: at most one
-        // path is ever selected, so the two are equivalent, and this one does
-        // not hand clippy a closure over a double reference.
-        if conn
-            .paths()
-            .iter()
-            .any(|path| path.is_selected() && path.is_relay())
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            let summary: Vec<String> = conn
-                .paths()
-                .iter()
-                .map(|path| {
-                    let kind = if path.is_relay() {
-                        "relay"
-                    } else if path.is_ip() {
-                        "ip"
-                    } else {
-                        "other"
-                    };
-                    if path.is_selected() {
-                        format!("*{kind}")
-                    } else {
-                        kind.to_owned()
-                    }
-                })
-                .collect();
-            bail!(
-                "relay bench selected a non-relay path (paths={summary:?}); \
-                 producer and consumer both need clear_ip_transports \
-                 (restart producer with `bench --transport relay`)"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// Ticket addr with only `TransportAddr::Relay` entries — no IP, no custom.
-fn relay_only_addr(addr: &EndpointAddr) -> Result<EndpointAddr> {
-    let relays: Vec<TransportAddr> = addr
-        .relay_urls()
-        .cloned()
-        .map(TransportAddr::Relay)
-        .collect();
-    if relays.is_empty() {
-        bail!(
-            "ticket has no iroh relay URL — cannot force relay transport \
-             (producer must be reachable via a relay; loopback tickets cannot)"
-        );
-    }
-    Ok(EndpointAddr::from_parts(addr.id, relays))
 }
 
 async fn dial_with_retry(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection> {
@@ -682,20 +590,26 @@ mod tests {
             BenchTransport::parse("webrtc").unwrap(),
             BenchTransport::WebRtc
         );
-        assert_eq!(
-            BenchTransport::parse("RELAY").unwrap(),
-            BenchTransport::Relay
-        );
         assert!(BenchTransport::parse("dynamic").is_err());
         assert_eq!(
             BenchTransport::from_ticket_kind(TICKET_KIND_BENCH_WEBRTC).unwrap(),
             BenchTransport::WebRtc
         );
-        assert_eq!(
-            BenchTransport::from_ticket_kind(TICKET_KIND_BENCH_RELAY).unwrap(),
-            BenchTransport::Relay
-        );
         assert!(BenchTransport::from_ticket_kind(0).is_err());
+    }
+
+    /// The relay is a rendezvous, never a data path — not even for the bench.
+    #[test]
+    fn relay_is_not_a_bench_transport() {
+        let err = BenchTransport::parse("relay").expect_err("relay is not a data path");
+        assert!(
+            err.to_string().contains("unknown transport"),
+            "unexpected error: {err:#}"
+        );
+        assert!(BenchTransport::parse("relay-only").is_err());
+        assert!(BenchTransport::parse("iroh_relay").is_err());
+        // Kind 2 stays reserved: an old relay-bench ticket no longer decodes.
+        assert!(BenchTransport::from_ticket_kind(2).is_err());
     }
 
     async fn spawn_loopback_producer(transport: BenchTransport) -> (Endpoint, MountTicket) {
@@ -716,67 +630,6 @@ mod tests {
             }
         });
         (endpoint, ticket)
-    }
-
-    #[test]
-    fn relay_only_addr_strips_ips() {
-        let id = SecretKey::from_bytes(&[3u8; 32]).public();
-        let full = EndpointAddr::from_parts(
-            id,
-            [
-                TransportAddr::Ip("127.0.0.1:9".parse().unwrap()),
-                TransportAddr::Relay("https://relay.example".parse().unwrap()),
-            ],
-        );
-        let only = relay_only_addr(&full).unwrap();
-        assert!(only.ip_addrs().next().is_none());
-        assert_eq!(only.relay_urls().count(), 1);
-        assert!(relay_only_addr(&EndpointAddr::new(id)).is_err());
-    }
-
-    /// A relay-forced dial refuses a ticket carrying no relay URL.
-    ///
-    /// The ticket is built by hand rather than by standing a producer up, and
-    /// that is the fix rather than a shortcut. `spawn_loopback_producer` could
-    /// not bind this case *at all*: `bind_bench` passes `clear_ip = true` for
-    /// the relay transport — correct in production, where the lookups resolve a
-    /// real relay — but against `LookupOpts::loopback()` the builder ends up
-    /// with an empty transport list. `bind_addr` adds an IP transport,
-    /// `RelayMode::Disabled` retains away every relay transport, no custom
-    /// transport is registered, and `clear_ip_transports()` removes the IP one.
-    /// iroh then fails the bind with "no valid address available" — its own
-    /// `test_bind_addr_badport_notrequired_no_other_transports` asserts that
-    /// exact string for that exact configuration.
-    ///
-    /// The test never needed the producer: `connect_forced` reads the ticket
-    /// and rejects it in `relay_only_addr` before it binds or dials anything.
-    /// Nothing here touches the network.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn relay_mode_rejects_loopback_ticket_without_relay_url() {
-        let producer = SecretKey::from_bytes(&[9u8; 32]).public();
-        let ticket = MountTicket {
-            // Loopback: an IP path and no relay, which is what makes a
-            // relay-forced dial impossible.
-            addr: EndpointAddr::from_parts(
-                producer,
-                [TransportAddr::Ip("127.0.0.1:1".parse().unwrap())],
-            ),
-            secret: [0u8; SECRET_LEN],
-            lookups: LookupOpts::loopback(),
-            kind: TICKET_KIND_BENCH_RELAY,
-            flags: 0,
-            mesh_id: None,
-            author: None,
-        };
-
-        let transport = BenchTransport::from_ticket_kind(ticket.kind).unwrap();
-        let err = connect_forced(&ticket, transport)
-            .await
-            .expect_err("loopback has no relay URL");
-        assert!(
-            err.to_string().contains("no iroh relay URL"),
-            "unexpected error: {err:#}"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

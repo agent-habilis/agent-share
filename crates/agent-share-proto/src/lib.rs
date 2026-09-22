@@ -42,8 +42,8 @@ pub use self::framing::{
 };
 pub use self::manifest::{DirEntry, FileEntry, MountManifest, ReadStatus};
 pub use self::ticket::{
-    MountTicket, TICKET_FLAG_PASSWORD, TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_RELAY,
-    TICKET_KIND_BENCH_WEBRTC, TICKET_KIND_SHARE,
+    MountTicket, TICKET_FLAG_PASSWORD, TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_WEBRTC,
+    TICKET_KIND_SHARE,
 };
 
 pub mod auth;
