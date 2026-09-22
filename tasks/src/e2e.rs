@@ -90,14 +90,13 @@ impl Peer {
 /// means it.
 #[derive(Debug, Clone, Copy)]
 enum Transport {
-    /// iroh QUIC, falling back to the iroh relay. The native↔native default.
+    /// Direct iroh QUIC. The native↔native default, and the only lane it has:
+    /// the relay brokers the punch and never carries the bytes.
     Quic,
-    /// The iroh relay, pinned — or the only lane the end in question has.
-    Relay,
-    /// The WebRTC data channel, pinned. A native consumer reaches it only
-    /// under `--transport webrtc`.
+    /// The WebRTC data channel. A native consumer pins it with
+    /// `--transport webrtc`, and takes it on its own against a tab's ticket.
     WebRtc,
-    /// The browser default: WebRTC preferred, relay fallback.
+    /// The browser default, which now resolves to the data channel.
     Dynamic,
     /// No dial happens. Not an absence of information — these rows exist to
     /// prove a refusal is ruled locally, so the lane being unused is the
@@ -109,7 +108,6 @@ impl Transport {
     fn label(self) -> &'static str {
         match self {
             Self::Quic => "quic",
-            Self::Relay => "relay",
             Self::WebRtc => "webrtc",
             Self::Dynamic => "dynamic",
             Self::None => "none",
@@ -241,14 +239,6 @@ const CELLS: &[Cell] = &[
         precheck: None,
     },
     Cell {
-        name: "web-transport-relay",
-        run: cell_transport_relay,
-        producer: Peer::Native,
-        consumer: Peer::Web,
-        transport: Transport::Relay,
-        precheck: None,
-    },
-    Cell {
         name: "web-password",
         run: cell_password,
         producer: Peer::Native,
@@ -349,7 +339,7 @@ const CELLS: &[Cell] = &[
         run: cell_password_node_cli,
         producer: Peer::Native,
         consumer: Peer::Node,
-        transport: Transport::Relay,
+        transport: Transport::WebRtc,
         precheck: Some(node_datachannel_missing),
     },
     Cell {
@@ -357,7 +347,7 @@ const CELLS: &[Cell] = &[
         run: cell_password_web_producer,
         producer: Peer::Web,
         consumer: Peer::Native,
-        transport: Transport::Relay,
+        transport: Transport::WebRtc,
         precheck: None,
     },
     Cell {
@@ -365,7 +355,7 @@ const CELLS: &[Cell] = &[
         run: cell_password_web_producer_snapshot,
         producer: Peer::Web,
         consumer: Peer::Native,
-        transport: Transport::Relay,
+        transport: Transport::WebRtc,
         precheck: None,
     },
     Cell {
@@ -1425,20 +1415,15 @@ fn cell_password_web_producer_snapshot(ctx: &Ctx<'_>) -> Res<()> {
     web_producer_over(ctx, "snapshot", None, |_| Ok(()))
 }
 
-/// **The same pairing, forced onto the WebRTC data channel.**
+/// **The same pairing, with the lane pinned rather than inferred.**
 ///
-/// The other two web-producer rows take the relay, because that is what a
-/// native consumer picks by default against a ticket a tab minted — a tab has
-/// no mDNS, no DHT and no loopback peers, so its ticket advertises a relay URL
-/// and the native side dials it. That leaves the lane `README.md` names for
-/// this pairing — WebRTC — never dialled by any row with a real file share.
-/// `cargo task bench`'s `browser-produce-webrtc` covers it only for the
-/// synthetic `BenchProducer`, which serves a generated stream rather than a
-/// manifest, a nested directory and a zero-byte file.
-///
-/// `--transport webrtc` is what closes that: it strips the alternatives rather
-/// than preferring the channel, and asserts the selected path afterwards, so
-/// this row passing *is* the lane assertion.
+/// The other two web-producer rows reach the data channel on their own: a tab's
+/// ticket advertises a relay URL and no IP address, and the relay no longer
+/// carries file data, so the native consumer switches to WebRTC itself. This
+/// row passes `--transport webrtc`, which strips the alternatives rather than
+/// preferring the channel and asserts the selected path afterwards — so a
+/// regression in that automatic switch shows up as one row failing, not all
+/// three.
 fn cell_web_producer_webrtc(ctx: &Ctx<'_>) -> Res<()> {
     web_producer_over(ctx, "opfs", Some("webrtc"), |_| Ok(()))
 }
@@ -1731,7 +1716,7 @@ const WEBMCP_MIN_CHROME: u32 = 150;
 ///
 /// Every miss is reported, not just the first. A row that stopped at the first
 /// bad answer would need a run per assertion to see the shape of a breakage,
-/// and these rows cost a relay handshake each.
+/// and these rows cost a signalling handshake each.
 fn run_webmcp(body: &str) -> Res<()> {
     let script = format!(
         r"(async () => {{
@@ -1935,8 +1920,7 @@ fn cell_seeder_propagation(ctx: &Ctx<'_>) -> Res<()> {
 /// Default transport on the consumer, not a pinned one. Reaching a *browser*
 /// seeder means forming a data channel to it, and only the dynamic lane both
 /// falls back to a seeder and can negotiate one: `webrtc` pins the lane and has
-/// no seeder fallback at all, while `relay` has the fallback but no way to dial
-/// a peer that lives in a tab.
+/// no seeder fallback at all.
 fn cell_seeder_propagation_two_tabs(ctx: &Ctx<'_>) -> Res<()> {
     let (dir, _sha) = make_share(3)?;
     let (mut origin, ticket) = serve(ctx.binary, dir.path(), None)?;
@@ -2177,18 +2161,13 @@ fn cell_producer_gone(ctx: &Ctx<'_>) -> Res<()> {
     page.finish()
 }
 
-/// Each pinned data path carries a session end to end.
+/// The pinned data path carries a session end to end.
 ///
-/// `webrtc` is the lane browsers depend on; `relay` is the fallback when ICE
-/// fails, which is what a real Safari session did. Both are pinned by the URL,
-/// so a session that quietly settled on the other path is a failure rather than
-/// a footnote.
+/// `webrtc` is the lane browsers depend on, and the only one that carries file
+/// bytes. It is pinned by the URL, so a session that quietly settled anywhere
+/// else is a failure rather than a footnote.
 fn cell_transport_webrtc(ctx: &Ctx<'_>) -> Res<()> {
     cell_transport(ctx, "webrtc")
-}
-
-fn cell_transport_relay(ctx: &Ctx<'_>) -> Res<()> {
-    cell_transport(ctx, "relay")
 }
 
 fn cell_transport(ctx: &Ctx<'_>, transport: &str) -> Res<()> {
