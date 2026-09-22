@@ -74,7 +74,7 @@ pub(crate) fn run(sh: &Shell, opts: &Options) -> TaskOutcome {
     let binary = util::build_binary(sh, util::Profile::Release)?;
 
     let mut rows = Vec::new();
-    for transport in ["quic", "webrtc", "relay"] {
+    for transport in ["quic", "webrtc"] {
         if !wants(&opts.cells, &format!("native-synth-{transport}")) {
             continue;
         }
@@ -93,7 +93,6 @@ pub(crate) fn run(sh: &Shell, opts: &Options) -> TaskOutcome {
     // cell, because launching Chrome and a bundler per cell would dominate.
     let browser_cells: Vec<(String, &str, bool)> = [
         ("browser-consume-webrtc", "webrtc", true),
-        ("browser-consume-relay", "relay", true),
         ("browser-produce-webrtc", "webrtc", false),
     ]
     .into_iter()
@@ -215,18 +214,11 @@ fn cell_native_synth(binary: &str, opts: &Options, transport: &str, depth: usize
              nothing cleared"
                 .to_owned(),
         );
-    } else if transport == "webrtc" {
+    } else {
         notes.push(
             "QUIC inside a WebRTC data channel: bytes are encrypted twice, and \
              `host/sender.rs:52` undoes GSO batching into one data-channel \
              message per QUIC datagram"
-                .to_owned(),
-        );
-    } else {
-        notes.push(
-            "routed through a public iroh relay, so throughput is bounded by \
-             that shared path's bandwidth as well as its RTT — the high-RTT \
-             point, but not a controlled one"
                 .to_owned(),
         );
     }

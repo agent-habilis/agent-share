@@ -81,7 +81,7 @@ const connect: ModelContextTool = {
     password: { type: 'string', description: 'Password, if the share is protected.' },
     transport: {
       type: 'string',
-      enum: ['webrtc', 'relay', 'dynamic'],
+      enum: ['webrtc', 'dynamic'],
       description: 'Force a data path. Omit to let the client choose.',
     },
   }),

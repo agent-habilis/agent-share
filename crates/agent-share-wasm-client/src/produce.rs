@@ -23,7 +23,7 @@ use agent_share_proto::framing::{
 };
 use agent_share_proto::lookup::LookupOpts;
 use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
-use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_RELAY, TICKET_KIND_BENCH_WEBRTC};
+use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_WEBRTC};
 use fofoca::iroh::endpoint::{Connection, presets};
 use fofoca::iroh::{Endpoint, SecretKey};
 use fofoca_chunks::{
@@ -729,7 +729,7 @@ pub struct BenchProducer {
 
 #[wasm_bindgen]
 impl BenchProducer {
-    /// Mint a ticket for `transport` (`webrtc` | `relay`) and serve echo/fill
+    /// Mint a ticket for `transport` (`webrtc`) and serve echo/fill
     /// until [`BenchProducer::stop`].
     ///
     /// # Errors
@@ -739,12 +739,9 @@ impl BenchProducer {
         let mode = transport.trim().to_ascii_lowercase();
         let (kind, with_webrtc) = match mode.as_str() {
             "webrtc" | "webrtc_only" | "webrtc-only" => (TICKET_KIND_BENCH_WEBRTC, true),
-            "relay" | "relay_only" | "relay-only" | "iroh_relay" | "iroh-relay" => {
-                (TICKET_KIND_BENCH_RELAY, false)
-            }
             other => {
                 return Err(JsValue::from_str(&format!(
-                    "unknown transport {other:?}; expected webrtc or relay"
+                    "unknown transport {other:?}; expected webrtc"
                 )));
             }
         };

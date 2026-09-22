@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * `npx agent-share <ticket> [dir] [--password <pw>]` — receive a shared folder.
- * `npx agent-share bench --transport webrtc|relay` — synthetic OP_BENCH producer.
+ * `npx agent-share bench --transport webrtc` — synthetic OP_BENCH producer.
  * `npx agent-share bench <ticket>` — bench consumer (transport from ticket).
  *
  * Folder receive writes real files rather than mounting: NFS is native-only.
@@ -22,7 +22,7 @@ const CHUNK = 256 * 1024
 function usage() {
   console.error('usage:')
   console.error('  npx agent-share <ticket> [destination] [--password <pw>]')
-  console.error('  npx agent-share bench --transport webrtc|relay')
+  console.error('  npx agent-share bench --transport webrtc')
   console.error('  npx agent-share bench <ticket>')
   console.error()
   console.error('  Receive writes into `destination` (default: ./share).')
@@ -71,6 +71,24 @@ async function installWebRtc() {
 }
 
 /**
+ * Release `node-datachannel`'s native threads.
+ *
+ * Its addon holds a worker pool that keeps Node's event loop alive, so a
+ * command that only closes the connection runs to completion and then never
+ * exits. Best-effort: a missing addon means nothing was ever started.
+ */
+async function shutdownWebRtc() {
+  try {
+    const dc = /** @type {{ cleanup?: () => void }} */ (
+      /** @type {unknown} */ (await import('node-datachannel'))
+    )
+    dc.cleanup?.()
+  } catch {
+    // Nothing to release.
+  }
+}
+
+/**
  * Load the wasm client built by `cargo task web-wasm`.
  *
  * A package name rather than a path: it resolves through `node_modules` from a
@@ -112,10 +130,10 @@ async function receive(ticket, destination, password) {
     )
   }
 
-  process.stderr.write('connecting (relay)…\n')
+  process.stderr.write('connecting (webrtc)…\n')
   const client = await wasm.ShareClient.connect(
     ticket,
-    'relay',
+    'webrtc',
     undefined,
     undefined,
     password,
@@ -165,14 +183,20 @@ async function receive(ticket, destination, password) {
   }
 
   process.stderr.write(`\rreceived ${manifest.files.length} files into ${root}\n`)
+
+  // Node has no page to navigate away from: an open data channel keeps the
+  // event loop alive, so a receive that does not close would never return.
+  client.leave_mesh()
+  client.close_connection()
+  await shutdownWebRtc()
 }
 
 /**
  * @param {string} transport
  */
 async function benchProduce(transport) {
-  if (transport !== 'webrtc' && transport !== 'relay') {
-    throw new Error('bench producer requires --transport webrtc|relay')
+  if (transport !== 'webrtc') {
+    throw new Error('bench producer requires --transport webrtc')
   }
   await installWebRtc()
   const wasm = await loadClient()
@@ -285,6 +309,7 @@ async function benchConsume(ticket, duration) {
     onBenchStatus,
   )
   console.log(JSON.stringify(report, null, 2))
+  await shutdownWebRtc()
 }
 
 /**
@@ -331,7 +356,7 @@ async function main() {
     }
     if (!parsed.ticket) {
       if (!parsed.transport) {
-        throw new Error('bench producer requires --transport webrtc|relay')
+        throw new Error('bench producer requires --transport webrtc')
       }
       await benchProduce(parsed.transport)
       return

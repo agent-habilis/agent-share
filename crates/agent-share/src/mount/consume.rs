@@ -144,6 +144,7 @@ pub(crate) async fn attach(
     password: Option<&str>,
 ) -> Result<()> {
     let ticket = MountTicket::decode(ticket)?;
+    let webrtc_only = webrtc_only || relay_only(&ticket.addr);
     // Before the endpoint, before the dial: a ticket that wants a password we
     // do not have is a usage error, and it should read as one rather than as a
     // connection that mysteriously drops.
@@ -326,6 +327,17 @@ pub(crate) async fn attach(
 /// Pins a key so the `WebRTC` transport advertises the identity the endpoint
 /// binds — the producer does the same, for the same reason.
 ///
+/// A ticket a browser tab minted: a relay URL and no IP address.
+///
+/// A tab is publicly reachable or not reachable at all — no mDNS, no DHT, no
+/// loopback peers — so its ticket advertises only the relay it is registered
+/// on. Since the relay never carries file data, that address is not something
+/// to dial but a signal: the producer is behind a data channel, so take the
+/// WebRTC lane without being told to.
+pub(crate) fn relay_only(addr: &fofoca::iroh::EndpointAddr) -> bool {
+    addr.ip_addrs().next().is_none() && addr.relay_urls().next().is_some()
+}
+
 /// `webrtc_only` clears IP, for the same reason the bench's `WebRTC` arm does:
 /// a lane is pinned by removing the alternatives, not by hoping the preferred
 /// one wins a race. The address book is still seeded with the producer's IP and
@@ -1432,6 +1444,36 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+
+    /// A tab's ticket carries a relay URL and no IP address. That is the
+    /// signature a native consumer reads as "switch to the WebRTC lane",
+    /// because the relay does not carry file data.
+    #[test]
+    fn a_ticket_with_no_ip_address_is_relay_only() {
+        use fofoca::iroh::{EndpointAddr, SecretKey, TransportAddr};
+
+        let id = SecretKey::from_bytes(&[4u8; 32]).public();
+        let tab = EndpointAddr::from_parts(
+            id,
+            [TransportAddr::Relay(
+                "https://relay.example".parse().unwrap(),
+            )],
+        );
+        assert!(relay_only(&tab));
+
+        let native = EndpointAddr::from_parts(
+            id,
+            [
+                TransportAddr::Ip("127.0.0.1:9".parse().unwrap()),
+                TransportAddr::Relay("https://relay.example".parse().unwrap()),
+            ],
+        );
+        assert!(!relay_only(&native));
+
+        // Nothing at all is not the tab signature either: there is no lane to
+        // switch *to*, and `ensure_reachable_addr` already rejects it.
+        assert!(!relay_only(&EndpointAddr::new(id)));
+    }
 
     #[test]
     fn mount_folder_name_is_iso_local_minute() {

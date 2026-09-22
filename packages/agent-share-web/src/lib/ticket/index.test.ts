@@ -155,15 +155,18 @@ describe('the preview route', () => {
 })
 
 describe('parseTransport', () => {
-  test('accepts the three canonical modes', () => {
+  test('accepts the two canonical modes', () => {
     expect(parseTransport('?transport=webrtc')).toBe('webrtc')
-    expect(parseTransport('?transport=relay')).toBe('relay')
     expect(parseTransport('?transport=dynamic')).toBe('dynamic')
+  })
+
+  test('relay is no longer a mode — the relay never carries file data', () => {
+    expect(parseTransport('?transport=relay')).toBeUndefined()
   })
 
   test('is case- and whitespace-insensitive', () => {
     expect(parseTransport('?transport=WebRTC')).toBe('webrtc')
-    expect(parseTransport('?transport=%20relay%20')).toBe('relay')
+    expect(parseTransport('?transport=%20dynamic%20')).toBe('dynamic')
   })
 
   test('treats unknown, empty and absent values as the default', () => {
@@ -193,12 +196,12 @@ describe('transport on the route', () => {
 
   test('sharePath round-trips the mode', () => {
     expect(sharePath(TICKET, 'info', 'webrtc')).toBe(`/info/${TICKET}?transport=webrtc`)
-    const url = new URL(sharePath(TICKET, 'info', 'relay'), 'http://localhost')
+    const url = new URL(sharePath(TICKET, 'info', 'dynamic'), 'http://localhost')
     expect(parseRoute(url.pathname, url.search)).toEqual({
       view: 'info',
       ticket: TICKET,
       path: [],
-      transport: 'relay',
+      transport: 'dynamic',
     })
   })
 

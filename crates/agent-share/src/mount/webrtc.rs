@@ -14,18 +14,18 @@
 //!    an address containing *only* the `WebRTC` custom addr. No selected path,
 //!    so the Initial fans out over the data channel.
 //!
-//! For *this* lane the relay is a rendezvous, not a transport: it carries the
-//! SDP exchange and never a byte of file data, and when ICE fails the dial
-//! fails loudly rather than quietly relaying. That is a property of the native
-//! lane only — the browser client relays instead of failing. See below.
+//! The relay is a rendezvous, not a transport: it carries the SDP exchange and
+//! never a byte of file data, and when ICE fails the dial fails loudly rather
+//! than quietly relaying. That holds on every lane — the browser client fails
+//! the same way.
 //!
 //! # Which transport carries bytes
 //!
 //! | pair | carries bytes | never |
 //! |---|---|---|
-//! | native ↔ native | iroh QUIC, else iroh relay | **`WebRTC`** |
-//! | native ↔ web | `WebRTC`, else iroh relay | — |
-//! | web ↔ web | `WebRTC`, else iroh relay | — |
+//! | native ↔ native | direct iroh QUIC | **`WebRTC`**, **the relay** |
+//! | native ↔ web | `WebRTC` | the relay |
+//! | web ↔ web | `WebRTC` | the relay |
 //!
 //! `WebRTC` exists because a browser has no UDP socket and cannot speak QUIC
 //! directly. That is the whole of its justification, and it does not reach two

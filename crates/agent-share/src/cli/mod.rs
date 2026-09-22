@@ -71,7 +71,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             ..
         }) => {
             let Some(transport) = transport else {
-                anyhow::bail!("bench producer requires --transport webrtc|relay|quic");
+                anyhow::bail!("bench producer requires --transport webrtc|quic");
             };
             return crate::mount::produce_bench(
                 &transport,

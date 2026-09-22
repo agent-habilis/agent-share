@@ -69,7 +69,7 @@ describe('the route table', () => {
     // why `SessionLayout` keys the session it mounts rather than trusting the
     // router to remount it.
     expect(clientKey('a', undefined)).not.toBe(clientKey('b', undefined))
-    expect(clientKey('a', 'webrtc')).not.toBe(clientKey('a', 'relay'))
+    expect(clientKey('a', 'webrtc')).not.toBe(clientKey('a', 'dynamic'))
   })
 })
 

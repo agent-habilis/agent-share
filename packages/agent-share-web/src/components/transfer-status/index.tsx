@@ -188,7 +188,7 @@ function describeDown(snapshot: TransferSnapshot | null): string {
     `${humanBytes(total.received)} received this session.`,
     `By path: ${laneSummary(lanes)}`,
     '',
-    'Wire bytes, counted by the QUIC state machine below the transport split — so the relay path and the WebRTC one are measured the same way. Slightly more than the files themselves, and it excludes mesh traffic.',
+    'Wire bytes, counted by the QUIC state machine below the transport split. Slightly more than the files themselves, and it excludes mesh traffic.',
   )
 }
 
@@ -205,14 +205,11 @@ function describeUp(snapshot: TransferSnapshot | null): string {
 
 function describePeers(snapshot: TransferSnapshot | null): string {
   if (!snapshot) return PENDING
-  const peers = peerCounts(snapshot.gossip, snapshot.direct, snapshot.relayPeer)
+  const peers = peerCounts(snapshot.gossip, snapshot.direct)
   return lines(
     `Peers — ${peers.connected} connected of ${peers.known} known`,
-    'Connected: peers this tab holds a live connection to — WebRTC data channels plus a relay-carried mount peer.',
+    'Connected: peers this tab holds a live WebRTC data channel with.',
     'Known: members on this share’s mesh, not counting this tab.',
-    peers.connected === 0 && peers.known > 0
-      ? '\nNone direct — this session is riding the relay.'
-      : null,
   )
 }
 
@@ -221,11 +218,7 @@ export const TransferStatus = component<TransferStatusProps>(function* (props) {
     const snapshot = props.sample.value
     const revival = props.revival.value
     const total = snapshot?.link.total
-    const peers = peerCounts(
-      snapshot?.gossip ?? 0,
-      snapshot?.direct ?? 0,
-      snapshot?.relayPeer ?? false,
-    )
+    const peers = peerCounts(snapshot?.gossip ?? 0, snapshot?.direct ?? 0)
     /*
       Zeros before the first sample, not dashes.
 

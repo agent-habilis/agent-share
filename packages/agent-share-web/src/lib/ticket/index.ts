@@ -16,7 +16,7 @@
  * name may hold anything a filesystem allows — `?`, `#`, a literal `/` cannot
  * appear, but a `%` can.
  *
- * `?transport=webrtc|relay|dynamic` pins the mount data path (the wasm
+ * `?transport=webrtc|dynamic` pins the mount data path (the wasm
  * `TransportMode`). `?dev=true` reveals the Info pane's dev tools. Both are
  * local debugging preferences rather than part of the capability, so they ride
  * the query string — and `shareUrl`, the link a producer hands out,
@@ -26,7 +26,7 @@
 export type ShareView = 'files' | 'info' | 'preview'
 
 /** Mount data path, spelled as the wasm `TransportMode` spells it. */
-export type TransportMode = 'webrtc' | 'relay' | 'dynamic'
+export type TransportMode = 'webrtc' | 'dynamic'
 
 export interface ShareRoute {
   view: ShareView
@@ -57,13 +57,13 @@ function routeSegments(pathname: string): string[] {
   return parts[0] === APP_BASE.slice(1) ? parts.slice(1) : parts
 }
 
-const TRANSPORT_MODES: readonly TransportMode[] = ['webrtc', 'relay', 'dynamic']
+const TRANSPORT_MODES: readonly TransportMode[] = ['webrtc', 'dynamic']
 
 /**
  * Read `?transport=` out of a query string.
  *
  * Canonical names only. `TransportMode::parse` on the wasm side also takes
- * aliases (`webrtc_only`, `iroh-relay`, …) for direct API callers, but four
+ * aliases (`webrtc_only`, `webrtc-only`, …) for direct API callers, but four
  * spellings per mode is not a URL surface anyone can eyeball. An unrecognised
  * value reads as absent, so a typo degrades to the default rather than failing
  * the page.

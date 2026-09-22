@@ -24,8 +24,8 @@ describe('shareTarget', () => {
   })
 
   test('writes a preview path under the ticket', () => {
-    expect(shareTarget('?transport=relay', TICKET, 'preview', ['docs', 'note.md'])).toBe(
-      `/preview/${TICKET}/docs/note.md?transport=relay`,
+    expect(shareTarget('?transport=webrtc', TICKET, 'preview', ['docs', 'note.md'])).toBe(
+      `/preview/${TICKET}/docs/note.md?transport=webrtc`,
     )
   })
 
