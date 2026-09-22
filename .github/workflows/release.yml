@@ -111,7 +111,7 @@ jobs:
       contents: write
       pull-requests: write
       actions: write # dispatch CI on the formula branch
-    # Two tags in flight would race to push `main` and the tap. Queue them;
+    # Two tags in flight would race to push the formula branch. Queue them;
     # never cancel one, or its release ships without a formula.
     concurrency:
       group: update-formula
@@ -181,24 +181,3 @@ jobs:
               --body "Bumps \`Formula/agent-share.rb\` to the checksums of the ${TAG} release."
           fi
           gh workflow run ci.yml --ref "$branch"
-      # The GITHUB_TOKEN is scoped to this repo, so mirroring into the org
-      # tap needs the TAP_PUSH_TOKEN secret (fine-grained PAT, contents
-      # read/write on homebrew-tap only).
-      - uses: actions/checkout@v5
-        if: steps.guard.outputs.skip != 'true'
-        with:
-          repository: agent-habilis/homebrew-tap
-          token: ${{ secrets.TAP_PUSH_TOKEN }}
-          path: tap
-      - name: Mirror the formula to the org tap
-        if: steps.guard.outputs.skip != 'true'
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          cp Formula/agent-share.rb tap/Formula/agent-share.rb
-          cd tap
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/agent-share.rb
-          git diff --cached --quiet || git commit -m "agent-share ${TAG}"
-          git push

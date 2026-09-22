@@ -104,9 +104,10 @@ git push origin main --follow-tags
 ```
 
 The tag push starts `.github/workflows/release.yml`. It builds the four
-binaries, creates the GitHub release, and updates `Formula/agent-share.rb` on
-`main`. Then it copies the formula to `agent-habilis/homebrew-tap`. That copy
-needs the `TAP_PUSH_TOKEN` Actions secret: a fine-grained PAT with contents
+binaries, creates the GitHub release, and opens a PR that updates
+`Formula/agent-share.rb`. When that PR merges into `main`,
+`.github/workflows/tap.yml` copies the formula to `agent-habilis/homebrew-tap`.
+That copy needs the `TAP_PUSH_TOKEN` Actions secret: a fine-grained PAT with contents
 read/write on the tap repo.
 
 ## The web client
