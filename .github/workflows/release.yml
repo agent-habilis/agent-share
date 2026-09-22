@@ -109,12 +109,33 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Two tags in flight would race to push `main` and the tap. Queue them;
+    # never cancel one, or its release ships without a formula.
+    concurrency:
+      group: update-formula
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
         with:
           ref: main # commit the formula bump onto main, not the tag
           token: ${{ secrets.GITHUB_TOKEN }}
+      # Skip only when main is strictly newer. An equal version must still run:
+      # the first release tags the version the formula already names, and a
+      # re-cut tag needs its new checksums written.
+      - name: Skip a tag older than the formula on main
+        id: guard
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          ver="${TAG#v}"
+          current=$(sed -nE 's/^  version "([^"]*)"/\1/p' Formula/agent-share.rb)
+          newest=$(printf '%s\n' "$ver" "$current" | sort -V | tail -n 1)
+          if [ "$current" != "$ver" ] && [ "$newest" = "$current" ]; then
+            echo "Formula on main is at $current, newer than $TAG. Leaving it alone." >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Bump Formula/agent-share.rb to the released version + checksums
+        if: steps.guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -132,6 +153,7 @@ jobs:
             perl -0pi -e "s{(${target}\.tar\.gz\"\s*\n\s*sha256 \")[0-9a-f]{64}}{\${1}${sum}}g" Formula/agent-share.rb
           done
       - name: Commit the formula bump
+        if: steps.guard.outputs.skip != 'true'
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -144,11 +166,13 @@ jobs:
       # tap needs the TAP_PUSH_TOKEN secret (fine-grained PAT, contents
       # read/write on homebrew-tap only).
       - uses: actions/checkout@v5
+        if: steps.guard.outputs.skip != 'true'
         with:
           repository: agent-habilis/homebrew-tap
           token: ${{ secrets.TAP_PUSH_TOKEN }}
           path: tap
       - name: Mirror the formula to the org tap
+        if: steps.guard.outputs.skip != 'true'
         env:
           TAG: ${{ github.ref_name }}
         run: |
