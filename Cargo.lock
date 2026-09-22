@@ -1526,7 +1526,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 [[package]]
 name = "fofoca"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1546,6 +1546,7 @@ dependencies = [
  "iroh-gossip",
  "iroh-mainline-address-lookup",
  "iroh-mdns-address-lookup",
+ "iroh-relay",
  "libc",
  "n0-future",
  "rand 0.9.4",
@@ -1563,7 +1564,7 @@ dependencies = [
 [[package]]
 name = "fofoca-chunks"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1576,7 +1577,7 @@ dependencies = [
 [[package]]
 name = "fofoca-doc"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "automerge",
@@ -1593,7 +1594,7 @@ dependencies = [
 [[package]]
 name = "fofoca-iroh-multihop-transport"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1612,7 +1613,7 @@ dependencies = [
 [[package]]
 name = "fofoca-iroh-transport-util"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "iroh",
 ]
@@ -1620,7 +1621,7 @@ dependencies = [
 [[package]]
 name = "fofoca-iroh-webrtc-transport"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1646,7 +1647,7 @@ dependencies = [
 [[package]]
 name = "fofoca-logging"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "fofoca-protocol",
@@ -1659,7 +1660,7 @@ dependencies = [
 [[package]]
 name = "fofoca-protocol"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1684,7 +1685,7 @@ dependencies = [
 [[package]]
 name = "fofoca-util"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "libc",
  "tokio",
@@ -2570,7 +2571,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/fofoca-network/iroh-gossip?rev=57dcb6b8e5c0645c951830faf6b84b5893ee83c1#57dcb6b8e5c0645c951830faf6b84b5893ee83c1"
+source = "git+https://github.com/fofoca-network/iroh-gossip?rev=50f6a933d8f4e11aeac38fd7581db3658f9fe684#50f6a933d8f4e11aeac38fd7581db3658f9fe684"
 dependencies = [
  "blake3",
  "bytes",
@@ -4929,7 +4930,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.60.2",

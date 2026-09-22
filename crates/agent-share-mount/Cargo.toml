@@ -52,4 +52,4 @@ futures = "0.3"
 # The tag must stay in step with the workspace root and with
 # `agent-share-wasm-client`, which restates it for the same reason. Three copies
 # is the cost of a dependency that means different things on two targets.
-fofoca = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0", default-features = false }
+fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "d9434eec9acf81542acea56bba8e86439c8cb8ee", default-features = false }

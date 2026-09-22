@@ -19,10 +19,10 @@ import { Outlet, useLocation, useParams } from 'visage-router'
 
 import { jittered, revivalOriginCapMs } from './backoff/index.ts'
 import { forgetPassword, rememberPassword, rememberedPassword } from './password.ts'
+import type { Revival } from './revival.ts'
 import {
   SessionCtx,
   transferLabel,
-  type RateSample,
   type SessionApi,
   type SessionReady,
   type ToastMessage,
@@ -97,15 +97,6 @@ type State =
 const HOLDINGS_REPAINT_MS = 1_000
 
 /**
- * How many rate readings `history` keeps — a minute at the 1s sampler tick.
- *
- * Long enough that the shape of a transfer is legible and short enough that a
- * stall shows up as the graph draining rather than as a flat tail nobody
- * notices.
- */
-const HISTORY_TICKS = 60
-
-/**
  * How long a message holds the top bar before it gives it back.
  *
  * It is holding the action row hostage the whole time — that is the price of
@@ -151,7 +142,7 @@ const Session = component<{
    * for. So the browser stays on screen and only the actions that need the
    * peer are held back.
    */
-  const reviving = signal(false)
+  const revival = signal<Revival | null>(null)
   /**
    * The tree this tab last seeded, read from its own storage while the dial
    * is still grinding. Rendered only inside the `connecting` phase — never a
@@ -181,8 +172,6 @@ const Session = component<{
    * that read it repaint each second — the file list must not.
    */
   const sample = signal<TransferSnapshot | null>(null)
-  /** The last minute of rates, oldest first. See `SessionApi.history`. */
-  const history = signal<readonly RateSample[]>([])
   const openedAt = Date.now()
   const lastActivityAt = signal(0)
   /** Wire bytes at the previous tick, to tell movement from a quiet keep-alive. */
@@ -297,6 +286,11 @@ const Session = component<{
   using _sampler = interval(1000, () => {
     const current = state.peek()
     if (current.phase !== 'ready') return
+    // Until the swap, `current.client` is the retiring one. Its data channels
+    // may still count as open — after a sleep the browser fires no `close`
+    // for a channel whose QUIC died underneath — so its numbers describe a
+    // connection this tab no longer has. The header shows the redial instead.
+    if (revival.peek()) return
     // getStats, for the per-peer rows and the ICE addresses behind them.
     // Per-peer round-trips on the main thread, competing with the bulk
     // transfer — and the wasm side asks for a slower cadence. With the Info
@@ -317,12 +311,6 @@ const Session = component<{
       // count cannot see — the WebRTC-path mount is already inside it.
       relayPeer: !current.client.closed && current.client.transport !== 'webrtc',
     }
-    // A fresh array rather than a mutated one: signals compare by identity, so
-    // pushing in place would leave every reader on the value it already drew.
-    history.value = [
-      ...history.peek().slice(1 - HISTORY_TICKS),
-      { up: link.total.up_bps, down: link.total.down_bps },
-    ]
     const moved = link.total.sent + link.total.received
     if (moved > movedBytes) lastActivityAt.value = Date.now()
     movedBytes = moved
@@ -596,8 +584,8 @@ const Session = component<{
     revivalInFlight = (async () => {
       // The `ready` state is deliberately left in place: the manifest is still
       // good, so the browser stays on screen and navigable while this runs.
-      // Only `reviving` flips, and only the actions that need the peer read it.
-      reviving.value = true
+      // Only `revival` flips, and only the actions that need the peer read it.
+      revival.value = { attempts: 0, lastError: null }
       let backoff = RECONNECT_BACKOFF_START_MS
       let attempt = 0
       // The dying client, kept ALIVE until its replacement is up. Its mount
@@ -639,12 +627,13 @@ const Session = component<{
             if (ctx.aborted.aborted) return
             console.debug('[agent-share] reconnect attempt failed; retrying', error)
             attempt += 1
+            revival.value = { attempts: attempt, lastError: String(error) }
             await new Promise((resolve) => setTimeout(resolve, jittered(backoff)))
             backoff = Math.min(backoff * 2, RECONNECT_BACKOFF_MAX_MS)
           }
         }
       } finally {
-        reviving.value = false
+        revival.value = null
         revivalInFlight = null
       }
     })()
@@ -661,6 +650,12 @@ const Session = component<{
    * origin still costs only polite, membership-reusing attempts.
    */
   const RECONNECT_BACKOFF_MAX_MS = 10_000
+  /**
+   * How far the clock may move between two 1 s ticks before it counts as a
+   * sleep. Well above what a hidden tab's throttled timer does (13-20 s,
+   * measured in Safari) and well below the shortest sleep anyone notices.
+   */
+  const SLEEP_GAP_MS = 60_000
 
   /**
    * Notice a connection that died while nothing was using it.
@@ -674,17 +669,35 @@ const Session = component<{
    * Guarded on `ready`: while connecting or failed there is nothing to revive,
    * and without the guard a share whose producer is gone would spin.
    */
+  let lastTickAt = Date.now()
   using _liveness = interval(1000, () => {
+    const now = Date.now()
+    const slept = now - lastTickAt > SLEEP_GAP_MS
+    lastTickAt = now
     const current = state.peek()
-    if (current.phase === 'ready' && current.client.closed) void ensureLive()
+    if (current.phase !== 'ready') return
+    // A jump in the clock between ticks is the machine having slept. The
+    // connection may not report `closed` yet — QUIC only learns of the idle
+    // timeout on its next send — but it is dead all the same, so start early
+    // rather than wait a tick for the flag.
+    if (current.client.closed || slept) {
+      if (slept) console.debug('[agent-share] clock jumped; the machine slept')
+      void ensureLive()
+    }
   })
 
+  // The tab coming back into view, and the network coming back at all. A
+  // wake with this tab already in front fires neither `visibilitychange`
+  // nor, on a wired machine, `online`; the poll above covers that case.
   const onVisible = () => {
     if (document.visibilityState === 'visible') void ensureLive()
   }
+  const onOnline = () => void ensureLive()
   document.addEventListener('visibilitychange', onVisible)
+  window.addEventListener('online', onOnline)
   ctx.aborted.addEventListener('abort', () => {
     document.removeEventListener('visibilitychange', onVisible)
+    window.removeEventListener('online', onOnline)
   })
 
   // Drop the mount when the session unmounts (ticket change / leave).
@@ -944,18 +957,18 @@ const Session = component<{
     coverage,
     transfer,
     sample,
-    history,
     openedAt,
     lastActivityAt,
     tick,
     seeding,
     toast,
     mountError,
-    redialling: reviving,
+    redialling: computed(() => revival.value !== null),
+    revival,
     mounted,
     status: computed(() => {
       const active = transfer.value
-      return reviving.value
+      return revival.value
         ? 'reconnecting'
         : active
           ? transferLabel(active.kind)

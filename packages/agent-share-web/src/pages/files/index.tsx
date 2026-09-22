@@ -11,6 +11,7 @@ import { ColumnView } from '../../components/column-view/index.tsx'
 import { SessionChrome } from '../../components/session-chrome/index.tsx'
 import { transferLabel, useSession } from '../../components/session/session.ts'
 import { canMount } from '../../lib/mount/index.ts'
+import { describeRevival } from '../../components/session/revival.ts'
 import { seedState } from '../../lib/seeding/index.ts'
 
 export const FilesPage = component(function* () {
@@ -25,7 +26,9 @@ export const FilesPage = component(function* () {
     const mounted = session.mounted.value
     // Re-dialling a connection lost to a background tab. Browsing is unaffected
     // — the tree is local — so only the actions that reach the peer wait.
-    const redialling = session.redialling.value
+    const revival = session.revival.value
+    const redialling = revival !== null
+    const disabledReason = revival ? describeRevival(revival) : undefined
     const mountable = canMount() && !redialling
 
     const mountButton = () => (
@@ -125,6 +128,7 @@ export const FilesPage = component(function* () {
           seedDisabled={session.seeding.value || redialling}
           onPreview={session.onPreview}
           previewDisabled={active !== null || redialling}
+          disabledReason={disabledReason}
         />
       </SessionChrome>
     )

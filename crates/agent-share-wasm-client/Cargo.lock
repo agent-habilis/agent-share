@@ -49,7 +49,7 @@ version = "0.1.0"
 dependencies = [
  "agent-share-proto",
  "anyhow",
- "fofoca 0.6.0",
+ "fofoca",
  "fofoca-chunks",
  "futures",
 ]
@@ -60,7 +60,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bs58",
- "fofoca-protocol 0.6.0",
+ "fofoca-protocol",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -74,9 +74,9 @@ dependencies = [
  "agent-share-proto",
  "anyhow",
  "console_error_panic_hook",
- "fofoca 0.5.0",
+ "fofoca",
  "fofoca-chunks",
- "fofoca-iroh-webrtc-transport 0.5.0",
+ "fofoca-iroh-webrtc-transport",
  "futures",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
@@ -1177,42 +1177,8 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "fofoca"
-version = "0.5.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b#a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b"
-dependencies = [
- "anyhow",
- "argon2",
- "async-trait",
- "bs58",
- "bytes",
- "chacha20poly1305",
- "fofoca-directory",
- "fofoca-doc 0.5.0",
- "fofoca-iroh-webrtc-transport 0.5.0",
- "fofoca-logging 0.5.0",
- "fofoca-protocol 0.5.0",
- "fofoca-reassembly",
- "fofoca-util 0.5.0",
- "futures-util",
- "iroh",
- "iroh-gossip",
- "n0-future",
- "rand 0.9.5",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tracing",
- "uuid",
- "web-time",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "fofoca"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1220,11 +1186,11 @@ dependencies = [
  "bs58",
  "bytes",
  "chacha20poly1305",
- "fofoca-doc 0.6.0",
- "fofoca-iroh-webrtc-transport 0.6.0",
- "fofoca-logging 0.6.0",
- "fofoca-protocol 0.6.0",
- "fofoca-util 0.6.0",
+ "fofoca-doc",
+ "fofoca-iroh-webrtc-transport",
+ "fofoca-logging",
+ "fofoca-protocol",
+ "fofoca-util",
  "futures-util",
  "iroh",
  "iroh-gossip",
@@ -1244,7 +1210,7 @@ dependencies = [
 [[package]]
 name = "fofoca-chunks"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1255,46 +1221,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "fofoca-directory"
-version = "0.5.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b#a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b"
-dependencies = [
- "anyhow",
- "fofoca-protocol 0.5.0",
- "fofoca-util 0.5.0",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "fofoca-doc"
-version = "0.5.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b#a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b"
-dependencies = [
- "anyhow",
- "automerge",
- "bs58",
- "chacha20poly1305",
- "fofoca-protocol 0.5.0",
- "fofoca-util 0.5.0",
- "serde",
- "serde_json",
- "tracing",
- "zeroize",
-]
-
-[[package]]
 name = "fofoca-doc"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "automerge",
  "bs58",
  "chacha20poly1305",
- "fofoca-protocol 0.6.0",
- "fofoca-util 0.6.0",
+ "fofoca-protocol",
+ "fofoca-util",
  "serde",
  "serde_json",
  "tracing",
@@ -1304,41 +1240,15 @@ dependencies = [
 [[package]]
 name = "fofoca-iroh-transport-util"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "iroh",
-]
-
-[[package]]
-name = "fofoca-iroh-webrtc-transport"
-version = "0.5.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b#a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b"
-dependencies = [
- "anyhow",
- "bytes",
- "futures",
- "if-addrs",
- "iroh",
- "iroh-base",
- "js-sys",
- "n0-watcher",
- "noq-udp",
- "rand 0.9.5",
- "serde",
- "serde_json",
- "str0m",
- "str0m-aws-lc-rs",
- "tokio",
- "tracing",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]
 name = "fofoca-iroh-webrtc-transport"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1363,39 +1273,27 @@ dependencies = [
 
 [[package]]
 name = "fofoca-logging"
-version = "0.5.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b#a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b"
-dependencies = [
- "anyhow",
- "fofoca-protocol 0.5.0",
- "fofoca-util 0.5.0",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "fofoca-logging"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
- "fofoca-protocol 0.6.0",
- "fofoca-util 0.6.0",
+ "fofoca-protocol",
+ "fofoca-util",
  "serde_json",
  "tracing",
 ]
 
 [[package]]
 name = "fofoca-protocol"
-version = "0.5.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b#a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b"
+version = "0.6.0"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "anyhow",
  "argon2",
  "bs58",
  "bytes",
  "chacha20poly1305",
- "fofoca-util 0.5.0",
+ "fofoca-util",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
@@ -1411,59 +1309,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "fofoca-protocol"
-version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
-dependencies = [
- "anyhow",
- "argon2",
- "bs58",
- "bytes",
- "chacha20poly1305",
- "fofoca-util 0.6.0",
- "getrandom 0.2.17",
- "getrandom 0.3.4",
- "getrandom 0.4.3",
- "iroh-base",
- "rand 0.9.5",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tracing",
- "uuid",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "fofoca-reassembly"
-version = "0.5.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b#a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b"
-dependencies = [
- "anyhow",
- "bytes",
- "fofoca-protocol 0.5.0",
- "fofoca-util 0.5.0",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "fofoca-util"
-version = "0.5.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b#a80fde2e86fcb96bb8bf7e0e8ccb81d2ec28f75b"
-dependencies = [
- "tokio",
- "tracing",
- "vergen-gitcl",
- "web-time",
-]
-
-[[package]]
 name = "fofoca-util"
 version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?tag=v0.6.0#2611c67b9ebfee3c49485710d1789bdfa798b8f4"
+source = "git+https://github.com/fofoca-network/fofoca?rev=d9434eec9acf81542acea56bba8e86439c8cb8ee#d9434eec9acf81542acea56bba8e86439c8cb8ee"
 dependencies = [
  "tokio",
  "tracing",
@@ -2254,7 +2102,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/fofoca-network/iroh-gossip?rev=57dcb6b8e5c0645c951830faf6b84b5893ee83c1#57dcb6b8e5c0645c951830faf6b84b5893ee83c1"
+source = "git+https://github.com/fofoca-network/iroh-gossip?rev=50f6a933d8f4e11aeac38fd7581db3658f9fe684#50f6a933d8f4e11aeac38fd7581db3658f9fe684"
 dependencies = [
  "blake3",
  "bytes",

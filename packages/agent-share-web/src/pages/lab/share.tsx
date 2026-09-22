@@ -10,6 +10,7 @@ import { Button, Input, Select, Stack, Text } from 'moonspace-dom'
 import { component, signal } from 'visage-dom'
 
 import { Panel } from '../../components/panel/index.tsx'
+import { copyText } from '../../lib/clipboard/index.ts'
 import { createShareDirectory, removeShareDirectory, writeOpfsFile } from '../../lib/opfs/index.ts'
 import {
   directorySource,
@@ -229,7 +230,7 @@ export const SharePanel = component(function* () {
             variant="ghost"
             disabled={ticket.value === ''}
             onclick={() => {
-              void navigator.clipboard.writeText(ticket.peek())
+              void copyText(ticket.peek())
               log('ticket copied')
             }}
           >

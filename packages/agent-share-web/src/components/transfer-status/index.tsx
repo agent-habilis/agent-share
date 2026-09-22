@@ -14,12 +14,13 @@
  * The numbers are wire bytes on the mount connection, from the QUIC state
  * machine — see `transferStats.ts` for what that includes and excludes.
  *
- * While the session is re-dialling the slot is simply empty: redialing is
- * the app's permanent background posture, so it gets no message — the stats
- * return the moment a connection does.
+ * While the session is re-dialling the peer field reads `--/--` and its
+ * tooltip says how many attempts have failed and why the last one did. The
+ * sampler stops while the redial runs — the client it would read is the
+ * retiring one — so the rates hold at their last reading, which is zero.
  */
 
-import { ONE_ROW, Spinner, Text } from 'moonspace-dom'
+import { ONE_ROW, Text } from 'moonspace-dom'
 import { component } from 'visage-dom'
 import type { ReadonlySignal } from 'visage-dom'
 import { Style, css, raw } from 'visage-style'
@@ -35,12 +36,18 @@ import {
   type TransferSnapshot,
 } from '../../lib/transfer-stats/index.ts'
 import { NARROW_PX } from '../../lib/breakpoints.ts'
+import { describeRevival, type Revival } from '../session/revival.ts'
 import { humanBytes } from '../../lib/tree.ts'
 
 export interface TransferStatusProps {
   /** The latest reading, or `null` until the first sample lands. */
   sample: ReadonlySignal<TransferSnapshot | null>
+  /** The redial in progress, or null while the connection is up. */
+  revival: ReadonlySignal<Revival | null>
 }
+
+/** Five cells, like `formatPeers`, so the field keeps its width. */
+const PEERS_REDIALLING = '--/--'
 
 /**
  * One glyph and its value, in a box of fixed width.
@@ -212,6 +219,7 @@ function describePeers(snapshot: TransferSnapshot | null): string {
 export const TransferStatus = component<TransferStatusProps>(function* (props) {
   yield () => {
     const snapshot = props.sample.value
+    const revival = props.revival.value
     const total = snapshot?.link.total
     const peers = peerCounts(
       snapshot?.gossip ?? 0,
@@ -262,9 +270,9 @@ export const TransferStatus = component<TransferStatusProps>(function* (props) {
           glyph="⧉"
           glyphCells={2}
           label="peers"
-          title={describePeers(snapshot)}
+          title={revival ? describeRevival(revival) : describePeers(snapshot)}
           cells={PEERS_CELLS}
-          value={formatPeers(peers)}
+          value={revival ? PEERS_REDIALLING : formatPeers(peers)}
         />
       </span>
     )

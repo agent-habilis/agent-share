@@ -52,7 +52,7 @@ pub(crate) fn mesh_lookups(
     fofoca::protocol::LookupOpts {
         mdns: share.mdns,
         dht: share.dht,
-        relay: match &share.relay {
+        relay_lookup: match &share.relay {
             ShareRelay::Disabled => MeshRelay::Disabled,
             ShareRelay::Pinned => MeshRelay::Pinned,
             ShareRelay::Custom(urls) => MeshRelay::Custom(urls.clone()),

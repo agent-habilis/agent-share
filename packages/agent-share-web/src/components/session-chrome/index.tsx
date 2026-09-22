@@ -43,7 +43,7 @@ export function SessionChrome({
           happening. The old blank-while-redialling treatment made the whole
           bar vanish, which read as a broken page — worse than an honest zero.
         */
-        active ? null : <TransferStatus sample={session.sample} />
+        active ? null : <TransferStatus sample={session.sample} revival={session.revival} />
       }
       trailing={trailing}
     >

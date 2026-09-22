@@ -7,6 +7,7 @@ import { component, signal } from 'visage-dom'
 
 import { Centered } from '../../components/centered/index.tsx'
 import { Chrome } from '../../components/chrome/index.tsx'
+import { copyText } from '../../lib/clipboard/index.ts'
 import { FailedBody } from '../../components/failed-body/index.tsx'
 import { LoadingBody } from '../../components/loading-body/index.tsx'
 import { useShareNav } from '../../components/nav.ts'
@@ -197,7 +198,7 @@ export const HomePage = component(function* (_props) {
                   <Button
                     variant="primary"
                     onclick={() => {
-                      void navigator.clipboard.writeText(url)
+                      void copyText(url)
                     }}
                   >
                     Copy link

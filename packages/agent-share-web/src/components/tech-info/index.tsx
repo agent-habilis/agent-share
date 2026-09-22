@@ -60,8 +60,6 @@ import {
 } from "./country-flag/index.ts";
 import { shareProgress } from "./progress/index.ts";
 import { SlotGrid } from "./slot-grid/index.tsx";
-import { sparkline } from "./sparkline/index.ts";
-import type { RateSample } from "../session/session.ts";
 import { Bento, Panel } from "../panel/index.tsx";
 import {
   agentActivity,
@@ -90,7 +88,6 @@ export interface TechInfoProps {
   held: ReadonlySignal<ReadonlySet<number>>;
   coverage: ReadonlySignal<Coverage>;
   /** The last minute of rates, for the sparklines. */
-  history: ReadonlySignal<readonly RateSample[]>;
   openedAt: number;
   lastActivityAt: ReadonlySignal<number>;
   /** ready / mounting / syncing / downloading / mounted */
@@ -333,52 +330,6 @@ function readInfo(client: InfoClient): SessionInfo | null {
   }
 }
 
-/**
- * The sparkline's width in cells. One cell is one sampler tick.
- *
- * Forty rather than the full minute the history holds, so the graph, its glyph
- * and its peak label still fit one line inside a single-column panel — where
- * the label was wrapping and pushing the two graphs apart.
- */
-const SPARK_CELLS = 40;
-
-/**
- * One labelled rate history: the glyph, the line, and the peak it is drawn
- * against.
- *
- * The peak is not decoration — the line is scaled to its own window, so without
- * it a full-height graph could be a megabyte a second or a trickle.
- */
-function Spark(props: {
-  glyph: string;
-  label: string;
-  values: readonly number[];
-}) {
-  const peak = Math.max(0, ...props.values);
-  return (
-    <Stack direction="row" gap={1}>
-      <Text color="fgMuted" aria-hidden="true">
-        {props.glyph}
-      </Text>
-      <Text
-        color="fgMuted"
-        aria-label={`${props.label} over the last ${props.values.length} seconds, peaking at ${formatRate(peak)}`}
-        style={{ whiteSpace: "pre" }}
-      >
-        {sparkline(props.values, SPARK_CELLS)}
-      </Text>
-      {/*
-        `nowrap`, because this label wrapping is what pushes the two graphs
-        apart — and two rows of `█` that no longer share a baseline read as a
-        rendering fault rather than as a narrow window.
-      */}
-      <Text color="fgMuted" style={{ whiteSpace: "nowrap" }}>
-        peak {formatRate(peak)}
-      </Text>
-    </Stack>
-  );
-}
-
 export const TechInfo = component<TechInfoProps>(function* (props) {
   // The nested plain function below captures `ctx`; `this` would not reach it.
   const ctx = this;
@@ -444,7 +395,6 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
     const coverage = props.coverage.value;
     const files = props.files;
     const progress = shareProgress(files, held, coverage);
-    const history = props.history.value;
 
     // The manifest's file count, which the host already knows — a slot is a
     // file, so the grid has a width even before any peer publishes anything.
@@ -508,39 +458,21 @@ export const TechInfo = component<TechInfoProps>(function* (props) {
         <Bento>
           <Panel title="Activity">
             <Stack direction="column" gap={1}>
-              <Stack direction="column" gap={1}>
-                {/*
-                  A row of space between the two graphs, and between them and the
-                  numbers. `█` fills its whole line box, so on adjacent rows a
-                  busy download and a busy upload meet in the middle and read as
-                  one bar twice as tall.
-                */}
-                <Spark
-                  glyph="↓"
-                  label="download"
-                  values={history.map((rate) => rate.down)}
-                />
-                <Spark
-                  glyph="↑"
-                  label="upload"
-                  values={history.map((rate) => rate.up)}
-                />
-                <Stack direction="column" gap={0}>
-                  <Text>
-                    down {formatRate(link?.total.down_bps ?? 0)} · up{" "}
-                    {formatRate(link?.total.up_bps ?? 0)}
-                  </Text>
-                  <Text>
-                    received {humanBytes(link?.total.received ?? 0)} · sent{" "}
-                    {humanBytes(link?.total.sent ?? 0)} · wire ratio{" "}
-                    {ratioLabel(link)}
-                  </Text>
-                  <Text>
-                    opened {clockLabel(props.openedAt)} · last activity{" "}
-                    {clockLabel(props.lastActivityAt.value)} · connected{" "}
-                    {formatDuration(info?.general.connected_ms_ui ?? 0)}
-                  </Text>
-                </Stack>
+              <Stack direction="column" gap={0}>
+                <Text>
+                  down {formatRate(link?.total.down_bps ?? 0)} · up{" "}
+                  {formatRate(link?.total.up_bps ?? 0)}
+                </Text>
+                <Text>
+                  received {humanBytes(link?.total.received ?? 0)} · sent{" "}
+                  {humanBytes(link?.total.sent ?? 0)} · wire ratio{" "}
+                  {ratioLabel(link)}
+                </Text>
+                <Text>
+                  opened {clockLabel(props.openedAt)} · last activity{" "}
+                  {clockLabel(props.lastActivityAt.value)} · connected{" "}
+                  {formatDuration(info?.general.connected_ms_ui ?? 0)}
+                </Text>
               </Stack>
               {/*
                 This tab's own holdings, byte-weighted. The peer rows count slots

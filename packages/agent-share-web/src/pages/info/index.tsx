@@ -49,7 +49,6 @@ export const InfoPage = component(function* () {
           files={files}
           held={session.held}
           coverage={session.coverage}
-          history={session.history}
           openedAt={session.openedAt}
           lastActivityAt={session.lastActivityAt}
           status={session.status.value}

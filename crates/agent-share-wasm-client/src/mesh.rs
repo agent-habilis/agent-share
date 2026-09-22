@@ -36,6 +36,7 @@ use fofoca::ops::{StateMergeParams, broadcast_state_merge};
 use fofoca::protocol::Password;
 use fofoca::protocol::{
     Channel, DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message, Nickname,
+    TransportPolicy,
 };
 use fofoca::runtime::{
     CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams,
@@ -176,7 +177,7 @@ fn mesh_lookups(share: &agent_share_proto::lookup::LookupOpts) -> fofoca::protoc
     fofoca::protocol::LookupOpts {
         mdns: share.mdns,
         dht: share.dht,
-        relay: match &share.relay {
+        relay_lookup: match &share.relay {
             ShareRelay::Disabled => MeshRelay::Disabled,
             ShareRelay::Pinned => MeshRelay::Pinned,
             ShareRelay::Custom(urls) => MeshRelay::Custom(urls.clone()),
@@ -431,6 +432,7 @@ impl MeshPeer {
                 lookups: LookupOpts::public_preset(),
                 password: None,
                 issuer_pubkey: None,
+                transport: TransportPolicy::default(),
             },
             advertise: DirectorySelection::Unset,
             password: None,

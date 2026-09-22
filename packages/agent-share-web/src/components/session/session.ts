@@ -15,17 +15,12 @@ import type { Client } from '../../lib/client/index.ts'
 import type { Progress } from '../../lib/download/index.ts'
 import type { TransferSnapshot } from '../../lib/transfer-stats/index.ts'
 import type { DirNode } from '../../lib/tree.ts'
+import type { Revival } from './revival.ts'
 
 export type Transfer = {
   kind: 'download' | 'mounting' | 'syncing'
   progress: Progress
   abort: AbortController
-}
-
-/** One tick's throughput, in bytes per second. See `SessionApi.history`. */
-export interface RateSample {
-  readonly up: number
-  readonly down: number
 }
 
 export type ToastTone = 'error' | 'warning'
@@ -68,17 +63,6 @@ export interface SessionApi {
   readonly coverage: ReadonlySignal<ReadonlyMap<number, number>>
   readonly transfer: ReadonlySignal<Transfer | null>
   readonly sample: ReadonlySignal<TransferSnapshot | null>
-  /**
-   * The recent rate readings, oldest first — one per sampler tick, capped at a
-   * minute's worth.
-   *
-   * `sample` is the instant; this is the shape of the last minute, which is the
-   * only thing that distinguishes a stalled transfer from a slow one. Kept here
-   * rather than in the view that draws it because the sampler is the one clock
-   * allowed to advance, and a view that started its own would zero every rate
-   * on screen.
-   */
-  readonly history: ReadonlySignal<readonly RateSample[]>
   /** Wall clock when this session was opened. Never changes. */
   readonly openedAt: number
   /**
@@ -114,6 +98,8 @@ export interface SessionApi {
    * read this.
    */
   readonly redialling: ReadonlySignal<boolean>
+  /** The redial's progress while `redialling` holds, null otherwise. */
+  readonly revival: ReadonlySignal<Revival | null>
   readonly mounted: ReadonlySignal<boolean>
   /** ready / mounting / syncing / downloading / mounted / reconnecting. */
   readonly status: ReadonlySignal<string>

@@ -62,6 +62,11 @@ interface ColumnViewProps {
   /** Open the selected file in the preview view. Files only. */
   onPreview: () => void
   previewDisabled?: boolean
+  /**
+   * Why the peer actions are held back, shown on hover. Set while the
+   * session redials; a disabled button with no reason reads as broken.
+   */
+  disabledReason?: string
 }
 
 /** The directory chain the current path selects, root first. */
@@ -290,6 +295,7 @@ export const ColumnView = component<ColumnViewProps>(function* (props) {
           seedDisabled={props.seedDisabled}
           onPreview={props.onPreview}
           previewDisabled={props.previewDisabled}
+          disabledReason={props.disabledReason}
         />
       </div>
     )
@@ -553,6 +559,7 @@ function Detail({
   seedDisabled,
   onPreview,
   previewDisabled,
+  disabledReason,
 }: {
   node: Node | undefined
   width: number
@@ -567,6 +574,7 @@ function Detail({
   seedDisabled?: boolean
   onPreview: () => void
   previewDisabled?: boolean
+  disabledReason?: string
 }) {
   if (!node) return null
   const state = seedState(node, held, coverage)
@@ -615,6 +623,7 @@ function Detail({
                 variant="secondary"
                 onclick={() => onDownload()}
                 disabled={downloadDisabled}
+                title={downloadDisabled ? disabledReason : undefined}
               >
                 Download
               </Button>
@@ -631,6 +640,7 @@ function Detail({
                 variant="secondary"
                 onclick={() => onSeed()}
                 disabled={seedDisabled || state === 'full'}
+                title={seedDisabled ? disabledReason : undefined}
               >
                 {state === 'full' ? 'Seeding' : 'Seed'}
               </Button>
@@ -643,6 +653,7 @@ function Detail({
                   variant="secondary"
                   onclick={() => onPreview()}
                   disabled={previewDisabled}
+                  title={previewDisabled ? disabledReason : undefined}
                 >
                   Preview
                 </Button>

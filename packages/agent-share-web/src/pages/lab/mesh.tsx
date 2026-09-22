@@ -7,6 +7,7 @@ import { Button, Select, Stack, Text } from 'moonspace-dom'
 import { component, interval, signal } from 'visage-dom'
 
 import { Panel } from '../../components/panel/index.tsx'
+import { copyText } from '../../lib/clipboard/index.ts'
 import { buildPeerCard } from '../../lib/peer-card/index.ts'
 import { loadWasm, type WasmModule } from 'agent-share-wasm'
 import { Field, TicketBox, createLog, jsError } from './parts.tsx'
@@ -151,7 +152,7 @@ export const MeshPanel = component(function* () {
               variant="ghost"
               disabled={!onMesh}
               onclick={() => {
-                void navigator.clipboard.writeText(meshUrl(meshId.peek()))
+                void copyText(meshUrl(meshId.peek()))
                 log('join URL copied')
               }}
             >
