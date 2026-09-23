@@ -1,10 +1,10 @@
 //! The headline claim of "every peer a seeder": a share outlives its
 //! producer when someone else on the mesh holds the bytes.
 //!
-//! RFC 01 phase 3's verification line, as a subprocess test: produce, mirror,
+//! RFC 01 phase 3's verification line, as a subprocess test: produce, seed,
 //! **kill the producer**, and prove a fresh consumer — holding the *original*
 //! ticket, whose address now points at a corpse — still stands the share up,
-//! because the mirror's card vouches for the tree on the mesh and the
+//! because the seed's card vouches for the tree on the mesh and the
 //! consumer bootstraps its manifest from it.
 //!
 //! CI-runnable: the consumer runs `--no-mount`, so the assertion is "the NFS
@@ -106,7 +106,7 @@ fn spawn_producer(root: &Path) -> (ChildGuard, String) {
 }
 
 #[test]
-fn a_share_survives_its_producer_when_a_mirror_serves() {
+fn a_share_survives_its_producer_when_a_seed_serves() {
     let src = tempfile::Builder::new()
         .prefix("agent-share-dead-origin-src-")
         .tempdir()
@@ -117,32 +117,18 @@ fn a_share_survives_its_producer_when_a_mirror_serves() {
 
     let (mut origin, ticket) = spawn_producer(&root);
 
-    // Mirror the whole share — a one-shot copy that leaves the origin's
-    // manifest and secret in a sidecar, so `serve` re-serves it as a second
-    // source for the *same* share rather than minting a new one.
+    // Seed the whole share: copy it, leaving the origin's manifest and secret in
+    // a sidecar, then serve the copy as a second source for the *same* share
+    // rather than a new one.
     let copy = tempfile::Builder::new()
         .prefix("agent-share-dead-origin-copy-")
         .tempdir()
         .expect("temp dir");
     let copy_root = copy.path().join("copy");
-    let status = test_cmd()
-        .args([
-            "mirror",
-            &ticket,
-            copy_root.to_str().expect("utf-8 path"),
-            "--output",
-            "json",
-        ])
-        .status()
-        .expect("run mirror");
-    assert!(
-        status.success(),
-        "mirror must complete against a live origin"
-    );
-
     let mut seeder_cmd = test_cmd();
     seeder_cmd.args([
-        "serve",
+        "seed",
+        &ticket,
         copy_root.to_str().expect("utf-8 path"),
         "--swarm",
         LOOPBACK_SWARM_ID,
@@ -152,7 +138,7 @@ fn a_share_survives_its_producer_when_a_mirror_serves() {
     let (_seeder, seeder_rx) = spawn_piped(seeder_cmd);
     // The seeder prints its own mount command once it serves; its card (tree +
     // serving) reaches the mesh from there.
-    recv_line_containing(&seeder_rx, "agent-share").expect("mirror serve never came up");
+    recv_line_containing(&seeder_rx, "agent-share").expect("seed serve never came up");
 
     // What makes the rest of this test mean something. Without an author in the
     // ticket the consumer below would fall back to counting peer cards, and the
@@ -168,7 +154,7 @@ fn a_share_survives_its_producer_when_a_mirror_serves() {
 
     // A fresh consumer holding the ORIGINAL ticket: its address points at the
     // corpse. The short discovery deadline keeps the origin dial from eating
-    // the test budget; the manifest must then come from the mirror.
+    // the test budget; the manifest must then come from the seed.
     let target = tempfile::Builder::new()
         .prefix("agent-share-dead-origin-mnt-")
         .tempdir()

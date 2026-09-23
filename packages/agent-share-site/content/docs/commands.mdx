@@ -36,19 +36,21 @@ there. Unmounts on Ctrl-C.
 `--transport webrtc` forces the WebRTC data channel. It exists to test the
 browser path from a native process. Do not use it to pick a transport.
 
-## mirror
+## seed
 
 ```sh
-agent-share mirror <ticket> <dest> [--only PATH]… [--password …] [--output human|json]
+agent-share seed <ticket> <dest> [--only PATH]… [--password …] [--copy-only] [--output human|json]
 ```
 
-Takes a full, hash-verified copy of the share into `<dest>`. `--only` copies
+Takes a full, hash-verified copy of the share into `<dest>`, then serves it
+until you stop it. `--copy-only` stops after the copy. The serve step takes the
+same `--swarm`, `--mdns`, `--dht` and `--relay` flags as `serve`. `--only` copies
 only the paths that you name. You can repeat it, and a directory takes
 everything under it. A partial copy can still be served: the files it does not
 hold show as absent.
 
-The copy records what it needs to serve again, so `agent-share serve <dest>`
-asks for no password.
+The copy records what it needs to serve again, so the serve step, and a later
+`agent-share serve <dest>`, ask for no password.
 
 ## bench
 
@@ -76,4 +78,5 @@ must not publish an unprotected share.
 `--output json` gives one line for machines:
 
 - `serve` prints the `agent-share <ticket>` command.
-- `mirror` prints the `agent-share serve <dir>` command.
+- `seed` prints the `agent-share <ticket>` command of its serve step. With
+  `--copy-only`, it prints the `agent-share serve <dir>` command.

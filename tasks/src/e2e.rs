@@ -303,8 +303,8 @@ const CELLS: &[Cell] = &[
         precheck: None,
     },
     Cell {
-        name: "password-native-mirror-reserve",
-        run: cell_password_native_mirror_reserve,
+        name: "password-native-seed-reserve",
+        run: cell_password_native_seed_reserve,
         producer: Peer::Native,
         consumer: Peer::Native,
         transport: Transport::Quic,
@@ -966,42 +966,42 @@ impl Attempt {
     }
 }
 
-/// Run `agent-share mirror <ticket> <dest>` with an optional password.
+/// Run `agent-share seed <ticket> <dest> --copy-only` with an optional password.
 ///
-/// `mirror` rather than the bare mount form: it needs no NFS, no mountpoint and
+/// `seed --copy-only` rather than the bare mount form: it needs no NFS, no mountpoint and
 /// no privileges, exits on its own, and exercises the same `redeem_auth` gate
 /// every consumer path goes through.
-fn mirror_attempt(ctx: &Ctx<'_>, ticket: &str, password: Option<&str>) -> Res<(Attempt, TempDir)> {
-    mirror_attempt_over(ctx, ticket, password, None)
+fn seed_attempt(ctx: &Ctx<'_>, ticket: &str, password: Option<&str>) -> Res<(Attempt, TempDir)> {
+    seed_attempt_over(ctx, ticket, password, None)
 }
 
-/// [`mirror_attempt`], with the data path pinned.
+/// [`seed_attempt`], with the data path pinned.
 ///
 /// `Some("webrtc")` is the only way a native consumer reaches the browser lane
 /// — it fails rather than settling elsewhere — so a row that passes with it is
 /// proof the lane carried the bytes, and needs no separate assertion.
-fn mirror_attempt_over(
+fn seed_attempt_over(
     ctx: &Ctx<'_>,
     ticket: &str,
     password: Option<&str>,
     transport: Option<&str>,
 ) -> Res<(Attempt, TempDir)> {
-    let dest = TempDir::new("e2e-mirror")?;
-    let attempt = mirror_run(ctx, ticket, dest.path(), password, transport)?;
+    let dest = TempDir::new("e2e-seed")?;
+    let attempt = seed_run(ctx, ticket, dest.path(), password, transport)?;
     Ok((attempt, dest))
 }
 
-/// Mirror into a directory the caller owns, so a copy can be taken twice.
+/// Seed into a directory the caller owns, so a copy can be taken twice.
 ///
-/// [`mirror_attempt`] makes its own `TempDir`, which is right for the rows that
-/// only care whether one mirror succeeded. Catching a copy *up* needs the same
+/// [`seed_attempt`] makes its own `TempDir`, which is right for the rows that
+/// only care whether one seed succeeded. Catching a copy *up* needs the same
 /// destination twice — the second run reads the sidecar and asks for the
 /// difference.
-fn mirror_into(ctx: &Ctx<'_>, ticket: &str, dest: &Path) -> Res<()> {
-    let attempt = mirror_run(ctx, ticket, dest, None, None)?;
+fn seed_into(ctx: &Ctx<'_>, ticket: &str, dest: &Path) -> Res<()> {
+    let attempt = seed_run(ctx, ticket, dest, None, None)?;
     if !attempt.ok {
         return Err(format!(
-            "mirroring into {} failed:\n{}",
+            "seeding into {} failed:\n{}",
             dest.display(),
             attempt.output
         )
@@ -1010,9 +1010,9 @@ fn mirror_into(ctx: &Ctx<'_>, ticket: &str, dest: &Path) -> Res<()> {
     Ok(())
 }
 
-/// The one place a `mirror` is spawned. Both callers differ only in who owns
+/// The one place a `seed` is spawned. Both callers differ only in who owns
 /// the destination and whether a failure is fatal.
-fn mirror_run(
+fn seed_run(
     ctx: &Ctx<'_>,
     ticket: &str,
     dest: &Path,
@@ -1020,7 +1020,7 @@ fn mirror_run(
     transport: Option<&str>,
 ) -> Res<Attempt> {
     let mut cmd = Command::new(ctx.binary);
-    cmd.arg("mirror").arg(ticket).arg(dest);
+    cmd.arg("seed").arg(ticket).arg(dest).arg("--copy-only");
     if let Some(password) = password {
         cmd.args(["--password", password]);
     }
@@ -1031,7 +1031,7 @@ fn mirror_run(
     // what several rows measure.
     cmd.env("AGENT_SHARE_DISCOVERY_DEADLINE_SECS", DISCOVERY_SECS);
     let started = Instant::now();
-    let captured = run_capture(cmd, "e2e mirror", NATIVE_TIMEOUT)?;
+    let captured = run_capture(cmd, "e2e seed", NATIVE_TIMEOUT)?;
     Ok(Attempt {
         output: format!("{}{}", captured.stdout, captured.stderr),
         ok: captured.status.success(),
@@ -1058,7 +1058,7 @@ fn protected_share(ctx: &Ctx<'_>) -> Res<(Proc, String, TempDir)> {
 /// The row that would catch a check so strict it refuses everyone.
 fn cell_password_native_live_right(ctx: &Ctx<'_>) -> Res<()> {
     let (mut producer, ticket, _dir) = protected_share(ctx)?;
-    let (attempt, _dest) = mirror_attempt(ctx, &ticket, Some(PASSWORD))?;
+    let (attempt, _dest) = seed_attempt(ctx, &ticket, Some(PASSWORD))?;
     producer.interrupt();
     if !attempt.ok {
         return Err(format!(
@@ -1067,7 +1067,7 @@ fn cell_password_native_live_right(ctx: &Ctx<'_>) -> Res<()> {
         )
         .into());
     }
-    attempt.says("Mirrored")
+    attempt.says("Copied")
 }
 
 /// A wrong password, with the producer up. Named, and named locally.
@@ -1077,7 +1077,7 @@ fn cell_password_native_live_right(ctx: &Ctx<'_>) -> Res<()> {
 /// instead.
 fn cell_password_native_live_wrong(ctx: &Ctx<'_>) -> Res<()> {
     let (mut producer, ticket, _dir) = protected_share(ctx)?;
-    let (attempt, _dest) = mirror_attempt(ctx, &ticket, Some("not-the-password"))?;
+    let (attempt, _dest) = seed_attempt(ctx, &ticket, Some("not-the-password"))?;
     producer.interrupt();
     if attempt.ok {
         return Err("a wrong password opened the share".into());
@@ -1095,7 +1095,7 @@ fn cell_password_native_live_wrong(ctx: &Ctx<'_>) -> Res<()> {
 fn cell_password_native_dead_wrong(ctx: &Ctx<'_>) -> Res<()> {
     let (mut producer, ticket, _dir) = protected_share(ctx)?;
     producer.interrupt();
-    let (attempt, _dest) = mirror_attempt(ctx, &ticket, Some("not-the-password"))?;
+    let (attempt, _dest) = seed_attempt(ctx, &ticket, Some("not-the-password"))?;
     if attempt.ok {
         return Err("a wrong password opened the share".into());
     }
@@ -1112,7 +1112,7 @@ fn cell_password_native_dead_wrong(ctx: &Ctx<'_>) -> Res<()> {
 fn cell_password_native_dead_right(ctx: &Ctx<'_>) -> Res<()> {
     let (mut producer, ticket, _dir) = protected_share(ctx)?;
     producer.interrupt();
-    let (attempt, _dest) = mirror_attempt(ctx, &ticket, Some(PASSWORD))?;
+    let (attempt, _dest) = seed_attempt(ctx, &ticket, Some(PASSWORD))?;
     if attempt.ok {
         return Err("a share with no producer and no seeder served bytes".into());
     }
@@ -1126,7 +1126,7 @@ fn cell_password_native_dead_right(ctx: &Ctx<'_>) -> Res<()> {
 fn cell_password_native_absent(ctx: &Ctx<'_>) -> Res<()> {
     let (mut producer, ticket, _dir) = protected_share(ctx)?;
     producer.interrupt();
-    let (attempt, _dest) = mirror_attempt(ctx, &ticket, None)?;
+    let (attempt, _dest) = seed_attempt(ctx, &ticket, None)?;
     if attempt.ok {
         return Err("a protected share opened with no password".into());
     }
@@ -1143,7 +1143,7 @@ fn cell_password_native_spurious(ctx: &Ctx<'_>) -> Res<()> {
     let (dir, _sha) = make_share(1)?;
     let (mut producer, ticket) = serve(ctx.binary, dir.path(), None)?;
     producer.interrupt();
-    let (attempt, _dest) = mirror_attempt(ctx, &ticket, Some(PASSWORD))?;
+    let (attempt, _dest) = seed_attempt(ctx, &ticket, Some(PASSWORD))?;
     if attempt.ok {
         return Err("a password was accepted for an unprotected share".into());
     }
@@ -1151,33 +1151,33 @@ fn cell_password_native_spurious(ctx: &Ctx<'_>) -> Res<()> {
     attempt.faster_than(Duration::from_secs(5))
 }
 
-/// A mirror of a protected share, re-served without the password.
+/// A seed of a protected share, re-served without the password.
 ///
 /// The documented degradation: `fofoca` gates every mesh derivation behind the
 /// stretched password key, so such a copy cannot join the share's mesh. It must
 /// still *serve* — the token in its sidecar opens the mount protocol — because
 /// serving nothing would be the worse trade. Asserted from the outside: a fresh
 /// consumer with the password reads the tree out of the re-server.
-fn cell_password_native_mirror_reserve(ctx: &Ctx<'_>) -> Res<()> {
+fn cell_password_native_seed_reserve(ctx: &Ctx<'_>) -> Res<()> {
     let (mut origin, ticket, _dir) = protected_share(ctx)?;
-    let (copied, dest) = mirror_attempt(ctx, &ticket, Some(PASSWORD))?;
+    let (copied, dest) = seed_attempt(ctx, &ticket, Some(PASSWORD))?;
     if !copied.ok {
-        return Err(format!("the mirror failed:\n{}", copied.output).into());
+        return Err(format!("the seed failed:\n{}", copied.output).into());
     }
     origin.interrupt();
 
-    // No `--password`: the copy has only what the mirror left beside it.
+    // No `--password`: the copy has only what the seed left beside it.
     let (mut reserver, reserved_ticket) = serve(ctx.binary, dest.path(), None)?;
-    let (read_back, _dest2) = mirror_attempt(ctx, &reserved_ticket, Some(PASSWORD))?;
+    let (read_back, _dest2) = seed_attempt(ctx, &reserved_ticket, Some(PASSWORD))?;
     reserver.interrupt();
     if !read_back.ok {
         return Err(format!(
-            "a re-served protected mirror did not serve its bytes:\n{}",
+            "a re-served protected seed did not serve its bytes:\n{}",
             read_back.output
         )
         .into());
     }
-    read_back.says("Mirrored")
+    read_back.says("Copied")
 }
 
 /// A protected ticket that carries **no mesh id**, as an older producer minted.
@@ -1194,7 +1194,7 @@ fn cell_password_legacy_ticket(ctx: &Ctx<'_>) -> Res<()> {
     let (mut producer, ticket, _dir) = protected_share(ctx)?;
     let legacy = strip_mesh_id(&ticket)?;
 
-    let (wrong, _a) = mirror_attempt(ctx, &legacy, Some("not-the-password"))?;
+    let (wrong, _a) = seed_attempt(ctx, &legacy, Some("not-the-password"))?;
     if wrong.ok {
         return Err("a wrong password opened a legacy ticket".into());
     }
@@ -1202,7 +1202,7 @@ fn cell_password_legacy_ticket(ctx: &Ctx<'_>) -> Res<()> {
     // local ruling, because the user does not care which end decided.
     wrong.says("does not open this share")?;
 
-    let (right, _b) = mirror_attempt(ctx, &legacy, Some(PASSWORD))?;
+    let (right, _b) = seed_attempt(ctx, &legacy, Some(PASSWORD))?;
     producer.interrupt();
     if !right.ok {
         return Err(format!(
@@ -1211,7 +1211,7 @@ fn cell_password_legacy_ticket(ctx: &Ctx<'_>) -> Res<()> {
         )
         .into());
     }
-    right.says("Mirrored")
+    right.says("Copied")
 }
 
 /// Re-encode `ticket` with its mesh id removed — a ticket as an older producer
@@ -1471,7 +1471,7 @@ fn web_producer_over(
 
     // A wrong password is refused, and refused locally — the verifier in the
     // mesh id the *browser* minted is what the native side checks against.
-    let (wrong, _a) = mirror_attempt(ctx, &ticket, Some("not-the-password"))?;
+    let (wrong, _a) = seed_attempt(ctx, &ticket, Some("not-the-password"))?;
     if wrong.ok {
         return Err("a wrong password opened a browser-produced share".into());
     }
@@ -1481,7 +1481,7 @@ fn web_producer_over(
     // And the right one reads the tree the tab is serving. With `transport`
     // pinned this is also the lane assertion: the binary refuses to settle
     // anywhere else, so arriving bytes are bytes that took that path.
-    let (right, dest) = mirror_attempt_over(ctx, &ticket, Some(PASSWORD), transport)?;
+    let (right, dest) = seed_attempt_over(ctx, &ticket, Some(PASSWORD), transport)?;
     if !right.ok {
         return Err(format!(
             "the native CLI could not open a browser-produced share{}:\n{}",
@@ -1865,7 +1865,7 @@ fn cell_seeder_propagation(ctx: &Ctx<'_>) -> Res<()> {
 
     // A copy taken at v1, before the change exists.
     let copy = TempDir::new("e2e-seeder")?;
-    mirror_into(ctx, &ticket, copy.path())?;
+    seed_into(ctx, &ticket, copy.path())?;
     if copy.path().join("added-live.txt").exists() {
         return Err("the fixture already had the file this row adds".into());
     }
@@ -1877,11 +1877,11 @@ fn cell_seeder_propagation(ctx: &Ctx<'_>) -> Res<()> {
     //
     // Retried rather than slept on. The producer debounces a rescan for 300 ms
     // and publishes once it settles, so the honest wait is "until the copy has
-    // it" — and a mirror's own connect usually outlasts the debounce, so this
+    // it" — and a seed's own connect usually outlasts the debounce, so this
     // costs one attempt and no fixed delay.
     let deadline = Instant::now() + NATIVE_TIMEOUT;
     loop {
-        mirror_into(ctx, &ticket, copy.path())?;
+        seed_into(ctx, &ticket, copy.path())?;
         if copy.path().join("added-live.txt").exists() {
             break;
         }

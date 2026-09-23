@@ -106,7 +106,7 @@ pub(super) fn redeem_auth(ticket: &MountTicket, password: Option<&str>) -> Resul
 /// Both come out of one call because both cost an Argon2id on a protected
 /// share, and because the mesh resolution is where a wrong password is caught —
 /// a caller that skipped it would dial with a credential nobody accepts and
-/// blame the network. `mirror` learned that the hard way: it took the token
+/// blame the network. `seed` learned that the hard way: it took the token
 /// without the mesh and spent ninety seconds on discovery before failing.
 pub(super) struct Redeemed {
     pub(super) auth: ShareAuth,
@@ -641,7 +641,7 @@ async fn bootstrap_from_seeders(
         };
         // The same `auth` the origin dial used. A seeder authenticated with the
         // password once and now checks the token exactly as the origin did, so
-        // no password reaches this path — which is what lets a mirror re-seed a
+        // no password reaches this path — which is what lets a seed re-seed a
         // protected share without ever holding one.
         let client = RemoteClient::new(endpoint.clone(), ticket, auth);
         // Signature-checked inside `fetch_signed_manifest` when the ticket names
@@ -1072,7 +1072,7 @@ impl RemoteClient {
     /// The manifest as the origin published it: its bytes, its version, and the
     /// creator's signature over both.
     ///
-    /// The inner bytes come back untouched rather than re-encoded. A mirror
+    /// The inner bytes come back untouched rather than re-encoded. A seed
     /// re-serves them verbatim so its indices stay the origin's, and everyone
     /// fingerprints them so peers on one tree agree; decoding and re-encoding
     /// would be correct only for as long as the encoding stays canonical, and

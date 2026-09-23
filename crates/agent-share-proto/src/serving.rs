@@ -11,8 +11,8 @@
 //! capped at 3840 bytes. Two things keep it small:
 //!
 //! - A complete peer sends `"*"`. One byte, and it covers essentially every
-//!   origin plus every finished mirror, which is most peers most of the time.
-//! - A partial peer sends sorted ranges, `"0-12,15,40-99"`. A mirror fetches in
+//!   origin plus every finished seed, which is most peers most of the time.
+//! - A partial peer sends sorted ranges, `"0-12,15,40-99"`. A seed fetches in
 //!   manifest order, so its held set is usually one run however many files it
 //!   has.
 //!
@@ -388,7 +388,7 @@ mod tests {
     }
 
     /// A contiguous holding still uses runs: six characters beats a 512-char
-    /// bitmap, and a mirror fetching in order is exactly that shape.
+    /// bitmap, and a seed fetching in order is exactly that shape.
     #[test]
     fn a_contiguous_holding_still_prefers_runs() {
         let held: Vec<u32> = (0..500).collect();

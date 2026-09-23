@@ -14,7 +14,7 @@ lazy, with no daemon and no FUSE.
 - **[Live](https://agent-share.dev/docs/concepts#live-changes)** — edits, new files and deletions reach connected peers without a remount.
 - **[Read-only](https://agent-share.dev/docs/concepts#the-nfs-bridge)** — a consumer cannot change the files of the producer. Every write fails.
 - **[Password-protected](https://agent-share.dev/docs/commands#passwords)** — with a password, the ticket finds the share but does not open it.
-- **[Mirror](https://agent-share.dev/docs/concepts#mirror)** — download the full tree, verified against the origin, and serve it as a second source.
+- **[Seed](https://agent-share.dev/docs/concepts#seed)** — download the full tree, verified against the origin, and serve it as a second source.
 - **[Browser](https://agent-share.dev/docs/browser#the-webapp)** — open a share in the webapp, or create one from a folder. No install, no backend.
 - **[npx](https://agent-share.dev/docs/browser#npx)** — `npx agent-share` writes the files into a local folder, with no native binary.
 - **[WebMCP](https://agent-share.dev/docs/webmcp)** — the webapp publishes its actions as WebMCP tools, so an agent can drive it.

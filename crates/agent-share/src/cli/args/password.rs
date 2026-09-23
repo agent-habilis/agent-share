@@ -130,12 +130,28 @@ mod tests {
     }
 
     #[test]
-    fn mirror_takes_a_password_too() {
-        let Some(MountAction::Mirror { password, .. }) =
-            Cli::parse_from(["agent-share", "mirror", "abc", "./dest", "--password", "pw"]).action
+    fn seed_takes_a_password_too() {
+        let Some(MountAction::Seed { password, .. }) =
+            Cli::parse_from(["agent-share", "seed", "abc", "./dest", "--password", "pw"]).action
         else {
-            panic!("expected Mirror");
+            panic!("expected Seed");
         };
         assert_eq!(password.resolve().expect("resolve").as_deref(), Some("pw"));
+    }
+
+    #[test]
+    fn seed_serves_unless_told_to_copy_only() {
+        let parse = |args: &[&str]| match Cli::parse_from(args).action {
+            Some(MountAction::Seed { copy_only, .. }) => copy_only,
+            _ => panic!("expected Seed"),
+        };
+        assert!(!parse(&["agent-share", "seed", "abc", "./dest"]));
+        assert!(parse(&[
+            "agent-share",
+            "seed",
+            "abc",
+            "./dest",
+            "--copy-only"
+        ]));
     }
 }

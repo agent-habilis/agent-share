@@ -519,7 +519,7 @@ mod tests {
         assert!(!vouches(&card(Some("aaaa"), None), "aaaa", 0, 3));
     }
 
-    /// `serving` must cover the slot being read: a partial mirror vouches for
+    /// `serving` must cover the slot being read: a partial seed vouches for
     /// what it holds and nothing else.
     #[test]
     fn serving_must_cover_the_slot() {

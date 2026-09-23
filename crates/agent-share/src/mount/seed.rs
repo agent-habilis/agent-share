@@ -1,23 +1,25 @@
-//! `agent-share mirror` — take a full copy of a share, and be able to serve it.
+//! `agent-share seed` — take a full copy of a share, then serve it.
 //!
 //! A separate verb from the lazy mount, deliberately. The mount is diskless: it
 //! fetches bytes as a reader touches them and keeps nothing, which is what makes
-//! browsing a 500 GB share cheap. A mirror is the opposite trade, taken on
+//! browsing a 500 GB share cheap. A seed is the opposite trade, taken on
 //! purpose — it downloads everything so that this machine can hand it to
 //! somebody else. **A peer that holds no bytes cannot seed, and no protocol
 //! design removes that.**
 //!
-//! Its output is an ordinary directory, so the way to seed it is the verb that
-//! already exists:
+//! Its output is an ordinary directory, so the serve step is the verb that
+//! already exists, run on the copy once it is complete. `--copy-only` stops
+//! before that step, and the copy can be served later:
 //!
 //! ```sh
-//! agent-share mirror <ticket> ./copy
-//! agent-share serve ./copy          # now a second source for that tree
+//! agent-share seed <ticket> ./copy               # copy, then serve
+//! agent-share seed <ticket> ./copy --copy-only   # copy only
+//! agent-share serve ./copy                       # serve it later
 //! ```
 //!
 //! # Verifying without a verified transport
 //!
-//! `OP_READ` returns raw bytes, not a bao stream, so a mirror cannot verify
+//! `OP_READ` returns raw bytes, not a bao stream, so a seed cannot verify
 //! *ranges* as they arrive — that needs the range protocol stage 4 brings. What
 //! it can do is better than nothing and cheap: it downloads a whole file, hashes
 //! it locally, and compares the result with the root the origin reports over
@@ -61,10 +63,10 @@ pub(super) const ORIGIN_MANIFEST: &str = "origin.manifest";
 
 /// Filename holding the share secret this copy belongs to.
 ///
-/// **Why a mirror keeps the secret.** Serving a copy under a *fresh* secret
+/// **Why a seed keeps the secret.** Serving a copy under a *fresh* secret
 /// would make a second, unrelated share: a different mesh, a different ticket,
 /// and nobody holding the original link would ever find it. Re-serving under the
-/// origin's secret is what makes a mirror an additional *source for the same
+/// origin's secret is what makes a seed an additional *source for the same
 /// share* — the thing a swarm is.
 ///
 /// The protocol already allows this and needs no new code for it: a producer
@@ -73,9 +75,9 @@ pub(super) const ORIGIN_MANIFEST: &str = "origin.manifest";
 /// `mount::tests::a_non_origin_peer_serves_the_origins_ticket_secret`.
 ///
 /// It is the read capability at rest, so it is written with owner-only
-/// permissions. Whoever ran the mirror already holds it — it came in the ticket
+/// permissions. Whoever ran the seed already holds it — it came in the ticket
 /// they pasted — so this stores nothing they did not have. It does mean a
-/// mirror directory is as sensitive as the link that made it.
+/// seed directory is as sensitive as the link that made it.
 pub(super) const ORIGIN_SECRET: &str = "origin.secret";
 
 /// Filename holding the *token* a protected share's password derived, written
@@ -88,10 +90,10 @@ pub(super) const ORIGIN_SECRET: &str = "origin.secret";
 ///
 /// **Why the token and not the password.** The password is a human secret,
 /// likely reused; the token is a per-share credential that opens this share and
-/// nothing else. Storing the token lets a mirror re-seed unattended — the point
-/// of mirroring — without ever putting the password on disk. It is the same
+/// nothing else. Storing the token lets a seed re-seed unattended — the point
+/// of seeding — without ever putting the password on disk. It is the same
 /// class of secret [`ORIGIN_SECRET`] already is, written the same way (0600),
-/// and it makes the mirror directory exactly as sensitive as the ticket *plus*
+/// and it makes the seed directory exactly as sensitive as the ticket *plus*
 /// the password that made it.
 pub(super) const ORIGIN_AUTH: &str = "origin.auth";
 
@@ -110,14 +112,14 @@ pub(super) const ORIGIN_MESH: &str = "origin.mesh";
 ///
 /// The public half only, and the only file in the sidecar that is not a
 /// capability: it verifies manifests and signs nothing. That asymmetry is the
-/// point of the key split — a mirror is given everything it needs to serve the
+/// point of the key split — a seed is given everything it needs to serve the
 /// share and nothing that would let it publish a new version of it. See
 /// [`agent_share_proto::authorship`].
 pub(super) const ORIGIN_AUTHOR: &str = "origin.author";
 
 /// Whether `rel_path` was asked for.
 ///
-/// An empty filter means everything, so the ordinary whole-share mirror needs
+/// An empty filter means everything, so the ordinary whole-share seed needs
 /// no special case. A filter entry matches the file itself or any file beneath
 /// it, so naming a directory takes the directory.
 fn wanted(only: &[String], rel_path: &str) -> bool {
@@ -135,12 +137,13 @@ fn wanted(only: &[String], rel_path: &str) -> bool {
 /// # Errors
 /// The ticket does not decode, the share is unreachable, `dest` cannot be
 /// written, or a file fails to verify against the root the origin published.
-pub(crate) async fn mirror(
+pub(crate) async fn seed(
     ticket: &str,
     dest: &Path,
     only: &[String],
     webrtc_only: bool,
     password: Option<&str>,
+    copy_only: bool,
     json: bool,
 ) -> Result<()> {
     let ticket = MountTicket::decode(ticket)?;
@@ -151,7 +154,7 @@ pub(crate) async fn mirror(
     // Fails here, before a byte is fetched, if the password is missing or the
     // ticket does not want one.
     // Resolves the mesh too, which is what makes a wrong password fail here
-    // rather than after a ninety-second discovery deadline. A mirror never joins
+    // rather than after a ninety-second discovery deadline. A seed never joins
     // that mesh — it only needs the ruling.
     let auth = super::consume::redeem_auth(&ticket, password)?.auth;
     // Kept so the copy re-serves the origin's mesh rather than minting a rival.
@@ -170,7 +173,7 @@ pub(crate) async fn mirror(
 
     // Whatever happens below, close the endpoint. Dropping it instead aborts
     // ungracefully and prints an iroh error over the top of ours, which buries
-    // the reason a mirror actually failed.
+    // the reason a seed actually failed.
     let outcome = copy_all(
         &client,
         dest,
@@ -197,14 +200,14 @@ pub(crate) async fn mirror(
             error
         }
     })?;
-    report(&tally, dest, json);
+    report(&tally, dest, copy_only, json);
     Ok(())
 }
 
 /// The origin's manifest — as a difference when this destination already holds
 /// one, and whole when it does not.
 ///
-/// **A re-run into a folder mirrored before is the common case**, and it used to
+/// **A re-run into a folder seeded before is the common case**, and it used to
 /// pay for the tree again to learn that almost nothing moved: on a large share
 /// that is several MB fetched to discover a handful of changed files. The
 /// sidecar already keeps the envelope this copy was built from, so the version
@@ -221,7 +224,7 @@ async fn fetch_manifest_for(client: &RemoteClient, dest: &Path) -> Result<Signed
                 tracing::debug!(
                     from = held.version,
                     to = caught_up.version,
-                    "caught the mirror's manifest up by difference"
+                    "caught the seed's manifest up by difference"
                 );
                 return Ok(caught_up);
             }
@@ -252,7 +255,7 @@ struct OriginFacts<'a> {
     author: Option<[u8; 32]>,
 }
 
-/// The body of a mirror, so its caller can close the endpoint either way.
+/// The body of a seed, so its caller can close the endpoint either way.
 async fn copy_all(
     client: &RemoteClient,
     dest: &Path,
@@ -266,8 +269,8 @@ async fn copy_all(
         mesh_id,
         author,
     } = *origin;
-    // The *bytes*, not just the decoded struct. A mirror re-serves these
-    // verbatim so its indices stay the origin's — see `LiveTree::mirrored` — and
+    // The *bytes*, not just the decoded struct. A seed re-serves these
+    // verbatim so its indices stay the origin's — see `LiveTree::seeded` — and
     // the creator's signature with them, since a copy has no way to make one.
     let signed = fetch_manifest_for(client, dest).await?;
     let envelope = signed.encode();
@@ -286,14 +289,14 @@ async fn copy_all(
     // on the destination shares the user's files and not our bookkeeping.
     let sidecar = sidecar_dir(dest);
     // The sidecar still exists — it carries the origin's manifest, secret and
-    // mesh id — but it no longer holds a byte of content. A mirror re-serves
+    // mesh id — but it no longer holds a byte of content. A seed re-serves
     // the copy it just wrote, in place, and addresses it lazily the way the
     // origin does; keeping a second copy under here would double the disk cost
-    // of mirroring for nothing.
+    // of seeding for nothing.
     std::fs::create_dir_all(&sidecar).with_context(|| format!("creating {}", sidecar.display()))?;
     // Kept so `serve` can re-serve the origin's manifest rather than deriving
     // one from this directory. Written before any byte is fetched, so even an
-    // interrupted mirror is re-servable for what it did get.
+    // interrupted seed is re-servable for what it did get.
     std::fs::create_dir_all(&sidecar).with_context(|| format!("creating {}", sidecar.display()))?;
     std::fs::write(sidecar.join(ORIGIN_MANIFEST), &envelope)
         .context("recording the origin manifest")?;
@@ -306,7 +309,7 @@ async fn copy_all(
         std::fs::write(sidecar.join(ORIGIN_AUTHOR), author).context("recording the author key")?;
     }
     // Only for a protected share. Its absence is what tells `serve` the secret
-    // alone is the credential, so an ordinary mirror is untouched by any of
+    // alone is the credential, so an ordinary seed is untouched by any of
     // this — no extra file, no extra read.
     if auth.password_protected() {
         write_secret(&sidecar.join(ORIGIN_AUTH), auth.token())
@@ -342,7 +345,7 @@ async fn copy_all(
             .with_context(|| {
                 format!(
                     "{} is listed in the manifest but this peer would not serve it \
-                 (a partial mirror holds only some of a share)",
+                 (a partial seed holds only some of a share)",
                     file.rel_path
                 )
             })?;
@@ -361,14 +364,14 @@ async fn copy_all(
     Ok(tally)
 }
 
-/// Where a mirror keeps what it knows about the copy.
+/// Where a seed keeps what it knows about the copy.
 ///
 /// A sibling of the destination rather than a child, because the destination is
 /// meant to be handed straight to `agent-share serve` and anything inside it
 /// would be served as part of the share.
 fn sidecar_dir(dest: &Path) -> PathBuf {
     let name = dest.file_name().map_or_else(
-        || "mirror".to_owned(),
+        || "seed".to_owned(),
         |name| name.to_string_lossy().into_owned(),
     );
     dest.parent()
@@ -390,7 +393,7 @@ fn write_secret(path: &Path, secret: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// The share secret a mirror left beside `root`, if this directory is one.
+/// The share secret a seed left beside `root`, if this directory is one.
 ///
 /// Serving with this rather than a fresh secret is what puts the copy on the
 /// *same* mesh as the origin, answering the *same* ticket — so every holder of
@@ -402,10 +405,10 @@ pub(super) fn origin_secret_for(
     bytes.try_into().ok()
 }
 
-/// The origin's manifest bytes a mirror left beside `root`, if this directory
+/// The origin's manifest bytes a seed left beside `root`, if this directory
 /// is one.
 ///
-/// Presence of this file is what distinguishes a mirror from an ordinary
+/// Presence of this file is what distinguishes a seed from an ordinary
 /// directory, and it is why `serve` does not need a flag: a copy knows what it
 /// is a copy of.
 pub(super) fn origin_manifest_for(root: &Path) -> Option<Vec<u8>> {
@@ -421,9 +424,9 @@ pub(super) fn is_copy(root: &Path) -> bool {
     sidecar_dir(root).join(ORIGIN_MANIFEST).exists()
 }
 
-/// The credential a mirror of a *protected* share left beside `root`.
+/// The credential a seed of a *protected* share left beside `root`.
 ///
-/// `None` for an ordinary mirror, whose secret is its own credential — so
+/// `None` for an ordinary seed, whose secret is its own credential — so
 /// `serve` derives one from [`origin_secret_for`] instead and behaves exactly as
 /// it always has. See [`ORIGIN_AUTH`] for why the token is what is kept.
 pub(super) fn origin_mesh_id_for(root: &Path) -> Option<String> {
@@ -435,7 +438,7 @@ pub(super) fn origin_mesh_id_for(root: &Path) -> Option<String> {
     Some(trimmed.to_owned())
 }
 
-/// The creator's authorship public key a mirror left beside `root`.
+/// The creator's authorship public key a seed left beside `root`.
 ///
 /// `None` for a copy of an unsigned share, and for a directory that is not a
 /// copy at all — both mean "this producer has no creator to name".
@@ -444,7 +447,7 @@ pub(super) fn origin_author_for(root: &Path) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
-/// The credential a mirror of a *protected* share left beside `root`.
+/// The credential a seed of a *protected* share left beside `root`.
 pub(super) fn origin_auth_for(root: &Path) -> Option<ShareAuth> {
     let bytes = std::fs::read(sidecar_dir(root).join(ORIGIN_AUTH)).ok()?;
     let token: [u8; agent_share_proto::framing::SECRET_LEN] = bytes.try_into().ok()?;
@@ -455,7 +458,7 @@ pub(super) fn origin_auth_for(root: &Path) -> Option<ShareAuth> {
 /// byte range.
 ///
 /// Preferring addresses is not a micro-optimisation. A peer holding *part* of
-/// a file can answer for the chunks it has and decline the rest, so a mirror
+/// a file can answer for the chunks it has and decline the rest, so a seed
 /// can be assembled from several partial seeders — which is exactly the case a
 /// dead origin leaves behind. `OP_READ` can only ever ask one peer for a range
 /// and take what it gets.
@@ -570,7 +573,7 @@ async fn record(client: &RemoteClient, index: u32, path: &Path, bytes: &[u8]) ->
 /// Join `rel` under `dest`, refusing anything that would escape it.
 ///
 /// A manifest arrives over the network, so `../..` in a path is an attack, not
-/// a typo. `nfs.rs` rejects the same shapes on the mount side; a mirror writes
+/// a typo. `nfs.rs` rejects the same shapes on the mount side; a seed writes
 /// to disk and so has to reject them here too.
 fn safe_join(dest: &Path, rel: &str) -> Result<PathBuf> {
     let mut path = dest.to_path_buf();
@@ -589,9 +592,13 @@ fn safe_join(dest: &Path, rel: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn report(tally: &Tally, dest: &Path, json: bool) {
+fn report(tally: &Tally, dest: &Path, copy_only: bool, json: bool) {
+    // Without `--copy-only` the serve step prints the one line that matters
+    // next, so a hint to serve would only be noise.
     if json {
-        println!("agent-share serve {}", dest.display());
+        if copy_only {
+            println!("agent-share serve {}", dest.display());
+        }
         return;
     }
     let skipped = if tally.skipped == 0 {
@@ -600,7 +607,7 @@ fn report(tally: &Tally, dest: &Path, json: bool) {
         format!(", {} not requested", tally.skipped)
     };
     crate::util::output::status_out(
-        "Mirrored",
+        "Copied",
         &format!(
             "{} files, {} — {} verified against the origin, {} unverified{skipped}",
             tally.files,
@@ -609,6 +616,9 @@ fn report(tally: &Tally, dest: &Path, json: bool) {
             tally.unverified
         ),
     );
+    if !copy_only {
+        return;
+    }
     crate::util::output::status_out(
         "Serve",
         &format!(
@@ -629,10 +639,10 @@ mod tests {
     ///
     /// Serving under a freshly minted secret would build a second mesh with a
     /// second ticket, and nobody holding the original link would ever find it.
-    /// `produce::serve` reads this back and adopts it, which is why a mirror
+    /// `produce::serve` reads this back and adopts it, which is why a seed
     /// re-seeds the share it came from.
     #[test]
-    fn a_mirror_hands_its_secret_back_to_serve() {
+    fn a_seed_hands_its_secret_back_to_serve() {
         let root = std::env::temp_dir().join(format!(
             "agent-share-secret-{}-{}",
             std::process::id(),
@@ -644,7 +654,7 @@ mod tests {
         assert_eq!(
             origin_secret_for(&root),
             None,
-            "a directory nobody mirrored has no secret to adopt"
+            "a directory nobody seeded has no secret to adopt"
         );
 
         let secret = [7u8; agent_share_proto::framing::SECRET_LEN];

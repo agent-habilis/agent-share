@@ -134,7 +134,7 @@ pub(crate) async fn serve(
                     &tree.manifest_bytes(),
                 )),
                 // What this peer can actually hand over. An origin holds everything; a
-                // mirror serving a partial copy holds a subset, and says so rather than
+                // seed serving a partial copy holds a subset, and says so rather than
                 // letting readers discover the gaps by asking.
                 serving: tree.serving(),
                 // The producer never clears IP: it is the peer everyone else dials.
@@ -187,7 +187,7 @@ pub(crate) async fn serve(
                             .await;
                             // Availability moves for the same reasons the tree
                             // does — a file appearing or vanishing under the
-                            // watcher, and a partial mirror filling in. A stale
+                            // watcher, and a partial seed filling in. A stale
                             // grid is the same failure as a stale fingerprint:
                             // it sends readers to a peer that cannot answer.
                             // Both dedupe by value, so a rescan that changed
@@ -227,7 +227,7 @@ struct Inherited {
     mesh_id: Option<String>,
 }
 
-/// Read the sidecar a mirror left beside `root`, if this directory is a copy.
+/// Read the sidecar a seed left beside `root`, if this directory is a copy.
 ///
 /// Every field exists so the copy rejoins the share it came from instead of
 /// starting a rival one: the same secret so the original link still works, the
@@ -239,7 +239,7 @@ struct Inherited {
 /// once, at copy time; what survives is the credential it produced, so offering
 /// another almost always means this is the wrong directory.
 fn inherited_from_copy(root: &Path, password: Option<&str>) -> Result<Inherited> {
-    let auth = super::mirror::origin_auth_for(root);
+    let auth = super::seed::origin_auth_for(root);
     if auth.is_some() && password.is_some() {
         bail!(
             "this directory re-serves an existing share, whose password is already \
@@ -247,9 +247,9 @@ fn inherited_from_copy(root: &Path, password: Option<&str>) -> Result<Inherited>
         );
     }
     Ok(Inherited {
-        secret: super::mirror::origin_secret_for(root),
+        secret: super::seed::origin_secret_for(root),
         auth,
-        mesh_id: super::mirror::origin_mesh_id_for(root),
+        mesh_id: super::seed::origin_mesh_id_for(root),
     })
 }
 
@@ -257,7 +257,7 @@ fn inherited_from_copy(root: &Path, password: Option<&str>) -> Result<Inherited>
 /// names.
 ///
 /// **A copy gets a key of `None` and still names an author.** That pairing is
-/// the requirement in one line: a mirror re-serves the signature it was handed
+/// the requirement in one line: a seed re-serves the signature it was handed
 /// and holds nothing that could make another, so it can serve every byte of the
 /// share and never publish a version of it. An original is the other way round
 /// — it mints a key and names itself.
@@ -267,8 +267,8 @@ fn inherited_from_copy(root: &Path, password: Option<&str>) -> Result<Inherited>
 /// before any of this; persisting it would make a share's identity outlive the
 /// process, and that is a separate feature with its own storage question.
 fn authorship_for(root: &Path) -> (Option<SecretKey>, Option<[u8; 32]>) {
-    if super::mirror::is_copy(root) {
-        return (None, super::mirror::origin_author_for(root));
+    if super::seed::is_copy(root) {
+        return (None, super::seed::origin_author_for(root));
     }
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
@@ -280,9 +280,9 @@ fn authorship_for(root: &Path) -> (Option<SecretKey>, Option<[u8; 32]>) {
 /// The tree this directory serves, and the line describing it.
 ///
 /// Two shapes, and which one applies is read off the directory rather than
-/// asked for: a copy a mirror produced carries the origin's manifest beside it,
+/// asked for: a copy a seed produced carries the origin's manifest beside it,
 /// and re-serving those bytes rather than scanning is what keeps every index
-/// meaning what the origin says it means — and what lets a *partial* mirror
+/// meaning what the origin says it means — and what lets a *partial* seed
 /// serve at all, since a scan of a half-copy would renumber every slot after the
 /// first missing file.
 ///
@@ -290,8 +290,8 @@ fn authorship_for(root: &Path) -> (Option<SecretKey>, Option<[u8; 32]>) {
 /// The origin manifest is unreadable, the directory cannot be scanned, or the
 /// resulting manifest is past [`super::MAX_MANIFEST_BYTES`].
 fn open_tree(root: &Path, author: Option<SecretKey>) -> Result<(Arc<LiveTree>, String)> {
-    if let Some(origin_bytes) = super::mirror::origin_manifest_for(root) {
-        let tree = Arc::new(LiveTree::mirrored(root.to_path_buf(), origin_bytes)?);
+    if let Some(origin_bytes) = super::seed::origin_manifest_for(root) {
+        let tree = Arc::new(LiveTree::seeded(root.to_path_buf(), origin_bytes)?);
         let (held, total) = tree.coverage();
         let description = format!(
             "{} (re-seeding another share: {held} of {total} files held, read-only)",
@@ -335,7 +335,7 @@ fn open_tree(root: &Path, author: Option<SecretKey>) -> Result<(Arc<LiveTree>, S
 
 /// The mesh this producer joins, or `None` when it cannot join one.
 ///
-/// `None` has exactly one cause: a mirror re-serving a *protected* share it was
+/// `None` has exactly one cause: a seed re-serving a *protected* share it was
 /// given no password for. fofoca gates every mesh derivation behind the
 /// stretched password key, so such a peer genuinely cannot join — the token in
 /// its sidecar opens the mount protocol but says nothing about the mesh. It
@@ -418,7 +418,7 @@ fn open_hash_cache(_token: &[u8; SECRET_LEN]) -> Arc<super::hash::ChunkCache> {
 /// signal exchange that lets a peer with no IP path to us negotiate a data
 /// channel first. The `WebRtcHandle` comes back so the accept loop can attach
 /// negotiated sessions to it.
-/// `inherited` is `Some` when serving a directory a mirror produced. Minting a
+/// `inherited` is `Some` when serving a directory a seed produced. Minting a
 /// fresh secret there would build a *second* share: its own mesh id, its own
 /// ticket, and no way for anyone holding the original link to discover it.
 /// Adopting the origin's secret is what makes a copy an extra source for the
