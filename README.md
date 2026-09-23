@@ -53,7 +53,7 @@ With no install, open the ticket in the
 
 - [Docs](https://agent-share.dev/docs)
 - [Webapp](https://agent-share.dev/app/)
-- [Contributing](CONTRIBUTING.md)
+- [Contributing](contributing.md)
 - [License](LICENSE)
 - [agent-habilis](https://agent-habilis.com)
 - [iroh](https://www.iroh.computer/)
