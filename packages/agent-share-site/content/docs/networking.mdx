@@ -13,8 +13,7 @@ By default a share is reachable across machines. It uses three lookups:
 
 - **mDNS** finds peers on the local network.
 - **Mainline DHT** finds peers on the internet.
-- **The relay ladder** gives a rendezvous and a fallback path when a direct
-  connection fails.
+- **The relay ladder** gives a rendezvous where peers meet before they connect.
 
 To restrict a share, name the lookups that you want. When you name one, only
 the named ones are used:
@@ -38,15 +37,18 @@ The direction matters, so each row names a producer and a consumer.
 
 | producer → consumer | carries bytes | never |
 |---|---|---|
-| native → native | iroh QUIC, else iroh relay | **WebRTC** |
-| native → web | WebRTC, else iroh relay | — |
-| web → native | iroh relay, unless forced onto WebRTC | — |
-| web → web | WebRTC, else iroh relay | — |
-| native → node | iroh relay | — |
+| native → native | direct iroh QUIC | **WebRTC**, **the relay** |
+| native → web | WebRTC | the relay |
+| web → native | WebRTC | the relay |
+| web → web | WebRTC | the relay |
+| native → node | WebRTC | the relay |
+
+**The relay never carries file data.** It helps with the hole punch, carries
+the WebRTC handshake and gossips. The bytes go peer to peer, or they do not go.
 
 A browser tab is either publicly reachable or not reachable. It has no mDNS, no
-DHT and no loopback peers. So the ticket of a tab gives a relay URL, and a
-native consumer dials that relay.
+DHT and no loopback peers. So the ticket of a tab gives a relay URL and no IP
+address, and a native consumer reads that as "use WebRTC".
 
 ## Why WebRTC only for browsers
 
@@ -57,10 +59,11 @@ plain QUIC.
 
 ## When the preferred path fails
 
-- A **browser** falls back to the iroh relay when ICE fails. It connects at
-  relay speed.
-- A **native** peer does not fall back onto the data channel. If it can reach
-  the producer over neither IP nor relay, the mount fails.
+No end falls back to the relay.
+
+- A **browser** has no other path when ICE fails, so the mount fails.
+- A **native** peer that cannot punch a direct path to another native peer
+  waits until the probe deadline. Then it refuses to connect.
 
 <Callout type="info">
   `--transport webrtc` forces a native consumer onto the data channel. It

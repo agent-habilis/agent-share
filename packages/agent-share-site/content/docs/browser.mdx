@@ -45,10 +45,15 @@ native addon. To produce a share, use the native binary.
 A browser has no UDP socket and cannot speak QUIC. It reaches a native producer
 in two connections:
 
-1. It dials the producer over the iroh relay and swaps one WebRTC offer and
-   answer. The relay carries the handshake, not file data.
-2. It opens a new connection over the WebRTC data channel.
+1. It dials `agent-share/webrtc-signal/1` over the iroh relay and swaps one
+   WebRTC offer and answer. The relay carries the handshake, not file data.
+2. It opens a new connection to `agent-share/mount/1` over the WebRTC data
+   channel.
 
-If WebRTC fails, the browser falls back to the iroh relay. It connects at relay
-speed instead of failing. See [Networking](/docs/networking#transports) for the
+Two connections are necessary. iroh sends the first packet of a connection to
+new paths only while no path is selected. So a live connection cannot move to a
+transport that is attached later.
+
+If WebRTC fails, the mount fails. The browser does not fall back to the relay.
+See [Networking](/docs/networking#transports) for the
 full table.

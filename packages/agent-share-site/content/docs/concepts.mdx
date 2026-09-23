@@ -20,6 +20,12 @@ can find the share. It carries what a consumer needs to reach the producer. It
 is bare ASCII Base58, so it is safe in a URL and in a
 shell.
 
+agent-share started as `ahsw mount` in
+[agent-habilis/swarm](https://github.com/agent-habilis/swarm), and then forked.
+It uses its own QUIC ALPN, so both ends must run agent-share. The ticket uses
+the same Base58Check framing as the other agent-habilis tools, but it has no
+glyph prefix.
+
 When the share has a password, the ticket finds the share but does not open
 it. The consumer must also give the password.
 
