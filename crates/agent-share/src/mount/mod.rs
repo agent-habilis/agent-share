@@ -3,6 +3,8 @@
 // bytes rather than a second implementation that drifts. Re-exported here
 // under their long-standing names; the golden pin that guards them moved with
 // them (`agent_share_proto::framing` — `wire_constants_are_pinned`).
+use std::io::IsTerminal as _;
+
 pub(crate) use agent_share_proto::framing::{
     MAX_CHUNK_MAP_BYTES, MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH,
     OP_CHUNK, OP_CHUNK_MAP, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN,
@@ -140,9 +142,17 @@ type CtrlC = tokio::task::JoinHandle<std::io::Result<()>>;
 /// seconds, and without this line nothing shows that the key did anything.
 /// Human output only; json mode stays the one line a script reads.
 fn announce_stopping(json: bool) {
-    if !json {
-        crate::util::output::status("Stopping", "closing connections…");
+    if json {
+        return;
     }
+    // The terminal echoes the key as `^C` just before this line. A carriage
+    // return puts the line over it: the right-aligned verb's leading spaces
+    // cover those two columns. Changing the terminal's echo mode instead would
+    // have to be undone on every exit path.
+    if std::io::stderr().is_terminal() {
+        eprint!("\r");
+    }
+    crate::util::output::status("Stopping", "closing connections…");
 }
 
 #[cfg(test)]
