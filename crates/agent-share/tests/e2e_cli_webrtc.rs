@@ -66,7 +66,7 @@ async fn the_real_cli_serves_over_webrtc() {
     let stdout = child.stdout.take().expect("piped stdout");
     let serving = Serving(child);
 
-    // Scrape the ticket off the `Mount agent-share <ticket> .` line. The
+    // Scrape the ticket off the `Mount agent-share <ticket>` line. The
     // ticket is bare Base58 with nothing to grep for, so the anchor is the
     // literal command word and the proof is that the next word decodes.
     let ticket = tokio::task::spawn_blocking(move || {

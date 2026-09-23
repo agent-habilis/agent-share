@@ -42,8 +42,8 @@ For the supported platforms, see
 ## Usage
 
 ```sh
-agent-share serve <dir>          # producer: prints a ticket and the mount command
-agent-share <ticket> <target>    # consumer: mounts the share under <target>
+agent-share serve <dir>          # producer: prints the mount command and a web link
+agent-share <ticket> [target]    # consumer: mounts the share under [target], or here
 ```
 
 With no install, open the ticket in the

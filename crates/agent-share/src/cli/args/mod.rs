@@ -1,6 +1,6 @@
 //! The clap surface. The root command is what `ahsw mount` was in
 //! agent-habilis/swarm, hoisted to a standalone binary: the bare
-//! `agent-share <ticket> <target>` consumer form plus the `serve`
+//! `agent-share <ticket> [target]` consumer form plus the `serve`
 //! subcommand.
 
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ mod password;
 /// (read-only, lazy, no daemon).
 ///
 /// `agent-share serve <dir>` shares a folder and prints the `agent-share <ticket>`
-/// command; `agent-share <ticket> <target>` creates `agent-share-…/` under the
+/// command; `agent-share <ticket> [target]` creates `agent-share-…/` under the
 /// target and mounts through a loopback `NFSv3` bridge (the OS's built-in NFS
 /// client — no FUSE, no kernel extension). File bytes are fetched on demand
 /// as they are read. Writes fail (read-only).
@@ -34,7 +34,8 @@ pub(crate) struct Cli {
     pub ticket: Option<String>,
 
     /// Parent directory for the mount. Creates `agent-share-YYYY-MM-DDTHHMM/`
-    /// inside it (target may be non-empty). Unmounted on Ctrl-C.
+    /// inside it (target may be non-empty). Unmounted on Ctrl-C. Defaults to
+    /// the current folder.
     pub mountpoint: Option<PathBuf>,
 
     /// Start the loopback NFS bridge but skip the OS mount step; prints

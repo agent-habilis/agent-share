@@ -63,12 +63,14 @@ On the producer machine:
 agent-share serve ./notes
 ```
 
-The command prints the consumer command, with a ticket in it. Serve keeps
-running until you stop it.
+The command prints the consumer command, with a ticket in it. It also prints
+a link that opens the share in the webapp. Serve keeps running until you stop
+it.
 
 ### Mount it
 
-On the consumer machine, run the printed command with a target directory:
+On the consumer machine, run the printed command. You can add a target
+directory. Without one, agent-share uses the current directory:
 
 ```sh
 agent-share <ticket> ~/mnt

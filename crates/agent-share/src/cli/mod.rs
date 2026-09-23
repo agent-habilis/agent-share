@@ -2,6 +2,8 @@
 //! agent-habilis/swarm's `src/cli/mod.rs`, with the `Mount` subcommand
 //! hoisted to the root command.
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 
 use self::args::{Cli, MountAction, OutputFormat};
@@ -10,7 +12,7 @@ pub(crate) mod args;
 
 /// Read the consumer's `--transport` flag.
 ///
-/// Shared by the two consumer forms — the bare `agent-share <ticket> <target>`
+/// Shared by the two consumer forms — the bare `agent-share <ticket> [target]`
 /// mount and `seed` — so a spelling the mount accepts cannot be one the seed
 /// rejects. `webrtc` is the only thing that turns the lane on; everything else
 /// either names the default or is a usage error.
@@ -119,13 +121,15 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         }
         None => {}
     }
-    // The bare form: both positionals are optional at the clap layer (the
-    // `serve` subcommand shares the slot), so require them here.
-    let (Some(ticket), Some(mountpoint)) = (cli.ticket, cli.mountpoint) else {
+    // The bare form: the ticket is optional at the clap layer (the `serve`
+    // subcommand shares the slot), so require it here. The target defaults to
+    // the current folder, so the command `serve` prints runs as pasted.
+    let Some(ticket) = cli.ticket else {
         anyhow::bail!(
-            "usage: agent-share <ticket> <target>, agent-share serve <dir>, or agent-share bench"
+            "usage: agent-share <ticket> [target], agent-share serve <dir>, or agent-share bench"
         );
     };
+    let mountpoint = cli.mountpoint.unwrap_or_else(|| PathBuf::from("."));
     crate::mount::attach(
         &ticket,
         &mountpoint,

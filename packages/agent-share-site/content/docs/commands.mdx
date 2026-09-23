@@ -27,11 +27,11 @@ you stop it.
 ## Mount
 
 ```sh
-agent-share <ticket> <target> [--password PW | --password-stdin] [--transport webrtc] [--output human|json]
+agent-share <ticket> [target] [--password PW | --password-stdin] [--transport webrtc] [--output human|json]
 ```
 
-Creates `agent-share-YYYY-MM-DDTHHMM/` under `<target>` and mounts the share
-there. Unmounts on Ctrl-C.
+Creates `agent-share-YYYY-MM-DDTHHMM/` under `[target]` and mounts the share
+there. Without a target, it uses the current directory. Unmounts on Ctrl-C.
 
 `--transport webrtc` forces the WebRTC data channel. It exists to test the
 browser path from a native process. Do not use it to pick a transport.

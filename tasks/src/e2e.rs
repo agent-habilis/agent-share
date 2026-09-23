@@ -1593,7 +1593,7 @@ fn serve(binary: &str, dir: &Path, password: Option<&str>) -> Res<(Proc, String)
         cmd.args(["--password", password]);
     }
     let (producer, mut lines) = spawn_piped(cmd, "e2e producer")?;
-    // `mount::announce` in json mode prints exactly `agent-share <ticket> .`.
+    // `mount::announce` in json mode prints exactly `agent-share <ticket>`.
     let Some(line) = lines.wait_for("agent-share ", Duration::from_mins(1)) else {
         return Err(format!(
             "the producer never printed a ticket; output was:\n{}",

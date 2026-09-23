@@ -18,6 +18,10 @@ use crate::file::human_bytes;
 use crate::lookup::build_endpoint;
 use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 
+/// The webapp's files view, which takes the ticket as its last path segment.
+/// Must match `shareUrl()` in `packages/agent-share-web/src/lib/ticket`.
+const WEB_APP_FILES_URL: &str = "https://agent-share.dev/app/files/";
+
 /// Producer: share `dir` read-only. Scans at startup, then rescans whenever
 /// the tree changes and publishes the difference to anyone watching, so a
 /// consumer sees edits without remounting. Prints the consumer's
@@ -82,15 +86,13 @@ pub(crate) async fn serve(
 
     let hashes = Some(open_hash_cache(auth.token()));
 
-    // Shell-quoted: the hint is printed for copy-paste (and captured verbatim
-    // by scripts in json mode), so a dir name with a space must stay one word.
-    // Target parent for the consumer — it creates `agent-share-…/` under this.
-    let mount_hint = super::shell_word(".");
-    super::announce(
-        json,
-        &description,
-        &format!("agent-share {} {mount_hint}", ticket.encode()),
-    );
+    // No target: the consumer mounts under the current folder by default.
+    let encoded = ticket.encode();
+    super::announce(json, &description, &format!("agent-share {encoded}"));
+    // Human output only, for the same reason as the password note below.
+    if !json {
+        crate::util::output::status_out("Open", &format!("{WEB_APP_FILES_URL}{encoded}"));
+    }
     // The password is deliberately *not* in that command. It travels out of
     // band — putting it in the line people paste into chat alongside the ticket
     // would defeat the whole point — so say so rather than let the recipient
