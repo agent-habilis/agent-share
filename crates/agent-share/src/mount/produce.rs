@@ -185,9 +185,6 @@ pub(crate) async fn serve(
     Ok(())
 }
 
-/// The Ctrl-C listener `serve` starts on its first line.
-type CtrlC = tokio::task::JoinHandle<std::io::Result<()>>;
-
 /// Run `work` to the end even when Ctrl-C lands first, and say `Stopping` at
 /// once if it does.
 ///
@@ -196,7 +193,7 @@ type CtrlC = tokio::task::JoinHandle<std::io::Result<()>>;
 /// shutdown exists to avoid. `stopping` records that the Ctrl-C was used up,
 /// because a finished `JoinHandle` must not be polled again.
 async fn finish_despite_ctrl_c<T>(
-    ctrl_c: &mut CtrlC,
+    ctrl_c: &mut super::CtrlC,
     stopping: &mut bool,
     json: bool,
     work: impl Future<Output = T>,
@@ -226,7 +223,7 @@ async fn finish_despite_ctrl_c<T>(
 async fn serve_until_ctrl_c(
     share_mesh: Option<&super::mesh::ShareMesh>,
     tree: &LiveTree,
-    ctrl_c: &mut CtrlC,
+    ctrl_c: &mut super::CtrlC,
 ) {
     match share_mesh {
         Some(mesh) => {

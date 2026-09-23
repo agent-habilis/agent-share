@@ -143,6 +143,7 @@ pub(crate) async fn attach(
     webrtc_only: bool,
     password: Option<&str>,
 ) -> Result<()> {
+    let mut ctrl_c = tokio::spawn(tokio::signal::ctrl_c());
     let ticket = MountTicket::decode(ticket)?;
     let webrtc_only = webrtc_only || relay_only(&ticket.addr);
     // Before the endpoint, before the dial: a ticket that wants a password we
@@ -181,7 +182,12 @@ pub(crate) async fn attach(
         auth,
     })));
     let mut share_mesh: Option<Option<ShareMesh>> = None;
-    let (manifest, envelope) = match client.fetch_signed_manifest().await {
+    // With the origin down this waits up to the discovery deadline, which is
+    // the startup wait a Ctrl-C most often lands in.
+    let Some(fetched) = unless_ctrl_c(&mut ctrl_c, client.fetch_signed_manifest()).await else {
+        return stop_before_mount(json, mesh_task, &endpoint).await;
+    };
+    let (manifest, envelope) = match fetched {
         Ok(signed) => (MountManifest::decode(&signed.manifest)?, signed.encode()),
         // The producer refused the credential outright. Nothing else can go
         // right after that — the mesh is derived from the same token, so the
@@ -196,36 +202,19 @@ pub(crate) async fn attach(
         // `--transport webrtc` is exempt: it pins the lane for tests, and the
         // seeder path rides iroh's own transports.
         Err(origin_error) if !webrtc_only => {
-            let mesh = match mesh_task.take() {
-                Some(task) => task.await.unwrap_or(None),
-                None => None,
-            };
-            let (manifest, envelope) = bootstrap_from_seeders(
-                mesh.as_ref(),
-                &endpoint,
-                &origin_ticket,
+            let fallback = SeederFallback {
+                mesh_task: mesh_task.take(),
+                endpoint: &endpoint,
+                origin_ticket: &origin_ticket,
                 auth,
-                &origin_error,
-            )
-            .await
-            // The cost of having no offline verifier: with the origin down,
-            // "wrong password" and "share is gone" produce the same silence,
-            // because a wrong password derives a mesh id nobody else is on.
-            // Say both rather than pick one.
-            // No password hedge when the ticket carried a mesh id: the password
-            // was ruled on locally before the dial, so reaching here means it
-            // was right and the share is simply unreachable. A protected ticket
-            // *without* an id — minted before that field existed — had nothing
-            // local to check, so there the password is still a candidate.
-            .map_err(|error| {
-                if auth.password_protected() && origin_ticket.mesh_id.is_none() {
-                    error.context(
-                        "the password may be wrong, or the share may no longer be available",
-                    )
-                } else {
-                    error
-                }
-            })?;
+                origin_error: &origin_error,
+                json,
+            };
+            let Some((manifest, envelope, mesh)) =
+                manifest_from_seeders(fallback, &mut ctrl_c).await?
+            else {
+                return Ok(());
+            };
             share_mesh = Some(mesh);
             (manifest, envelope)
         }
@@ -305,8 +294,9 @@ pub(crate) async fn attach(
         ));
     }
 
-    tokio::signal::ctrl_c()
+    ctrl_c
         .await
+        .context("the Ctrl-C listener failed")?
         .context("waiting for Ctrl-C failed")?;
     super::announce_stopping(json);
     if mounted {
@@ -317,6 +307,105 @@ pub(crate) async fn attach(
     leave_mesh(share_mesh, serving_updates).await;
     // Best-effort: leave nothing behind when the folder is empty / unused.
     let _ = std::fs::remove_dir(&mountpoint);
+    endpoint.close().await;
+    Ok(())
+}
+
+/// What the dead-origin path needs to fetch the manifest from a seeder.
+struct SeederFallback<'a> {
+    mesh_task: Option<tokio::task::JoinHandle<Option<ShareMesh>>>,
+    endpoint: &'a Endpoint,
+    origin_ticket: &'a MountTicket,
+    auth: ShareAuth,
+    origin_error: &'a anyhow::Error,
+    json: bool,
+}
+
+/// The origin is unreachable. Every holder of this link is on the mesh its
+/// token derives; a peer whose card vouches for the tree can serve the same
+/// manifest — frozen, since the origin alone may mutate it.
+///
+/// `Ok(None)` when Ctrl-C came first: the consumer has then already left the
+/// mesh and closed its endpoint, and the caller only has to return.
+async fn manifest_from_seeders(
+    fallback: SeederFallback<'_>,
+    ctrl_c: &mut super::CtrlC,
+) -> Result<Option<(MountManifest, Vec<u8>, Option<ShareMesh>)>> {
+    let SeederFallback {
+        mesh_task,
+        endpoint,
+        origin_ticket,
+        auth,
+        origin_error,
+        json,
+    } = fallback;
+    let mesh = match mesh_task {
+        Some(task) => task.await.unwrap_or(None),
+        None => None,
+    };
+    let bootstrap =
+        bootstrap_from_seeders(mesh.as_ref(), endpoint, origin_ticket, auth, origin_error);
+    let Some(bootstrapped) = unless_ctrl_c(ctrl_c, bootstrap).await else {
+        super::announce_stopping(json);
+        leave_and_close(mesh, endpoint).await?;
+        return Ok(None);
+    };
+    let (manifest, envelope) = bootstrapped
+        // The cost of having no offline verifier: with the origin down,
+        // "wrong password" and "share is gone" produce the same silence,
+        // because a wrong password derives a mesh id nobody else is on.
+        // Say both rather than pick one.
+        // No password hedge when the ticket carried a mesh id: the password
+        // was ruled on locally before the dial, so reaching here means it
+        // was right and the share is simply unreachable. A protected ticket
+        // *without* an id — minted before that field existed — had nothing
+        // local to check, so there the password is still a candidate.
+        .map_err(|error| {
+            if auth.password_protected() && origin_ticket.mesh_id.is_none() {
+                error.context("the password may be wrong, or the share may no longer be available")
+            } else {
+                error
+            }
+        })?;
+    Ok(Some((manifest, envelope, mesh)))
+}
+
+/// `work`'s result, or `None` when Ctrl-C comes first.
+///
+/// Boxed: the startup futures are large, and pinned inline they bloat
+/// `attach`'s future up to `main`.
+async fn unless_ctrl_c<T>(ctrl_c: &mut super::CtrlC, work: impl Future<Output = T>) -> Option<T> {
+    let mut work = Box::pin(work);
+    tokio::select! {
+        done = &mut work => Some(done),
+        _ = &mut *ctrl_c => None,
+    }
+}
+
+/// A Ctrl-C before the mount: say so, then shut down as the normal path does.
+///
+/// The mesh join is awaited rather than dropped: it is a spawned task that
+/// runs on anyway, and dropping a half-built node drops its endpoints without
+/// closing them.
+async fn stop_before_mount(
+    json: bool,
+    mesh_task: Option<tokio::task::JoinHandle<Option<ShareMesh>>>,
+    endpoint: &Endpoint,
+) -> Result<()> {
+    super::announce_stopping(json);
+    let mesh = match mesh_task {
+        Some(task) => task.await.unwrap_or(None),
+        None => None,
+    };
+    leave_and_close(mesh, endpoint).await
+}
+
+/// Leave the mesh, if joined, then close the endpoint: `Left` has to go out
+/// over the endpoint before it closes.
+async fn leave_and_close(mesh: Option<ShareMesh>, endpoint: &Endpoint) -> Result<()> {
+    if let Some(mesh) = mesh {
+        mesh.leave().await;
+    }
     endpoint.close().await;
     Ok(())
 }

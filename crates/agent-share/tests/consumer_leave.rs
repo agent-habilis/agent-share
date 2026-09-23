@@ -32,6 +32,17 @@ impl ChildGuard {
             .expect("run kill");
         assert!(status.success(), "kill -INT failed");
     }
+
+    fn exit_status_within(&mut self, within: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if let Ok(Some(status)) = self.0.try_wait() {
+                return Some(status);
+            }
+            thread::sleep(POLL);
+        }
+        None
+    }
 }
 
 impl Drop for ChildGuard {
@@ -138,5 +149,49 @@ fn a_consumer_leaves_the_mesh_on_ctrl_c() {
     assert!(
         recv_line_within(&producer_rx, "0 on mesh", GOODBYE_TIMEOUT).is_some(),
         "the producer still counted the consumer {GOODBYE_TIMEOUT:?} after its Ctrl-C: no Left was sent"
+    );
+}
+
+/// A Ctrl-C while the consumer still waits for the manifest. With the origin
+/// gone that wait lasts up to the discovery deadline, and before the fix the
+/// Ctrl-C took the default action there and killed the process.
+#[test]
+fn a_consumer_stops_cleanly_on_a_ctrl_c_during_startup() {
+    let dir = tempfile::Builder::new()
+        .prefix("agent-share-early-stop-")
+        .tempdir()
+        .expect("temp dir");
+    let root = dir.path().join("share");
+    std::fs::create_dir_all(&root).expect("create share dir");
+    std::fs::write(root.join("readme.md"), b"# gone").expect("write file");
+
+    let (producer, _producer_rx, ticket) = spawn_producer(&root);
+    // A dead origin keeps the consumer in its manifest fetch.
+    drop(producer);
+
+    let target = dir.path().join("mnt");
+    let mut consumer_cmd = test_cmd();
+    consumer_cmd
+        .args([
+            &ticket,
+            target.to_str().expect("utf-8 mount target"),
+            "--no-mount",
+        ])
+        .env("AGENT_SHARE_DISCOVERY_DEADLINE_SECS", "30");
+    let (mut consumer, consumer_rx) = spawn_piped(consumer_cmd);
+    thread::sleep(Duration::from_secs(2));
+
+    consumer.interrupt();
+
+    assert!(
+        recv_line_within(&consumer_rx, "Stopping", Duration::from_secs(1)).is_some(),
+        "no Stopping line within 1s of a Ctrl-C during startup"
+    );
+    let status = consumer
+        .exit_status_within(Duration::from_secs(20))
+        .expect("the consumer did not exit after its Ctrl-C");
+    assert!(
+        status.success(),
+        "a Ctrl-C during startup must stop the consumer cleanly, got {status}"
     );
 }

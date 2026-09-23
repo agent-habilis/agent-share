@@ -132,6 +132,10 @@ fn announce(json: bool, serving: &str, command: &str) {
     crate::util::output::status_out("Mount", command);
 }
 
+/// The Ctrl-C listener `serve` and the consumer start on their first line, so a
+/// Ctrl-C during startup gets the clean shutdown rather than the default action.
+type CtrlC = tokio::task::JoinHandle<std::io::Result<()>>;
+
 /// Say at once that a Ctrl-C was heard: the clean shutdown after it takes
 /// seconds, and without this line nothing shows that the key did anything.
 /// Human output only; json mode stays the one line a script reads.
