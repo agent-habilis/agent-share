@@ -77,7 +77,7 @@ pub const TICKET_FLAG_SIGNED: u8 = 0b0010;
 ///
 /// Without [`TICKET_FLAG_PASSWORD`], the secret is a pure bearer capability:
 /// whoever holds this string can read the share. The web client puts it in the
-/// path (`/files/<ticket>`, `/info/<ticket>`) so those views are shareable as
+/// path (`/app/files/<ticket>`, `/app/info/<ticket>`) so those views are shareable as
 /// ordinary URLs. With the flag set, the string alone is inert — it is the
 /// *addressing*, and the password is the credential — which is what makes such
 /// a URL safe to post where the password is not.

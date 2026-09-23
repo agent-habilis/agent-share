@@ -1,0 +1,104 @@
+---
+title: Getting started
+description: Install agent-share, serve a folder, and mount it on a second machine.
+---
+
+import { Callout, Steps, Tabs } from 'nextra/components'
+
+# Getting started
+
+## Install
+
+<Tabs items={['brew', 'cargo', 'npx', 'browser']}>
+  <Tabs.Tab>
+
+Homebrew, for macOS and Linux:
+
+```sh
+brew install agent-habilis/tap/agent-share
+```
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+
+From source, everywhere else:
+
+```sh
+cargo install --git https://github.com/agent-habilis/agent-share agent-share
+```
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+
+No install. Node writes the files into a folder instead of mounting them:
+
+```sh
+npx agent-share <ticket> [destination]
+```
+
+The destination defaults to `./share`. To serve a folder, use the binary.
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+
+No install and no terminal. Open the <a href="/app/" target="_blank" rel="noopener">webapp</a> and paste a ticket, or
+share a folder straight from the tab.
+
+  </Tabs.Tab>
+</Tabs>
+
+Prebuilt binaries exist for macOS (Apple silicon and Intel) and Linux (x86-64
+and ARM64). The Linux binaries need glibc 2.39 or later (Ubuntu 24.04,
+Debian 13).
+
+## A first share
+
+<Steps>
+
+### Serve a folder
+
+On the producer machine:
+
+```sh
+agent-share serve ./notes
+```
+
+The command prints the consumer command, with a ticket in it. Serve keeps
+running until you stop it.
+
+### Mount it
+
+On the consumer machine, run the printed command with a target directory:
+
+```sh
+agent-share <ticket> ~/mnt
+```
+
+agent-share creates `agent-share-YYYY-MM-DDTHHMM/` under `~/mnt` and mounts the
+share there. The target can already hold other files.
+
+### Read it
+
+Open the files with any tool. Bytes move only when a tool reads them. Writes
+fail, because the mount is read-only.
+
+### Unmount
+
+Press Ctrl-C in the terminal that runs the mount.
+
+</Steps>
+
+<Callout type="info">
+  On Linux, `mount -t nfs` usually needs sudo. If the automatic mount step
+  fails, agent-share prints the mount command so that you can run it yourself.
+</Callout>
+
+## No install
+
+To read a share without the native binary, open it in the
+[webapp](/docs/browser), or receive it with `npx agent-share <ticket>`.
+
+## Platforms
+
+Mount works on macOS (`mount_nfs`) and Linux (`mount -t nfs`). Other platforms
+can only `serve`.

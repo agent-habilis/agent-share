@@ -166,6 +166,60 @@ fn zone_of(prefix: &[&str], roots: &BTreeSet<String>) -> Zone {
     }
 }
 
+/// The name inside a dynamic route segment — `[ticket]`, `[...path]` or
+/// `[[...mdxPath]]` — if this is one.
+///
+/// Its own rule, because a dynamic segment's name *is* the prop the page
+/// receives: `[[...mdxPath]]` arrives as `params.mdxPath`, so the spelling is
+/// the language's rather than the tree's. It still has to start lowercase and
+/// carry nothing but letters and digits, which is what keeps this from being a
+/// hole anything can walk through.
+fn dynamic_segment(name: &str) -> Option<&str> {
+    let inner = name
+        .strip_prefix("[[...")
+        .and_then(|rest| rest.strip_suffix("]]"))
+        .or_else(|| {
+            name.strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+                .map(|rest| rest.strip_prefix("...").unwrap_or(rest))
+        })?;
+    let first = inner.chars().next()?;
+    let plain = inner.chars().all(|char| char.is_ascii_alphanumeric());
+    (first.is_ascii_lowercase() && plain).then_some(inner)
+}
+
+/// Strip the punctuation a file router puts *around* a name, leaving the name
+/// itself to face the same rule as everything else.
+///
+/// Next spells a route group `(site)`, and Nextra reads the page order from
+/// `_meta.ts`. Neither is a name anybody chose, and both are rejected outright
+/// by the kebab rule — so the wrapper comes off rather than each file joining
+/// `ALLOWED`, which would have to grow a line per route. What is left still
+/// faces the rule, so `(Site)` fails where `(site)` passes.
+fn unwrap_router_name(name: &str) -> &str {
+    let name = name.strip_prefix('_').unwrap_or(name);
+    name.strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(name)
+}
+
+/// The zone's convention, plus the two spellings a file router imposes on the
+/// names under `packages/agent-share-site`.
+fn is_valid(name: &str, zone: Zone) -> bool {
+    if ALLOWED.contains(&name) {
+        return true;
+    }
+    // A crate has no file router, and `_meta.ts` beside Rust would be a
+    // different thing entirely — so both router rules are kebab-only.
+    if zone == Zone::Snake {
+        return is_conventional(name, zone);
+    }
+    if dynamic_segment(name).is_some() {
+        return true;
+    }
+    is_conventional(unwrap_router_name(name), zone)
+}
+
 /// Leading dots are stripped once so `.gitignore` and `.cargo` pass while
 /// `..odd` still fails. Doubled and trailing separators are deliberately not
 /// rejected: more surface, and nothing in the tree does it.
@@ -173,10 +227,7 @@ fn zone_of(prefix: &[&str], roots: &BTreeSet<String>) -> Zone {
 /// Rejecting every uppercase letter is what catches PascalCase and camelCase;
 /// rejecting the *other* zone's separator is what keeps the two conventions
 /// from bleeding into each other.
-fn is_valid(name: &str, zone: Zone) -> bool {
-    if ALLOWED.contains(&name) {
-        return true;
-    }
+fn is_conventional(name: &str, zone: Zone) -> bool {
     let name = name.strip_prefix('.').unwrap_or(name);
     let Some(first) = name.chars().next() else {
         return false;
@@ -292,6 +343,18 @@ mod tests {
         assert!(is_valid("README.md", Zone::Snake));
         assert!(is_valid("Formula", Zone::Kebab));
         assert!(!is_valid("..odd", Zone::Kebab));
+    }
+
+    #[test]
+    fn router_names_the_site_does_not_choose_pass() {
+        assert!(is_valid("_meta.ts", Zone::Kebab));
+        assert!(is_valid("(site)", Zone::Kebab));
+        assert!(is_valid("[[...mdxPath]]", Zone::Kebab));
+        assert!(is_valid("[ticket]", Zone::Kebab));
+        // The wrapper is not a licence for the name inside it.
+        assert!(!is_valid("(Site)", Zone::Kebab));
+        assert!(!is_valid("_Meta.ts", Zone::Kebab));
+        assert!(!is_valid("_meta.ts", Zone::Snake));
     }
 
     #[test]

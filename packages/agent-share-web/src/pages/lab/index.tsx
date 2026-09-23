@@ -6,7 +6,7 @@
  * It wears the app's chrome and the app's bento (see `components/Panel`) rather
  * than a stylesheet of its own, so the two pages age together. It is still its
  * own HTML entrypoint, outside the router: nothing in the app links here, and
- * the harnesses in `tasks/` reach it at `/lab` by URL.
+ * the harnesses in `tasks/` reach it at `/app/lab` by URL.
  */
 
 // First, before anything can build a Disposable. See the file for why.

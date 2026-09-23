@@ -1,0 +1,59 @@
+---
+title: Share a folder. Mount it anywhere.
+---
+
+import { Cards } from 'nextra/components'
+import { Hero } from '@/components/hero'
+
+<div className="dots">
+
+<Hero />
+
+<section className="install">
+
+```sh
+brew install agent-habilis/tap/agent-share
+```
+
+<p className="install-more">More install options <a href="/docs/getting-started">in the docs</a>.</p>
+
+</section>
+
+</div>
+
+<Cards num={3} className="bento">
+  <div className="bento-2 tile">
+    <h2 className="tile-title"><span className="tile-emoji">🗄️</span> Two commands</h2>
+    <p>One machine serves the folder and prints a ticket. The other mounts it with that ticket.</p>
+
+```sh
+# producer
+agent-share serve ./notes
+
+# consumer, on any other machine
+agent-share <ticket> ~/mnt
+```
+
+  </div>
+  <Cards.Card icon={<span className="tile-emoji">🔒</span>} title="Nothing goes to a cloud" href="/docs/concepts">
+    <p>The files stay on the machine that serves them. Peers connect straight to each other over encrypted QUIC. No bucket, no account, nobody else holding the data.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">📂</span>} title="It mounts as a real folder" href="/docs/concepts#the-nfs-bridge">
+    <p>grep it, open it in an editor, build against it. The OS's own NFS client does the mounting, so there is no FUSE, no kernel extension and no daemon.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">⚡</span>} title="Only the bytes you read" href="/docs/concepts#lazy-reads">
+    <p>Serving scans names and sizes, nothing else. Open one file in a 10 GB folder and one file is what crosses the wire.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🔄</span>} title="Always the current version" href="/docs/concepts#live-changes">
+    <p>The producer watches the folder. Edits, new files and deletions reach everyone connected, with no remount.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🌍</span>} title="It finds the other machine" href="/docs/networking">
+    <p>The same room over mDNS, anywhere else over the DHT and relays. It holes through NAT, so there is no port to forward and no VPN to join.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🔑</span>} title="Safe to share" href="/docs/commands#passwords">
+    <p>A password-protected ticket addresses the share without opening it. Post the link where the password is not.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🌐</span>} title="Nothing to install" href="/app/" target="_blank" rel="noopener">
+    <p>Open the ticket in the webapp, or run <code>npx agent-share</code>. Neither needs the binary.</p>
+  </Cards.Card>
+</Cards>

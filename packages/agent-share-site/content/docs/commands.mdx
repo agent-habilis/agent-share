@@ -1,0 +1,79 @@
+---
+title: Commands
+description: Every agent-share command and flag.
+---
+
+# Commands
+
+`agent-share --help` and `man agent-share` give the full reference. This page
+gives the commands and the flags that you use most.
+
+## serve
+
+```sh
+agent-share serve <dir> [lookup flags] [--password PW | --password-stdin] [--output human|json]
+```
+
+Shares `<dir>` read-only and prints the consumer command. Keeps serving until
+you stop it.
+
+| Flag | Does |
+|---|---|
+| `--swarm <id>` | Use the discovery config of an existing swarm id |
+| `--public` | mDNS, DHT and the default relay ladder. This is the default |
+| `--mdns`, `--dht`, `--relay [url,…]` | Use only the lookups that you name. See [Networking](/docs/networking) |
+| `--output json` | Print one `agent-share <ticket>` line, for scripts |
+
+## Mount
+
+```sh
+agent-share <ticket> <target> [--password PW | --password-stdin] [--transport webrtc] [--output human|json]
+```
+
+Creates `agent-share-YYYY-MM-DDTHHMM/` under `<target>` and mounts the share
+there. Unmounts on Ctrl-C.
+
+`--transport webrtc` forces the WebRTC data channel. It exists to test the
+browser path from a native process. Do not use it to pick a transport.
+
+## mirror
+
+```sh
+agent-share mirror <ticket> <dest> [--only PATH]… [--password …] [--output human|json]
+```
+
+Takes a full, hash-verified copy of the share into `<dest>`. `--only` copies
+only the paths that you name. You can repeat it, and a directory takes
+everything under it. A partial copy can still be served: the files it does not
+hold show as absent.
+
+The copy records what it needs to serve again, so `agent-share serve <dest>`
+asks for no password.
+
+## bench
+
+```sh
+agent-share bench --transport webrtc|quic           # producer
+agent-share bench <ticket> [--duration 30] [--depth 1]  # consumer
+```
+
+A synthetic throughput and latency test with no real directory. The producer
+picks the transport and puts it in the ticket.
+
+## Passwords
+
+`--password` protects a share on `serve` and unlocks it on a consumer.
+
+- `--password PW` shows in `ps` output and in your shell history.
+- `--password-stdin` reads the password up to the first newline. Use it in
+  scripts and CI.
+
+An empty password is an error, not "no password". A pipeline that sends nothing
+must not publish an unprotected share.
+
+## Output
+
+`--output json` gives one line for machines:
+
+- `serve` prints the `agent-share <ticket>` command.
+- `mirror` prints the `agent-share serve <dir>` command.

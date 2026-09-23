@@ -1,0 +1,100 @@
+---
+title: What is agent-share
+description: Share a folder with peers, or mount a peer's folder locally. Read-only, lazy, no daemon.
+---
+
+import { Callout, Cards } from 'nextra/components'
+
+# What is agent-share
+
+agent-share shares a folder with peers. A peer mounts that folder on its own
+machine and reads it like a local directory. The mount is read-only.
+
+The producer serves file bytes on demand over an
+[iroh](https://www.iroh.computer/) QUIC connection. The consumer mounts them
+through a loopback NFSv3 bridge. The bridge uses the built-in NFS client of the
+operating system, so there is no FUSE and no kernel extension.
+
+## No server, no daemon
+
+The two peers connect directly. There is nothing to host and no account to
+create. `agent-share serve` runs until you stop it. The mount stays until you
+press Ctrl-C.
+
+## Lazy and live
+
+Serve scans the folder for metadata only. Nothing is hashed or sent before a
+peer reads it. When a peer reads a file, it fetches only the byte ranges that
+it reads.
+
+The producer watches the folder. Edits, new files and deletions reach
+connected peers without a remount.
+
+<Callout type="info">
+  Both ends must run agent-share. It uses its own QUIC ALPN, so it does not
+  mount against other tools.
+</Callout>
+
+## Three ways to consume a share
+
+- The native binary mounts the share as a filesystem on macOS and Linux.
+- The [webapp](/docs/browser) opens the share in a browser tab, with no install.
+- `npx agent-share` writes the files into a local folder, with no native binary.
+
+## Features
+
+<Cards num={2} className="features">
+  <Cards.Card icon={<span className="tile-emoji">🕸️</span>} title="Peer to peer" href="#no-server-no-daemon">
+    <p>The two peers connect directly. No server to host, no account to create.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🔐</span>} title="Encrypted" href="/docs/networking#transports">
+    <p>Bytes move over iroh QUIC, or WebRTC in a browser. Both are encrypted.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">📂</span>} title="Real folder" href="/docs/concepts#the-nfs-bridge">
+    <p>The share mounts as a directory. grep it, open it in an editor, build against it.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🧰</span>} title="No FUSE" href="/docs/concepts#the-nfs-bridge">
+    <p>The built-in NFS client of the OS does the mount. No kernel extension, no daemon.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">⚡</span>} title="Lazy" href="/docs/concepts#lazy-reads">
+    <p>A peer fetches only the byte ranges that it reads, when it reads them.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🔄</span>} title="Live" href="/docs/concepts#live-changes">
+    <p>Edits, new files and deletions reach connected peers without a remount.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🔒</span>} title="Read-only" href="/docs/concepts#the-nfs-bridge">
+    <p>A consumer cannot change the files of the producer. Every write fails.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🔑</span>} title="Password-protected" href="/docs/commands#passwords">
+    <p>With a password, the ticket finds the share but does not open it.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🪞</span>} title="Mirror" href="/docs/concepts#mirror">
+    <p>Download the full tree, verified against the origin, and serve it as a second source.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🌐</span>} title="Browser" href="/docs/browser#the-webapp">
+    <p>Open a share in the webapp, or create one from a folder. No install, no backend.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">📦</span>} title="npx" href="/docs/browser#npx">
+    <p><code>npx agent-share</code> writes the files into a local folder, with no native binary.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🤖</span>} title="WebMCP" href="/docs/webmcp">
+    <p>The webapp publishes its actions as WebMCP tools, so an agent can drive it.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">🌍</span>} title="Multi-machine" href="/docs/networking#discovery">
+    <p>The local network over mDNS, the internet over the DHT and relays.</p>
+  </Cards.Card>
+  <Cards.Card icon={<span className="tile-emoji">💻</span>} title="macOS and Linux" href="/docs/getting-started#platforms">
+    <p>Mount works on macOS and Linux. Other platforms can serve.</p>
+  </Cards.Card>
+</Cards>
+
+## Where to go next
+
+<Cards>
+  <Cards.Card title="Getting started" href="/docs/getting-started" arrow />
+  <Cards.Card title="Concepts" href="/docs/concepts" arrow />
+  <Cards.Card title="Commands" href="/docs/commands" arrow />
+  <Cards.Card title="Browser and npx" href="/docs/browser" arrow />
+  <Cards.Card title="WebMCP" href="/docs/webmcp" arrow />
+  <Cards.Card title="Networking" href="/docs/networking" arrow />
+</Cards>

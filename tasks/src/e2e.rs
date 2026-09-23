@@ -717,7 +717,7 @@ impl Page {
         let (dir, blob_sha256) = make_share(files)?;
         let (producer, ticket) = serve(ctx.binary, dir.path(), password)?;
 
-        let target = format!("{}files/{ticket}{query}", ctx.url);
+        let target = format!("{}app/files/{ticket}{query}", ctx.url);
         run_browse(&["launch", "--headless", ctx.folder, &target])?;
         reap::track_browser(ctx.folder);
         let browser = Browser::new(ctx.folder.to_owned());
@@ -1244,7 +1244,7 @@ fn cell_password_web_dead_right(ctx: &Ctx<'_>) -> Res<()> {
     producer.interrupt();
 
     // Bound, not discarded: dropping the guard closes the window.
-    let _browser = open_window(ctx, &format!("{}files/{ticket}", ctx.url))?;
+    let _browser = open_window(ctx, &format!("{}app/files/{ticket}", ctx.url))?;
     wait_for_true(
         "/Password required/.test(document.body.innerText)",
         CONNECT_TIMEOUT,
@@ -1428,14 +1428,14 @@ fn cell_web_producer_webrtc(ctx: &Ctx<'_>) -> Res<()> {
     web_producer_over(ctx, "opfs", Some("webrtc"), |_| Ok(()))
 }
 
-/// Drive `/lab`'s share panel in `mode`, then open what it serves from the CLI.
+/// Drive `/app/lab`'s share panel in `mode`, then open what it serves from the CLI.
 fn web_producer_over(
     ctx: &Ctx<'_>,
     mode: &str,
     transport: Option<&str>,
     ready: impl Fn(&Browser) -> Res<()>,
 ) -> Res<()> {
-    let browser = open_window(ctx, &format!("{}lab", ctx.url))?;
+    let browser = open_window(ctx, &format!("{}app/lab", ctx.url))?;
     ready(&browser)?;
 
     let started = format!(
@@ -1702,7 +1702,8 @@ fn download() -> Res<Saved> {
 const FIXTURE_FILE_LEN: usize = "file 0 contents\n".len();
 
 /// Chrome below this cannot publish tools at all, so the rows would fail for a
-/// reason that is not a defect. 150 is the floor `docs/webmcp.md` names.
+/// reason that is not a defect. 150 is the floor the WebMCP docs name
+/// (`packages/agent-share-site/content/docs/webmcp.mdx`).
 const WEBMCP_MIN_CHROME: u32 = 150;
 
 /// Run a row's assertions in the page, and turn its report into a verdict.
@@ -1759,7 +1760,7 @@ fn run_webmcp(body: &str) -> Res<()> {
 ///
 /// A precheck runs before any window exists, so it cannot ask the page itself
 /// and settles for the version instead. That is the weaker of the two things
-/// `docs/webmcp.md` requires — the browser must also expose the property on the
+/// the WebMCP docs require — the browser must also expose the property on the
 /// origin under test — so a row whose browser is new enough but still publishes
 /// nothing fails on the guard at the top of [`run_webmcp`], naming what it
 /// found. Reported as a skip only where the version alone already settles it.
@@ -1894,7 +1895,7 @@ fn cell_seeder_propagation(ctx: &Ctx<'_>) -> Res<()> {
     let (mut seeder, _seeder_ticket) = serve(ctx.binary, copy.path(), None)?;
     origin.interrupt();
 
-    let _browser = open_window(ctx, &format!("{}files/{ticket}", ctx.url))?;
+    let _browser = open_window(ctx, &format!("{}app/files/{ticket}", ctx.url))?;
     let found = wait_for_true(
         "/added-live\\.txt/.test(document.body.innerText)",
         CONNECT_TIMEOUT,
@@ -1929,7 +1930,7 @@ fn cell_seeder_propagation_two_tabs(ctx: &Ctx<'_>) -> Res<()> {
     // fetches every slot and republishes what landed. `Seeding` is the label the
     // button takes once it holds everything, so waiting for it is waiting for
     // the bytes rather than for the click.
-    let _a = open_window(ctx, &format!("{}files/{ticket}", ctx.url))?;
+    let _a = open_window(ctx, &format!("{}app/files/{ticket}", ctx.url))?;
     wait_for_listing()?;
     click("Seed")?;
     wait_for_true(
@@ -1954,7 +1955,7 @@ fn cell_seeder_propagation_two_tabs(ctx: &Ctx<'_>) -> Res<()> {
     origin.interrupt();
 
     let folder_b = second_folder();
-    let _b = open_window_in(&folder_b, &format!("{}files/{ticket}", ctx.url))?;
+    let _b = open_window_in(&folder_b, &format!("{}app/files/{ticket}", ctx.url))?;
     wait_for_true_in(
         &folder_b,
         "/added-live\\.txt/.test(document.body.innerText)",
@@ -2251,7 +2252,7 @@ fn cell_password_no_producer(ctx: &Ctx<'_>) -> Res<()> {
     // Dead before the browser is even launched.
     producer.interrupt();
 
-    let target = format!("{}files/{ticket}", ctx.url);
+    let target = format!("{}app/files/{ticket}", ctx.url);
     run_browse(&["launch", "--headless", ctx.folder, &target])?;
     reap::track_browser(ctx.folder);
     let _browser = Browser::new(ctx.folder.to_owned());

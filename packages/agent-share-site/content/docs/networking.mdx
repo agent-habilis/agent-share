@@ -1,0 +1,71 @@
+---
+title: Networking
+description: How peers find each other, and which transport carries the bytes.
+---
+
+import { Callout } from 'nextra/components'
+
+# Networking
+
+## Discovery
+
+By default a share is reachable across machines. It uses three lookups:
+
+- **mDNS** finds peers on the local network.
+- **Mainline DHT** finds peers on the internet.
+- **The relay ladder** gives a rendezvous where peers meet before they connect.
+
+To restrict a share, name the lookups that you want. When you name one, only
+the named ones are used:
+
+```sh
+agent-share serve ./notes --mdns                 # local network only
+agent-share serve ./notes --dht --relay          # internet, no mDNS
+agent-share serve ./notes --relay https://relay.example.com,https://backup.example.com
+```
+
+A bare `--relay` uses the default ladder. `--relay <url>[,<url>…]` gives a
+custom ladder, in order. `--public` names the default preset explicitly.
+
+`--swarm <id>` uses the discovery config of an existing swarm id. A loopback
+swarm id keeps everything on one host. `--swarm` cannot be used with the
+lookup flags.
+
+## Transports
+
+The direction matters, so each row names a producer and a consumer.
+
+| producer → consumer | carries bytes | never |
+|---|---|---|
+| native → native | direct iroh QUIC | **WebRTC**, **the relay** |
+| native → web | WebRTC | the relay |
+| web → native | WebRTC | the relay |
+| web → web | WebRTC | the relay |
+| native → node | WebRTC | the relay |
+
+**The relay never carries file data.** It helps with the hole punch, carries
+the WebRTC handshake and gossips. The bytes go peer to peer, or they do not go.
+
+A browser tab is either publicly reachable or not reachable. It has no mDNS, no
+DHT and no loopback peers. So the ticket of a tab gives a relay URL and no IP
+address, and a native consumer reads that as "use WebRTC".
+
+## Why WebRTC only for browsers
+
+WebRTC exists because a browser cannot speak QUIC. It never carries bytes
+between two native peers. In a measurement where the transport was the only
+variable, the data channel gave **6× less throughput at 36× the latency** than
+plain QUIC.
+
+## When the preferred path fails
+
+No end falls back to the relay.
+
+- A **browser** has no other path when ICE fails, so the mount fails.
+- A **native** peer that cannot punch a direct path to another native peer
+  waits until the probe deadline. Then it refuses to connect.
+
+<Callout type="info">
+  `--transport webrtc` forces a native consumer onto the data channel. It
+  exists for tests and benchmarks.
+</Callout>

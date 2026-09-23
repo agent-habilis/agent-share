@@ -24,13 +24,13 @@ describe('sharePath / shareUrl', () => {
   test('defaults to the files view', () => {
     expect(sharePath(TICKET)).toBe(`/files/${encodeURIComponent(TICKET)}`)
     expect(shareUrl(TICKET)).toBe(
-      `http://localhost/files/${encodeURIComponent(TICKET)}`,
+      `http://localhost/app/files/${encodeURIComponent(TICKET)}`,
     )
   })
 
-  test('shareUrl is origin-absolute', () => {
+  test('shareUrl is origin-absolute, under the app base', () => {
     expect(shareUrl(TICKET, 'info')).toBe(
-      `http://localhost/info/${encodeURIComponent(TICKET)}`,
+      `http://localhost/app/info/${encodeURIComponent(TICKET)}`,
     )
   })
 })
@@ -58,6 +58,21 @@ describe('parseRoute', () => {
       ticket: TICKET,
       path: [],
     })
+  })
+
+  test('reads a pathname that still carries the app base', () => {
+    expect(parseRoute(`/app/files/${TICKET}`)).toEqual({
+      view: 'files',
+      ticket: TICKET,
+      path: [],
+    })
+    expect(parseRoute('/app')).toBeNull()
+    expect(parseRoute('/app/')).toBeNull()
+  })
+
+  test('defaults to the address bar, base included', () => {
+    window.history.replaceState(null, '', `/app/info/${TICKET}`)
+    expect(parseRoute()).toEqual({ view: 'info', ticket: TICKET, path: [] })
   })
 
   test('ignores trailing slashes', () => {
@@ -123,6 +138,7 @@ describe('the preview route', () => {
     expect(previewSegments(`/preview/${TICKET}/docs/note.md`)).toEqual(['docs', 'note.md'])
     expect(previewSegments(`/preview/${TICKET}`)).toEqual([])
     expect(previewSegments(`/preview/${TICKET}/`)).toEqual([])
+    expect(previewSegments(`/app/preview/${TICKET}/docs/note.md`)).toEqual(['docs', 'note.md'])
   })
 
   test('previewSegments splits before decoding', () => {
@@ -190,8 +206,8 @@ describe('transport on the route', () => {
   })
 
   test('shareUrl stays clean — the pin is local, not part of the capability', () => {
-    window.history.replaceState(null, '', `/files/${TICKET}?transport=webrtc`)
-    expect(shareUrl(TICKET)).toBe(`http://localhost/files/${TICKET}`)
+    window.history.replaceState(null, '', `/app/files/${TICKET}?transport=webrtc`)
+    expect(shareUrl(TICKET)).toBe(`http://localhost/app/files/${TICKET}`)
   })
 
 })
@@ -207,6 +223,11 @@ describe('parseShareInput', () => {
       TICKET,
     )
     expect(parseShareInput(`/info/${encodeURIComponent(TICKET)}`)).toBe(TICKET)
+  })
+
+  test('accepts share URLs under the app base', () => {
+    expect(parseShareInput(`http://localhost/app/files/${TICKET}`)).toBe(TICKET)
+    expect(parseShareInput(`/app/info/${TICKET}`)).toBe(TICKET)
   })
 
   test('returns null for empty or non-share URLs', () => {

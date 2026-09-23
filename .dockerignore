@@ -16,6 +16,8 @@ crates/agent-share-wasm-client/target
 # Front-end installs and output: reinstalled and rebundled in the image.
 **/node_modules
 dist
+packages/agent-share-site/.next
+packages/agent-share-site/out
 
 # The important ones. This is where the wasm and its glue land — the browser
 # target in `src/glue`, the CommonJS one in `node` — plus the hash of this

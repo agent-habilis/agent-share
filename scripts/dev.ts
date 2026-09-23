@@ -1,5 +1,5 @@
 /**
- * Dev server: HTML multipage (`/` + `/lab`) plus the wasm binary at a
+ * Dev server: HTML multipage (`/app` + `/app/lab`) plus the wasm binary at a
  * content-addressed HTTP path. The crate's glue defaults to `file://` for that
  * binary; callers pass the hashed path instead (see `agent-share-wasm`).
  *
@@ -16,8 +16,12 @@
  * regenerates `agent-share-wasm`'s `path.ts` so `--hot` rebundles the app onto the new
  * hash. A rebuild now heals itself; nobody has to remember to restart.
  *
- * `/*` is the SPA catch-all so `/files/<ticket>` and `/info/<ticket>` hit the
- * app; `/lab` and `/wasm/:name` are more specific and win first. That
+ * `/app/*` is the SPA catch-all so `/app/files/<ticket>` and `/app/info/<ticket>`
+ * hit the app; `/app/lab` and `/wasm/:name` are more specific and win first.
+ * Everything no route claims — the landing page and docs — is the site's
+ * static export, served with the production rules from `serve.ts`. It is built
+ * once by `bun run dev`, so docs edits need a restart; for live docs editing,
+ * run `next dev` in `packages/agent-share-site`. That
  * specificity is the point of the `/wasm/` prefix — at the URL root the
  * catch-all answered a stale hash with `index.html`, which reached the browser
  * as a wasm "expected magic word" error naming the wrong problem entirely.
@@ -37,6 +41,7 @@ import { fileURLToPath } from 'node:url'
 import index from '../packages/agent-share-web/src/pages/index.html'
 import lab from '../packages/agent-share-web/src/pages/lab/index.html'
 import { SW_ENTRY } from './entrypoints.ts'
+import { createFetch } from './serve.ts'
 import {
   tryWasmAsset,
   wasmResponse,
@@ -103,8 +108,8 @@ if (!initial) {
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 3000),
   routes: {
-    '/lab': lab,
-    '/lab/': lab,
+    '/app/lab': lab,
+    '/app/lab/': lab,
     // The pre-hash path, answered explicitly. Without this the SPA catch-all
     // below takes it and hands back HTML, which surfaces as a wasm "expected
     // magic word" error — technically loud, but it names the wrong problem.
@@ -158,8 +163,10 @@ const server = Bun.serve({
         { status: 404, headers: { 'content-type': 'text/plain;charset=utf-8' } },
       )
     },
-    '/*': index,
+    '/app': index,
+    '/app/*': index,
   },
+  fetch: createFetch(new URL('../packages/agent-share-site/out/', import.meta.url)),
   development: {
     hmr: true,
     console: true,

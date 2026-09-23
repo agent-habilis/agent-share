@@ -30,7 +30,7 @@ await writeWasmPath(asset)
 
 const result = await Bun.build({
   entrypoints: [APP_HTML, LAB_HTML],
-  outdir: './dist',
+  outdir: './dist/app',
   minify: true,
   target: 'browser',
 })
@@ -78,17 +78,25 @@ await Bun.write(`./dist${asset.path}.gz`, Bun.gzipSync(asset.bytes, { level: 9 }
 //
 // Bun writes chunk URLs relative to the page, and no page is served from the
 // depth its file sits at: the SPA shell answers every route, so under
-// `/files/<ticket>` a `./chunk-…` resolves to `/files/chunk-…` and 404s into a
-// blank page, and `/lab` is served a level up from `dist/lab/`. Every chunk
-// lands at the root of `dist/`, so collapsing a leading `../` run to `/` is
-// right for any page — which is why this walks the outputs rather than naming
-// one. (`publicPath: '/'` looks like the config-level answer but prepends
-// rather than replaces, leaving `/../chunk-…` for anything below the root.)
+// `/app/files/<ticket>` a `./chunk-…` resolves to `/app/files/chunk-…` and 404s
+// into a blank page, and `/app/lab` is served a level up from `dist/app/lab/`.
+// Every chunk lands at the root of `dist/app/`, so collapsing a leading `../`
+// run to `/app/` is right for any page — which is why this walks the outputs
+// rather than naming one. (`publicPath: '/app/'` looks like the config-level
+// answer but prepends rather than replaces, leaving `/app/../chunk-…` for
+// anything below the root.)
 for (const output of result.outputs) {
   if (output.path.endsWith('.html')) {
     const html = await Bun.file(output.path).text()
-    await Bun.write(output.path, html.replace(/(src|href)="(?:\.\.?\/)+/g, '$1="/'))
+    await Bun.write(output.path, html.replace(/(src|href)="(?:\.\.?\/)+/g, '$1="/app/'))
   }
   console.log(`  ${output.path}`)
 }
 console.log(`  dist${asset.path} (+.br, +.gz)`)
+
+// The landing page and docs: a Next static export, merged in at the root of
+// `dist/` around the app. It owns `/` and its own `404.html`; `serve.ts` gives
+// the SPA shell only to paths under `/app`.
+await Bun.$`bun run --filter agent-share-site build`
+await Bun.$`cp -R packages/agent-share-site/out/. dist/`
+console.log('  dist/ (site: index.html, docs/, 404.html)')

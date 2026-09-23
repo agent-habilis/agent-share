@@ -108,7 +108,12 @@ export async function tryWasmAsset(): Promise<WasmAsset | null> {
     .update(bytes)
     .digest('hex')
     .slice(0, 12)
-  const name = `agent_share_wasm_client_bg.${hash}.wasm`
+  // `.bin`, not `.wasm`: Cloudflare caches by extension alone, and `BIN` is on
+  // its default list where `WASM` is not. The binary is most of a first visit's
+  // bytes, so under `.wasm` every new visitor pulled it from the origin. Servers
+  // send `application/wasm` whatever the name, which is all
+  // `instantiateStreaming` checks.
+  const name = `agent_share_wasm_client_bg.${hash}.bin`
   return { bytes, hash, name, path: `${WASM_DIR}/${name}` }
 }
 

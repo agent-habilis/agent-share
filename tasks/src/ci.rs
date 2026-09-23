@@ -45,6 +45,8 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         }
         cmd!(sh, "bun run typecheck").quiet().run()?;
         cmd!(sh, "bun test").quiet().run()?;
+        // Outside bunfig's `root = "packages"`, so the run above never finds it.
+        cmd!(sh, "bun test ./scripts").quiet().run()?;
     } else {
         output::status("Skipping", "the web app (bun is not installed)");
     }

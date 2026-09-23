@@ -1,0 +1,69 @@
+---
+title: Concepts
+description: Tickets, producers and consumers, lazy reads, live changes, and the NFS bridge.
+---
+
+import { Callout } from 'nextra/components'
+
+# Concepts
+
+## Producer and consumer
+
+The **producer** is the machine that runs `agent-share serve <dir>`. It holds
+the files. The **consumer** is a machine that reads them. A consumer can be the
+native binary, a browser tab, or the `npx` receiver.
+
+## Ticket
+
+`serve` prints a ticket. The ticket is a bearer capability: anyone who has it
+can find the share. It carries what a consumer needs to reach the producer. It
+is bare ASCII Base58, so it is safe in a URL and in a
+shell.
+
+agent-share started as `ahsw mount` in
+[agent-habilis/swarm](https://github.com/agent-habilis/swarm), and then forked.
+It uses its own QUIC ALPN, so both ends must run agent-share. The ticket uses
+the same Base58Check framing as the other agent-habilis tools, but it has no
+glyph prefix.
+
+When the share has a password, the ticket finds the share but does not open
+it. The consumer must also give the password.
+
+## Lazy reads
+
+Serve scans the folder for metadata only: names, sizes and modes. Nothing is
+hashed or sent up front. A consumer fetches the byte ranges that it reads, when
+it reads them. A 10 GB folder where a peer opens one file costs the size of
+that file.
+
+## Live changes
+
+The producer watches the served folder. Edits, new files and deletions reach
+connected peers without a remount.
+
+A file's position in the manifest is the address that reads use. These
+positions are append-only for the life of a `serve`. A deleted file leaves its
+slot empty instead of renumbering the files after it. If slots were reused, a
+peer with an older listing could read the bytes of one file under the name of
+another, with no error.
+
+## The NFS bridge
+
+The consumer runs a small NFSv3 server on the loopback interface. The OS mounts
+it with its own NFS client: `mount_nfs` on macOS, `mount -t nfs` on Linux. The
+bridge turns NFS reads into requests to the producer.
+
+That is why agent-share needs no FUSE, no kernel extension and no daemon. The
+bridge lives only as long as the mount command.
+
+<Callout type="info">
+  The mount is read-only. Every write fails.
+</Callout>
+
+## Mirror
+
+A mount holds no bytes, so it cannot serve the share to others. `agent-share
+mirror` does the opposite trade: it downloads the full tree. It hashes each
+file on arrival and compares it with the root that the origin publishes. It
+refuses a copy that changed in transit. The result is an ordinary directory
+that you can `serve` as a second source.

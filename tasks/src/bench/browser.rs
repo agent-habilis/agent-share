@@ -1,4 +1,4 @@
-//! The browser cells: a real headless Chrome driving `/lab`.
+//! The browser cells: a real headless Chrome driving `/app/lab`.
 //!
 //! No application code changes to make this drivable. `/lab` is click-driven,
 //! but it is built on stable committed DOM ids (`packages/agent-share-web/src/pages/lab/consumer.tsx`,
@@ -119,7 +119,7 @@ pub(crate) fn cells(
     }
 }
 
-/// Start the dev server and land a headless window on `/lab`.
+/// Start the dev server and land a headless window on `/app/lab`.
 ///
 /// `scripts/dev.ts` rather than `scripts/start.ts`: it needs only the wasm dist, where
 /// the prod server would additionally need `bun run build`. The `.wasm` is byte-identical
@@ -140,7 +140,7 @@ fn prepare() -> Result<(Proc, Browser), String> {
 
     let (server, url) = start_dev_server(&root).map_err(|error| error.to_string())?;
     let folder = root.display().to_string();
-    let lab = format!("{url}lab");
+    let lab = format!("{url}app/lab");
     output::status("Launching", &format!("headless chrome on {lab}"));
 
     run_browse(&["launch", "--headless", &folder, &lab])
@@ -462,7 +462,7 @@ fn evaluate_at(expression: &str, folder: Option<&str>) -> Res<String> {
 /// not a flaky app.
 ///
 /// Losing it costs nothing that matters: the binary is served from a
-/// content-addressed URL (`…_bg.<hash>.wasm`, see `scripts/wasm-asset.ts`), so a
+/// content-addressed URL (`…_bg.<hash>.bin`, see `scripts/wasm-asset.ts`), so a
 /// stale entry is unreachable by construction rather than by cache-clearing —
 /// the hash moves when the bytes do. The reload that follows also passes
 /// `ignoreCache`. And if the browser really is wedged rather than slow, the very

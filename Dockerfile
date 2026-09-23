@@ -20,9 +20,9 @@
 FROM rust:1.95-bookworm AS build
 
 # Pinned, and lifted from the official image rather than piped from an install
-# script. `bun.lock` is lockfileVersion 1; a Bun that wants to migrate it would
+# script. `bun.lock` is lockfileVersion 3; a Bun that cannot read it would
 # fail `--frozen-lockfile`, so this tracks the version developers run.
-COPY --from=oven/bun:1.3.14 /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=oven/bun:1.4.2 /usr/local/bin/bun /usr/local/bin/bun
 
 # `ring`'s C core is compiled for wasm32 and gcc cannot emit it; Debian's clang
 # can, which is what `build-wasm.ts` looks for on PATH. `llvm` supplies
@@ -105,7 +105,7 @@ RUN bun build ./scripts/serve.ts --target=bun --outfile=/app/out/scripts/serve.j
 # --------------------------------------------------------------------------
 # Stage 2 — runtime.
 # --------------------------------------------------------------------------
-FROM oven/bun:1.3.14-slim AS runtime
+FROM oven/bun:1.4.2-slim AS runtime
 WORKDIR /app
 
 ENV PORT=3000
