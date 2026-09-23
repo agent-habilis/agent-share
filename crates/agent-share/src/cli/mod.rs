@@ -126,7 +126,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     // the current folder, so the command `serve` prints runs as pasted.
     let Some(ticket) = cli.ticket else {
         anyhow::bail!(
-            "usage: agent-share <ticket> [target], agent-share serve <dir>, or agent-share bench"
+            "usage: agent-share <ticket> [target], agent-share serve <dir>, agent-share seed <ticket> <dest>, or agent-share bench"
         );
     };
     let mountpoint = cli.mountpoint.unwrap_or_else(|| PathBuf::from("."));

@@ -81,6 +81,24 @@ fn serve_prints_a_bare_mount_command_and_a_web_link() {
 }
 
 #[test]
+fn the_usage_error_names_every_command() {
+    let output = test_cmd().output().expect("run agent-share");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "no arguments is a usage error");
+    for command in [
+        "agent-share <ticket>",
+        "agent-share serve",
+        "agent-share seed",
+        "agent-share bench",
+    ] {
+        assert!(
+            stderr.contains(command),
+            "the usage error must name `{command}`: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn the_consumer_form_needs_no_target() {
     let output = test_cmd()
         .arg("not-a-ticket")
