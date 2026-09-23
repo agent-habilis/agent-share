@@ -288,6 +288,7 @@ pub(crate) async fn attach(
         },
     };
     let share_mesh = share_mesh.map(Arc::new);
+    let mut serving_updates = None;
     if let Some(mesh) = &share_mesh {
         mesh.set_tree(tree_fingerprint).await;
         mesh.spawn_report(json);
@@ -298,7 +299,10 @@ pub(crate) async fn attach(
         // republished on a timer rather than per chunk because it rides a CRDT
         // that keeps history, and a large file must not produce one revision
         // per 64 KiB.
-        spawn_serving_updates(Arc::clone(&source_set), Arc::clone(mesh));
+        serving_updates = Some(spawn_serving_updates(
+            Arc::clone(&source_set),
+            Arc::clone(mesh),
+        ));
     }
 
     tokio::signal::ctrl_c()
@@ -309,16 +313,27 @@ pub(crate) async fn attach(
     }
     // Before the endpoint closes: `Left` has to go out over it, and peers that
     // never hear it wait out a silence timeout counting us as present.
-    // `try_unwrap` because the serving updater holds the other reference: it
-    // runs until the process ends, so the goodbye is skipped only if that task
-    // is mid-publish, which is a race worth losing rather than blocking on.
-    if let Some(mesh) = share_mesh.and_then(|mesh| Arc::try_unwrap(mesh).ok()) {
-        mesh.leave().await;
-    }
+    leave_mesh(share_mesh, serving_updates).await;
     // Best-effort: leave nothing behind when the folder is empty / unused.
     let _ = std::fs::remove_dir(&mountpoint);
     endpoint.close().await;
     Ok(())
+}
+
+/// The serving updater holds the other reference and never ends by itself, so
+/// it is stopped first; otherwise `try_unwrap` always fails and the goodbye is
+/// never sent.
+async fn leave_mesh(
+    share_mesh: Option<Arc<ShareMesh>>,
+    serving_updates: Option<tokio::task::JoinHandle<()>>,
+) {
+    if let Some(task) = serving_updates {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(mesh) = share_mesh.and_then(|mesh| Arc::try_unwrap(mesh).ok()) {
+        mesh.leave().await;
+    }
 }
 
 /// Bind the endpoint this consumer dials and meshes on, seeded with the
@@ -1380,7 +1395,10 @@ async fn run_quiet(program: &str, args: &[&std::ffi::OsStr]) -> bool {
 /// transfer's worth of edits. Nothing is lost by lagging — an under-stated card
 /// costs a peer one round trip, while an over-stated one sends readers to bytes
 /// that are not there.
-fn spawn_serving_updates(sources: Arc<super::sources::SourceSet>, mesh: Arc<ShareMesh>) {
+fn spawn_serving_updates(
+    sources: Arc<super::sources::SourceSet>,
+    mesh: Arc<ShareMesh>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut last = None;
         loop {
@@ -1394,7 +1412,7 @@ fn spawn_serving_updates(sources: Arc<super::sources::SourceSet>, mesh: Arc<Shar
                 last = Some(next);
             }
         }
-    });
+    })
 }
 
 /// Where a mount keeps the chunks it reads.
