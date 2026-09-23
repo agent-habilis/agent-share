@@ -255,6 +255,12 @@ body:has(.dots) {
   color: #fff;
 }
 
+/* The dark theme's accent is light enough that white on it reads at about
+   2.4:1; the page color reads at about 7.8:1. */
+.dark .btn-primary {
+  color: var(--x-color-nextra-bg);
+}
+
 .hero-link {
   color: var(--muted);
   text-decoration: none;
