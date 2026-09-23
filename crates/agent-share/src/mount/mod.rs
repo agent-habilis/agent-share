@@ -132,6 +132,15 @@ fn announce(json: bool, serving: &str, command: &str) {
     crate::util::output::status_out("Mount", command);
 }
 
+/// Say at once that a Ctrl-C was heard: the clean shutdown after it takes
+/// seconds, and without this line nothing shows that the key did anything.
+/// Human output only; json mode stays the one line a script reads.
+fn announce_stopping(json: bool) {
+    if !json {
+        crate::util::output::status("Stopping", "closing connections…");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

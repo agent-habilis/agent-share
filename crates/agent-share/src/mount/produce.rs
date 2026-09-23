@@ -40,6 +40,10 @@ pub(crate) async fn serve(
     password: Option<&str>,
     json: bool,
 ) -> Result<()> {
+    // Listening from the first line, so a Ctrl-C during startup also gets the
+    // clean shutdown rather than the default action, which kills the process
+    // without a goodbye to the mesh.
+    let mut ctrl_c = tokio::spawn(tokio::signal::ctrl_c());
     let root = dir
         .canonicalize()
         .with_context(|| format!("resolving {}", dir.display()))?;
@@ -115,33 +119,39 @@ pub(crate) async fn serve(
     // failure we stand up a plain Router with just the share's protocols and
     // carry on without peer counts, which is exactly the old behaviour.
     let mut fallback_router = None;
+    let mut stopping = false;
     let joined = match mesh_target {
         None => None,
         Some(target) => Some(
-            super::mesh::join(super::mesh::JoinOpts {
-                // Resolved above, before the endpoint was bound: on a protected share
-                // that resolution is also where a wrong password would have been
-                // caught, and it must not wait on a background join.
-                target,
-                shared: fofoca::runtime::InjectedEndpoint {
-                    endpoint: endpoint.clone(),
-                    webrtc: webrtc.clone(),
-                },
-                protocols: protocols(),
-                role: super::mesh::Role::Producer,
-                // Over the bytes `OP_MANIFEST` actually serves, not a re-encode of the
-                // struct. The producer holds them, so it can fingerprint the exact
-                // thing a consumer will hash on the other side.
-                tree: Some(agent_share_proto::manifest::manifest_fingerprint(
-                    &tree.manifest_bytes(),
-                )),
-                // What this peer can actually hand over. An origin holds everything; a
-                // seed serving a partial copy holds a subset, and says so rather than
-                // letting readers discover the gaps by asking.
-                serving: tree.serving(),
-                // The producer never clears IP: it is the peer everyone else dials.
-                transports: fofoca::net::TransportOpts::default(),
-            })
+            finish_despite_ctrl_c(
+                &mut ctrl_c,
+                &mut stopping,
+                json,
+                super::mesh::join(super::mesh::JoinOpts {
+                    // Resolved above, before the endpoint was bound: on a protected share
+                    // that resolution is also where a wrong password would have been
+                    // caught, and it must not wait on a background join.
+                    target,
+                    shared: fofoca::runtime::InjectedEndpoint {
+                        endpoint: endpoint.clone(),
+                        webrtc: webrtc.clone(),
+                    },
+                    protocols: protocols(),
+                    role: super::mesh::Role::Producer,
+                    // Over the bytes `OP_MANIFEST` actually serves, not a re-encode of the
+                    // struct. The producer holds them, so it can fingerprint the exact
+                    // thing a consumer will hash on the other side.
+                    tree: Some(agent_share_proto::manifest::manifest_fingerprint(
+                        &tree.manifest_bytes(),
+                    )),
+                    // What this peer can actually hand over. An origin holds everything; a
+                    // seed serving a partial copy holds a subset, and says so rather than
+                    // letting readers discover the gaps by asking.
+                    serving: tree.serving(),
+                    // The producer never clears IP: it is the peer everyone else dials.
+                    transports: fofoca::net::TransportOpts::default(),
+                }),
+            )
             .await,
         ),
     };
@@ -163,22 +173,68 @@ pub(crate) async fn serve(
         }
     };
 
-    // Nothing to accept here any more; wait for ctrl-c so the mesh can announce
-    // a graceful `Left` instead of peers waiting out a silence timeout — and,
-    // while waiting, keep the card's `tree` honest.
-    //
-    // A producer whose tree changes under the watcher would otherwise keep
-    // advertising the fingerprint it started with, which is worse than
-    // advertising none: a consumer would read agreement where there is none and
-    // treat a diverged peer as a valid source. `set_tree` dedupes by value, so
-    // the rescan timer firing with nothing changed costs nothing.
-    match &share_mesh {
+    if !stopping {
+        serve_until_ctrl_c(share_mesh.as_ref(), &tree, &mut ctrl_c).await;
+        super::announce_stopping(json);
+    }
+    if let Some(mesh) = share_mesh {
+        mesh.leave().await;
+    }
+    drop(fallback_router);
+    endpoint.close().await;
+    Ok(())
+}
+
+/// The Ctrl-C listener `serve` starts on its first line.
+type CtrlC = tokio::task::JoinHandle<std::io::Result<()>>;
+
+/// Run `work` to the end even when Ctrl-C lands first, and say `Stopping` at
+/// once if it does.
+///
+/// The work is a mesh join: dropping it half-done would drop the node's
+/// endpoints without closing them, which is the ungraceful abort a clean
+/// shutdown exists to avoid. `stopping` records that the Ctrl-C was used up,
+/// because a finished `JoinHandle` must not be polled again.
+async fn finish_despite_ctrl_c<T>(
+    ctrl_c: &mut CtrlC,
+    stopping: &mut bool,
+    json: bool,
+    work: impl Future<Output = T>,
+) -> T {
+    // Boxed: the join future is large, and pinned inline it bloats every
+    // caller future up to `main`.
+    let mut work = Box::pin(work);
+    tokio::select! {
+        done = &mut work => done,
+        _ = &mut *ctrl_c => {
+            *stopping = true;
+            super::announce_stopping(json);
+            work.await
+        }
+    }
+}
+
+/// Nothing to accept here any more; wait for ctrl-c so the mesh can announce
+/// a graceful `Left` instead of peers waiting out a silence timeout — and,
+/// while waiting, keep the card's `tree` honest.
+///
+/// A producer whose tree changes under the watcher would otherwise keep
+/// advertising the fingerprint it started with, which is worse than
+/// advertising none: a consumer would read agreement where there is none and
+/// treat a diverged peer as a valid source. `set_tree` dedupes by value, so
+/// the rescan timer firing with nothing changed costs nothing.
+async fn serve_until_ctrl_c(
+    share_mesh: Option<&super::mesh::ShareMesh>,
+    tree: &LiveTree,
+    ctrl_c: &mut CtrlC,
+) {
+    match share_mesh {
         Some(mesh) => {
             use tokio::sync::broadcast::error::RecvError;
             let mut updates = tree.subscribe();
             loop {
                 tokio::select! {
-                    _ = tokio::signal::ctrl_c() => break,
+                    _ = &mut *ctrl_c => break,
                     update = updates.recv() => match update {
                         // A lagged watcher has missed frames but the tree is
                         // still readable, so recompute rather than give up.
@@ -202,7 +258,7 @@ pub(crate) async fn serve(
                         }
                         Err(RecvError::Closed) => {
                             // The watcher is gone; the share still serves.
-                            let _ = tokio::signal::ctrl_c().await;
+                            let _ = (&mut *ctrl_c).await;
                             break;
                         }
                     },
@@ -210,15 +266,9 @@ pub(crate) async fn serve(
             }
         }
         None => {
-            let _ = tokio::signal::ctrl_c().await;
+            let _ = ctrl_c.await;
         }
     }
-    if let Some(mesh) = share_mesh {
-        mesh.leave().await;
-    }
-    drop(fallback_router);
-    endpoint.close().await;
-    Ok(())
 }
 
 /// What a copy carries about the share it came from, all of it optional and

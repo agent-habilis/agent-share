@@ -308,6 +308,7 @@ pub(crate) async fn attach(
     tokio::signal::ctrl_c()
         .await
         .context("waiting for Ctrl-C failed")?;
+    super::announce_stopping(json);
     if mounted {
         unmount(&mountpoint).await;
     }
