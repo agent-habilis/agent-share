@@ -59,7 +59,20 @@ pub(crate) async fn serve(
     let (tree, description) = open_tree(&root, authorship)?;
 
     let lookups = resolve_transfer_lookups(swarm, flags)?;
-    let (endpoint, mut ticket, secret, webrtc) = bind(lookups, inherited_secret).await?;
+    // Raced too: off loopback, `bind` waits for the relay, which can take
+    // seconds, and a Ctrl-C there has to be answered at once.
+    let mut stopping = false;
+    let bound = finish_despite_ctrl_c(
+        &mut ctrl_c,
+        &mut stopping,
+        json,
+        bind(lookups, inherited_secret),
+    );
+    let (endpoint, mut ticket, secret, webrtc) = bound.await?;
+    if stopping {
+        endpoint.close().await;
+        return Ok(());
+    }
     ticket.author = named_author;
     if ticket.author.is_some() {
         ticket.flags |= agent_share_proto::ticket::TICKET_FLAG_SIGNED;
@@ -119,7 +132,6 @@ pub(crate) async fn serve(
     // failure we stand up a plain Router with just the share's protocols and
     // carry on without peer counts, which is exactly the old behaviour.
     let mut fallback_router = None;
-    let mut stopping = false;
     let joined = match mesh_target {
         None => None,
         Some(target) => Some(
