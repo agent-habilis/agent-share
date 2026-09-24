@@ -40,12 +40,12 @@ rust-version = "1.93"
 # a path dep to a sibling checkout needed no round trip. fofoca cuts tags
 # (vX.Y.Z); name the tag, never a raw rev, and keep it in step with
 # agent-gossip's.
-fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "d9434eec9acf81542acea56bba8e86439c8cb8ee" }
-fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", rev = "d9434eec9acf81542acea56bba8e86439c8cb8ee", default-features = false }
-fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "d9434eec9acf81542acea56bba8e86439c8cb8ee" }
+fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "eebfd2fb1184480e0299b21b90ba3bf0506adfd1" }
+fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", rev = "eebfd2fb1184480e0299b21b90ba3bf0506adfd1", default-features = false }
+fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "eebfd2fb1184480e0299b21b90ba3bf0506adfd1" }
 # The content-addressed chunk store, a member of the same monorepo since
 # v0.6.0 (it grew up in this repo under crates/fofoca-chunks and moved).
-fofoca-chunks = { git = "https://github.com/fofoca-network/fofoca", rev = "d9434eec9acf81542acea56bba8e86439c8cb8ee" }
+fofoca-chunks = { git = "https://github.com/fofoca-network/fofoca", rev = "eebfd2fb1184480e0299b21b90ba3bf0506adfd1" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
