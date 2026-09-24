@@ -18,6 +18,10 @@ use crate::file::human_bytes;
 use crate::lookup::build_endpoint;
 use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 
+/// The webapp's files view, which takes the ticket as its last path segment.
+/// Must match `shareUrl()` in `packages/agent-share-web/src/lib/ticket`.
+const WEB_APP_FILES_URL: &str = "https://agent-share.dev/app/files/";
+
 /// Producer: share `dir` read-only. Scans at startup, then rescans whenever
 /// the tree changes and publishes the difference to anyone watching, so a
 /// consumer sees edits without remounting. Prints the consumer's
@@ -36,6 +40,10 @@ pub(crate) async fn serve(
     password: Option<&str>,
     json: bool,
 ) -> Result<()> {
+    // Listening from the first line, so a Ctrl-C during startup also gets the
+    // clean shutdown rather than the default action, which kills the process
+    // without a goodbye to the mesh.
+    let mut ctrl_c = tokio::spawn(tokio::signal::ctrl_c());
     let root = dir
         .canonicalize()
         .with_context(|| format!("resolving {}", dir.display()))?;
@@ -51,7 +59,20 @@ pub(crate) async fn serve(
     let (tree, description) = open_tree(&root, authorship)?;
 
     let lookups = resolve_transfer_lookups(swarm, flags)?;
-    let (endpoint, mut ticket, secret, webrtc) = bind(lookups, inherited_secret).await?;
+    // Raced too: off loopback, `bind` waits for the relay, which can take
+    // seconds, and a Ctrl-C there has to be answered at once.
+    let mut stopping = false;
+    let bound = finish_despite_ctrl_c(
+        &mut ctrl_c,
+        &mut stopping,
+        json,
+        bind(lookups, inherited_secret),
+    );
+    let (endpoint, mut ticket, secret, webrtc) = bound.await?;
+    if stopping {
+        endpoint.close().await;
+        return Ok(());
+    }
     ticket.author = named_author;
     if ticket.author.is_some() {
         ticket.flags |= agent_share_proto::ticket::TICKET_FLAG_SIGNED;
@@ -82,15 +103,13 @@ pub(crate) async fn serve(
 
     let hashes = Some(open_hash_cache(auth.token()));
 
-    // Shell-quoted: the hint is printed for copy-paste (and captured verbatim
-    // by scripts in json mode), so a dir name with a space must stay one word.
-    // Target parent for the consumer — it creates `agent-share-…/` under this.
-    let mount_hint = super::shell_word(".");
-    super::announce(
-        json,
-        &description,
-        &format!("agent-share {} {mount_hint}", ticket.encode()),
-    );
+    // No target: the consumer mounts under the current folder by default.
+    let encoded = ticket.encode();
+    super::announce(json, &description, &format!("agent-share {encoded}"));
+    // Human output only, for the same reason as the password note below.
+    if !json {
+        crate::util::output::status_out("Open", &format!("{WEB_APP_FILES_URL}{encoded}"));
+    }
     // The password is deliberately *not* in that command. It travels out of
     // band — putting it in the line people paste into chat alongside the ticket
     // would defeat the whole point — so say so rather than let the recipient
@@ -116,30 +135,35 @@ pub(crate) async fn serve(
     let joined = match mesh_target {
         None => None,
         Some(target) => Some(
-            super::mesh::join(super::mesh::JoinOpts {
-                // Resolved above, before the endpoint was bound: on a protected share
-                // that resolution is also where a wrong password would have been
-                // caught, and it must not wait on a background join.
-                target,
-                shared: fofoca::runtime::InjectedEndpoint {
-                    endpoint: endpoint.clone(),
-                    webrtc: webrtc.clone(),
-                },
-                protocols: protocols(),
-                role: super::mesh::Role::Producer,
-                // Over the bytes `OP_MANIFEST` actually serves, not a re-encode of the
-                // struct. The producer holds them, so it can fingerprint the exact
-                // thing a consumer will hash on the other side.
-                tree: Some(agent_share_proto::manifest::manifest_fingerprint(
-                    &tree.manifest_bytes(),
-                )),
-                // What this peer can actually hand over. An origin holds everything; a
-                // mirror serving a partial copy holds a subset, and says so rather than
-                // letting readers discover the gaps by asking.
-                serving: tree.serving(),
-                // The producer never clears IP: it is the peer everyone else dials.
-                transports: fofoca::net::TransportOpts::default(),
-            })
+            finish_despite_ctrl_c(
+                &mut ctrl_c,
+                &mut stopping,
+                json,
+                super::mesh::join(super::mesh::JoinOpts {
+                    // Resolved above, before the endpoint was bound: on a protected share
+                    // that resolution is also where a wrong password would have been
+                    // caught, and it must not wait on a background join.
+                    target,
+                    shared: fofoca::runtime::InjectedEndpoint {
+                        endpoint: endpoint.clone(),
+                        webrtc: webrtc.clone(),
+                    },
+                    protocols: protocols(),
+                    role: super::mesh::Role::Producer,
+                    // Over the bytes `OP_MANIFEST` actually serves, not a re-encode of the
+                    // struct. The producer holds them, so it can fingerprint the exact
+                    // thing a consumer will hash on the other side.
+                    tree: Some(agent_share_proto::manifest::manifest_fingerprint(
+                        &tree.manifest_bytes(),
+                    )),
+                    // What this peer can actually hand over. An origin holds everything; a
+                    // seed serving a partial copy holds a subset, and says so rather than
+                    // letting readers discover the gaps by asking.
+                    serving: tree.serving(),
+                    // The producer never clears IP: it is the peer everyone else dials.
+                    transports: fofoca::net::TransportOpts::default(),
+                }),
+            )
             .await,
         ),
     };
@@ -161,22 +185,65 @@ pub(crate) async fn serve(
         }
     };
 
-    // Nothing to accept here any more; wait for ctrl-c so the mesh can announce
-    // a graceful `Left` instead of peers waiting out a silence timeout — and,
-    // while waiting, keep the card's `tree` honest.
-    //
-    // A producer whose tree changes under the watcher would otherwise keep
-    // advertising the fingerprint it started with, which is worse than
-    // advertising none: a consumer would read agreement where there is none and
-    // treat a diverged peer as a valid source. `set_tree` dedupes by value, so
-    // the rescan timer firing with nothing changed costs nothing.
-    match &share_mesh {
+    if !stopping {
+        serve_until_ctrl_c(share_mesh.as_ref(), &tree, &mut ctrl_c).await;
+        super::announce_stopping(json);
+    }
+    if let Some(mesh) = share_mesh {
+        mesh.leave().await;
+    }
+    drop(fallback_router);
+    endpoint.close().await;
+    Ok(())
+}
+
+/// Run `work` to the end even when Ctrl-C lands first, and say `Stopping` at
+/// once if it does.
+///
+/// The work is a mesh join: dropping it half-done would drop the node's
+/// endpoints without closing them, which is the ungraceful abort a clean
+/// shutdown exists to avoid. `stopping` records that the Ctrl-C was used up,
+/// because a finished `JoinHandle` must not be polled again.
+async fn finish_despite_ctrl_c<T>(
+    ctrl_c: &mut super::CtrlC,
+    stopping: &mut bool,
+    json: bool,
+    work: impl Future<Output = T>,
+) -> T {
+    // Boxed: the join future is large, and pinned inline it bloats every
+    // caller future up to `main`.
+    let mut work = Box::pin(work);
+    tokio::select! {
+        done = &mut work => done,
+        _ = &mut *ctrl_c => {
+            *stopping = true;
+            super::announce_stopping(json);
+            work.await
+        }
+    }
+}
+
+/// Nothing to accept here any more; wait for ctrl-c so the mesh can announce
+/// a graceful `Left` instead of peers waiting out a silence timeout — and,
+/// while waiting, keep the card's `tree` honest.
+///
+/// A producer whose tree changes under the watcher would otherwise keep
+/// advertising the fingerprint it started with, which is worse than
+/// advertising none: a consumer would read agreement where there is none and
+/// treat a diverged peer as a valid source. `set_tree` dedupes by value, so
+/// the rescan timer firing with nothing changed costs nothing.
+async fn serve_until_ctrl_c(
+    share_mesh: Option<&super::mesh::ShareMesh>,
+    tree: &LiveTree,
+    ctrl_c: &mut super::CtrlC,
+) {
+    match share_mesh {
         Some(mesh) => {
             use tokio::sync::broadcast::error::RecvError;
             let mut updates = tree.subscribe();
             loop {
                 tokio::select! {
-                    _ = tokio::signal::ctrl_c() => break,
+                    _ = &mut *ctrl_c => break,
                     update = updates.recv() => match update {
                         // A lagged watcher has missed frames but the tree is
                         // still readable, so recompute rather than give up.
@@ -187,7 +254,7 @@ pub(crate) async fn serve(
                             .await;
                             // Availability moves for the same reasons the tree
                             // does — a file appearing or vanishing under the
-                            // watcher, and a partial mirror filling in. A stale
+                            // watcher, and a partial seed filling in. A stale
                             // grid is the same failure as a stale fingerprint:
                             // it sends readers to a peer that cannot answer.
                             // Both dedupe by value, so a rescan that changed
@@ -200,7 +267,7 @@ pub(crate) async fn serve(
                         }
                         Err(RecvError::Closed) => {
                             // The watcher is gone; the share still serves.
-                            let _ = tokio::signal::ctrl_c().await;
+                            let _ = (&mut *ctrl_c).await;
                             break;
                         }
                     },
@@ -208,15 +275,9 @@ pub(crate) async fn serve(
             }
         }
         None => {
-            let _ = tokio::signal::ctrl_c().await;
+            let _ = ctrl_c.await;
         }
     }
-    if let Some(mesh) = share_mesh {
-        mesh.leave().await;
-    }
-    drop(fallback_router);
-    endpoint.close().await;
-    Ok(())
 }
 
 /// What a copy carries about the share it came from, all of it optional and
@@ -227,7 +288,7 @@ struct Inherited {
     mesh_id: Option<String>,
 }
 
-/// Read the sidecar a mirror left beside `root`, if this directory is a copy.
+/// Read the sidecar a seed left beside `root`, if this directory is a copy.
 ///
 /// Every field exists so the copy rejoins the share it came from instead of
 /// starting a rival one: the same secret so the original link still works, the
@@ -239,7 +300,7 @@ struct Inherited {
 /// once, at copy time; what survives is the credential it produced, so offering
 /// another almost always means this is the wrong directory.
 fn inherited_from_copy(root: &Path, password: Option<&str>) -> Result<Inherited> {
-    let auth = super::mirror::origin_auth_for(root);
+    let auth = super::seed::origin_auth_for(root);
     if auth.is_some() && password.is_some() {
         bail!(
             "this directory re-serves an existing share, whose password is already \
@@ -247,9 +308,9 @@ fn inherited_from_copy(root: &Path, password: Option<&str>) -> Result<Inherited>
         );
     }
     Ok(Inherited {
-        secret: super::mirror::origin_secret_for(root),
+        secret: super::seed::origin_secret_for(root),
         auth,
-        mesh_id: super::mirror::origin_mesh_id_for(root),
+        mesh_id: super::seed::origin_mesh_id_for(root),
     })
 }
 
@@ -257,7 +318,7 @@ fn inherited_from_copy(root: &Path, password: Option<&str>) -> Result<Inherited>
 /// names.
 ///
 /// **A copy gets a key of `None` and still names an author.** That pairing is
-/// the requirement in one line: a mirror re-serves the signature it was handed
+/// the requirement in one line: a seed re-serves the signature it was handed
 /// and holds nothing that could make another, so it can serve every byte of the
 /// share and never publish a version of it. An original is the other way round
 /// — it mints a key and names itself.
@@ -267,8 +328,8 @@ fn inherited_from_copy(root: &Path, password: Option<&str>) -> Result<Inherited>
 /// before any of this; persisting it would make a share's identity outlive the
 /// process, and that is a separate feature with its own storage question.
 fn authorship_for(root: &Path) -> (Option<SecretKey>, Option<[u8; 32]>) {
-    if super::mirror::is_copy(root) {
-        return (None, super::mirror::origin_author_for(root));
+    if super::seed::is_copy(root) {
+        return (None, super::seed::origin_author_for(root));
     }
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
@@ -280,9 +341,9 @@ fn authorship_for(root: &Path) -> (Option<SecretKey>, Option<[u8; 32]>) {
 /// The tree this directory serves, and the line describing it.
 ///
 /// Two shapes, and which one applies is read off the directory rather than
-/// asked for: a copy a mirror produced carries the origin's manifest beside it,
+/// asked for: a copy a seed produced carries the origin's manifest beside it,
 /// and re-serving those bytes rather than scanning is what keeps every index
-/// meaning what the origin says it means — and what lets a *partial* mirror
+/// meaning what the origin says it means — and what lets a *partial* seed
 /// serve at all, since a scan of a half-copy would renumber every slot after the
 /// first missing file.
 ///
@@ -290,8 +351,8 @@ fn authorship_for(root: &Path) -> (Option<SecretKey>, Option<[u8; 32]>) {
 /// The origin manifest is unreadable, the directory cannot be scanned, or the
 /// resulting manifest is past [`super::MAX_MANIFEST_BYTES`].
 fn open_tree(root: &Path, author: Option<SecretKey>) -> Result<(Arc<LiveTree>, String)> {
-    if let Some(origin_bytes) = super::mirror::origin_manifest_for(root) {
-        let tree = Arc::new(LiveTree::mirrored(root.to_path_buf(), origin_bytes)?);
+    if let Some(origin_bytes) = super::seed::origin_manifest_for(root) {
+        let tree = Arc::new(LiveTree::seeded(root.to_path_buf(), origin_bytes)?);
         let (held, total) = tree.coverage();
         let description = format!(
             "{} (re-seeding another share: {held} of {total} files held, read-only)",
@@ -335,7 +396,7 @@ fn open_tree(root: &Path, author: Option<SecretKey>) -> Result<(Arc<LiveTree>, S
 
 /// The mesh this producer joins, or `None` when it cannot join one.
 ///
-/// `None` has exactly one cause: a mirror re-serving a *protected* share it was
+/// `None` has exactly one cause: a seed re-serving a *protected* share it was
 /// given no password for. fofoca gates every mesh derivation behind the
 /// stretched password key, so such a peer genuinely cannot join — the token in
 /// its sidecar opens the mount protocol but says nothing about the mesh. It
@@ -418,7 +479,7 @@ fn open_hash_cache(_token: &[u8; SECRET_LEN]) -> Arc<super::hash::ChunkCache> {
 /// signal exchange that lets a peer with no IP path to us negotiate a data
 /// channel first. The `WebRtcHandle` comes back so the accept loop can attach
 /// negotiated sessions to it.
-/// `inherited` is `Some` when serving a directory a mirror produced. Minting a
+/// `inherited` is `Some` when serving a directory a seed produced. Minting a
 /// fresh secret there would build a *second* share: its own mesh id, its own
 /// ticket, and no way for anyone holding the original link to discover it.
 /// Adopting the origin's secret is what makes a copy an extra source for the

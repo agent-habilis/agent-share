@@ -132,7 +132,7 @@ pub(crate) struct Advertised {
     pub(crate) holding: bool,
 }
 
-/// Shared like [`SharedTree`] and for the same reason: a mirror's coverage
+/// Shared like [`SharedTree`] and for the same reason: a seed's coverage
 /// changes as it fetches, so this cannot be fixed at join.
 type SharedServing = Arc<Mutex<Advertised>>;
 
@@ -470,7 +470,7 @@ impl ShareMesh {
     /// Publish which manifest slots this peer can serve.
     ///
     /// Idempotent by value like [`Self::set_tree`], and for the same reason: a
-    /// mirror recomputes this far more often than it changes, and a card
+    /// seed recomputes this far more often than it changes, and a card
     /// rewrite is a CRDT merge sent to every peer.
     pub(crate) async fn set_serving(&self, encoded: Option<String>, holding: bool) {
         {
@@ -619,7 +619,7 @@ pub(crate) struct JoinOpts {
     /// changes under it goes stale; see the note on [`ShareDriver`].
     pub(crate) tree: Option<String>,
     /// Which slots this peer can serve at join, when it already knows. A
-    /// producer knows immediately; a mirror recomputes as it fetches.
+    /// producer knows immediately; a seed recomputes as it fetches.
     pub(crate) serving: Option<String>,
     /// Must match the reach the injected endpoint was built with. A consumer
     /// run under `--transport webrtc` binds with IP cleared, so leaving the

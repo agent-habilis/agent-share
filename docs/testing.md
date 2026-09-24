@@ -85,7 +85,7 @@ no row covers, and the gaps are listed at the end of this file.
 | `password-native-dead-right` | native | native | quic | pass |
 | `password-native-absent` | native | native | none | pass |
 | `password-native-spurious` | native | native | none | pass |
-| `password-native-mirror-reserve` | native | native | quic | pass |
+| `password-native-seed-reserve` | native | native | quic | pass |
 | `password-legacy-ticket` | native | native | quic | pass |
 | `password-web-dead-right` | native | web | none | pass |
 | `password-web-persist` | native | web | dynamic | pass |
@@ -99,8 +99,8 @@ no row covers, and the gaps are listed at the end of this file.
 
 ## Which lane covers what, and why
 
-**`mirror`, not the mount form.** Every native-consumer row shells out to
-`agent-share mirror`. It needs no NFS, no mountpoint and no privileges, it exits
+**`seed --copy-only`, not the mount form.** Every native-consumer row shells out
+to `agent-share seed --copy-only`. It needs no NFS, no mountpoint and no privileges, it exits
 on its own, and it goes through the same `redeem_auth` gate every consumer path
 does. Testing the mount would test the OS's NFS client.
 

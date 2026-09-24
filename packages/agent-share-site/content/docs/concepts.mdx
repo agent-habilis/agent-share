@@ -60,10 +60,10 @@ bridge lives only as long as the mount command.
   The mount is read-only. Every write fails.
 </Callout>
 
-## Mirror
+## Seed
 
 A mount holds no bytes, so it cannot serve the share to others. `agent-share
-mirror` does the opposite trade: it downloads the full tree. It hashes each
-file on arrival and compares it with the root that the origin publishes. It
-refuses a copy that changed in transit. The result is an ordinary directory
-that you can `serve` as a second source.
+seed` does the opposite trade: it downloads the full tree. It hashes each file
+on arrival and compares it with the root that the origin publishes. It refuses
+a copy that changed in transit. When the copy is complete, `seed` serves it as
+a second source for the same share.

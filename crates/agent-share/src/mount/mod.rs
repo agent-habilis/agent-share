@@ -3,6 +3,8 @@
 // bytes rather than a second implementation that drifts. Re-exported here
 // under their long-standing names; the golden pin that guards them moved with
 // them (`agent_share_proto::framing` — `wire_constants_are_pinned`).
+use std::io::IsTerminal as _;
+
 pub(crate) use agent_share_proto::framing::{
     MAX_CHUNK_MAP_BYTES, MAX_DELTA_BYTES, MAX_MANIFEST_BYTES, MAX_READ_LEN, MOUNT_ALPN, OP_BENCH,
     OP_CHUNK, OP_CHUNK_MAP, OP_MANIFEST, OP_READ, OP_WATCH, REQUEST_HEADER_LEN, SECRET_LEN,
@@ -13,8 +15,8 @@ pub(crate) use agent_share_proto::ticket::MountTicket;
 
 pub(crate) use self::bench::{produce as produce_bench, run as run_bench};
 pub(crate) use self::consume::attach;
-pub(crate) use self::mirror::mirror;
 pub(crate) use self::produce::serve;
+pub(crate) use self::seed::seed;
 pub(crate) use self::webrtc::{WEBRTC_SIGNAL_ALPN, dial_webrtc, serve_signal};
 // The pre-ticket online wait is identical for every direct off-gossip
 // command — reuse `file`'s rather than keeping a fourth copy.
@@ -26,10 +28,10 @@ mod handlers;
 mod hash;
 mod live;
 mod mesh;
-mod mirror;
 mod nfs;
 mod produce;
 mod scan;
+mod seed;
 mod source;
 mod sources;
 mod webrtc;
@@ -130,6 +132,27 @@ fn announce(json: bool, serving: &str, command: &str) {
     }
     crate::util::output::status_out("Serving", serving);
     crate::util::output::status_out("Mount", command);
+}
+
+/// The Ctrl-C listener `serve` and the consumer start on their first line, so a
+/// Ctrl-C during startup gets the clean shutdown rather than the default action.
+type CtrlC = tokio::task::JoinHandle<std::io::Result<()>>;
+
+/// Say at once that a Ctrl-C was heard: the clean shutdown after it takes
+/// seconds, and without this line nothing shows that the key did anything.
+/// Human output only; json mode stays the one line a script reads.
+fn announce_stopping(json: bool) {
+    if json {
+        return;
+    }
+    // The terminal echoes the key as `^C` just before this line. A carriage
+    // return puts the line over it: the right-aligned verb's leading spaces
+    // cover those two columns. Changing the terminal's echo mode instead would
+    // have to be undone on every exit path.
+    if std::io::stderr().is_terminal() {
+        eprint!("\r");
+    }
+    crate::util::output::status("Stopping", "closing connections…");
 }
 
 #[cfg(test)]
@@ -437,19 +460,19 @@ mod tests {
             producer_under_secret(origin_tree.path(), secret, None).await;
 
         // A second host with its own endpoint and its own copy of the bytes,
-        // serving under the origin's secret. A mirror, in other words.
-        let mirror_tree = fixture_tree();
-        let (mirror_endpoint, mirror_ticket, mirror_task) =
-            producer_under_secret(mirror_tree.path(), secret, None).await;
+        // serving under the origin's secret. A seed, in other words.
+        let seed_tree = fixture_tree();
+        let (seed_endpoint, seed_ticket, seed_task) =
+            producer_under_secret(seed_tree.path(), secret, None).await;
         assert_ne!(
-            mirror_ticket.addr, origin_ticket.addr,
-            "the mirror must be a genuinely different endpoint"
+            seed_ticket.addr, origin_ticket.addr,
+            "the seed must be a genuinely different endpoint"
         );
 
-        // A consumer pointed at the mirror, holding only the origin's ticket
+        // A consumer pointed at the seed, holding only the origin's ticket
         // secret, is served — no new code anywhere.
-        let mirror_client = client_for(mirror_ticket, None).await;
-        let manifest = mirror_client
+        let seed_client = client_for(seed_ticket, None).await;
+        let manifest = seed_client
             .fetch_manifest()
             .await
             .expect("a peer must serve the origin's secret");
@@ -457,17 +480,17 @@ mod tests {
             .files
             .iter()
             .position(|file| file.rel_path == "hello.txt")
-            .expect("hello.txt listed by the mirror");
-        let bytes = mirror_client
+            .expect("hello.txt listed by the seed");
+        let bytes = seed_client
             .read_range(u32::try_from(hello).expect("index"), 0, 5)
             .await
             .expect("ranged read from a non-origin peer");
         assert_eq!(&bytes, b"hello");
 
         origin_endpoint.close().await;
-        mirror_endpoint.close().await;
+        seed_endpoint.close().await;
         origin_task.abort();
-        mirror_task.abort();
+        seed_task.abort();
     }
 
     /// The password feature's central claim: the ticket addresses the share,
@@ -700,7 +723,7 @@ mod tests {
             producer_under_secret(origin_tree.path(), secret, None).await;
         let origin_client = client_for(origin_ticket, None).await;
 
-        // Same shape, different contents — a stale mirror.
+        // Same shape, different contents — a stale seed.
         let stale = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir_all(stale.path().join("docs")).unwrap();
         std::fs::write(stale.path().join("hello.txt"), b"WRONG WORLD").unwrap();

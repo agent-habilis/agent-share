@@ -95,7 +95,7 @@ impl ShareAuth {
         }
     }
 
-    /// Adopt an already-derived token — a mirror re-serving from its sidecar,
+    /// Adopt an already-derived token — a seed re-serving from its sidecar,
     /// where the password was supplied once, at copy time, and is long gone.
     #[must_use]
     pub const fn from_token(token: [u8; SECRET_LEN], password_protected: bool) -> Self {
@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mirror_can_adopt_a_derived_token() {
+    fn a_seed_can_adopt_a_derived_token() {
         let secret = [11u8; SECRET_LEN];
         let token = share_token(&secret, Some("hunter2"));
         let auth = ShareAuth::from_token(token, true);

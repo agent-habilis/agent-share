@@ -29,8 +29,8 @@ agent-share-mount = { path = "../agent-share-mount" }
 # socket, the filesystem and multihop, none of which exist in a tab. What
 # remains is the whole node runtime — `setup_mesh` → `Node::spawn` → the event
 # loop — so a browser peer is the same peer a CLI runs, not a reduced stand-in.
-fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "d9434eec9acf81542acea56bba8e86439c8cb8ee", default-features = false }
-fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "d9434eec9acf81542acea56bba8e86439c8cb8ee", features = ["web"] }
+fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "eebfd2fb1184480e0299b21b90ba3bf0506adfd1", default-features = false }
+fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "eebfd2fb1184480e0299b21b90ba3bf0506adfd1", features = ["web"] }
 # NOTE: no iroh entries -- taken from `fofoca::iroh` and
 # `fofoca_protocol::iroh_base`, which this crate already depends on.
 anyhow = "1"
@@ -71,7 +71,7 @@ web-sys = { version = "0.3", features = [
 # tests. It grew up in this workspace and moved to `fofoca-network/fofoca` at
 # v0.6.0; restated here rather than inherited because this workspace stands
 # alone. The tag must stay in step with the root workspace's.
-fofoca-chunks = { git = "https://github.com/fofoca-network/fofoca", rev = "d9434eec9acf81542acea56bba8e86439c8cb8ee" }
+fofoca-chunks = { git = "https://github.com/fofoca-network/fofoca", rev = "eebfd2fb1184480e0299b21b90ba3bf0506adfd1" }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }

@@ -3575,7 +3575,7 @@ fn roster_after_failed_lane(list: Vec<KnownSeeder>, refusals: &[Refusal]) -> Vec
 }
 
 /// Persist the origin's manifest so a refreshed tab can re-arm with no live
-/// source — the web twin of the native mirror's sidecar. Best-effort: a full
+/// source — the web twin of the native seed's sidecar. Best-effort: a full
 /// quota or private-mode refusal costs resurrection, never the session.
 /// `envelope` is the whole `OP_MANIFEST` body, signature included, because that
 /// is what this tab will re-serve after a reload. The locator beside it records

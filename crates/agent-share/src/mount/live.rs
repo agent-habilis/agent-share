@@ -66,7 +66,7 @@ const DELTA_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 pub struct LiveTree {
     root: PathBuf,
     /// The creator's authorship key, held only by an origin that owns this
-    /// share. `None` for a mirror, which re-serves somebody else's signature
+    /// share. `None` for a seed, which re-serves somebody else's signature
     /// and must not be able to mint one of its own — see
     /// [`agent_share_proto::authorship`].
     author: Option<SecretKey>,
@@ -204,7 +204,7 @@ impl LiveTree {
 
     /// Seed a tree that **re-serves somebody else's manifest**.
     ///
-    /// A mirror is not a second origin. It serves the origin's manifest bytes
+    /// A seed is not a second origin. It serves the origin's manifest bytes
     /// *verbatim*, so every index means what the origin says it means, and a
     /// consumer can move between them without re-reading anything. Re-deriving
     /// the manifest from what happens to be on this disk would renumber every
@@ -214,21 +214,21 @@ impl LiveTree {
     ///
     /// A slot maps to a local path only when this peer actually has that file,
     /// at the size the origin published. Everything else is `None`, which reads
-    /// as `BadIndex`: **partial mirrors are ordinary**, and saying "I do not
+    /// as `BadIndex`: **partial seeds are ordinary**, and saying "I do not
     /// have that" is the honest answer. Anything laxer would serve a truncated
     /// or stale file under the origin's name.
     ///
     /// `root` is where the copy lives; `envelope` is exactly what `OP_MANIFEST`
     /// returned from the origin, signature included.
     ///
-    /// **The signature is re-served, never re-made.** A mirror holds no
+    /// **The signature is re-served, never re-made.** A seed holds no
     /// authorship key by design, so the only proof it can offer is the one the
     /// creator already published — which is enough, because a signature says
     /// who wrote the bytes and not who handed them over.
     ///
     /// # Errors
     /// `envelope` does not decode, or its manifest does not.
-    pub(super) fn mirrored(root: PathBuf, envelope: Vec<u8>) -> Result<Self> {
+    pub(super) fn seeded(root: PathBuf, envelope: Vec<u8>) -> Result<Self> {
         let origin_bytes = SignedManifest::decode(&envelope)?.manifest;
         let manifest = MountManifest::decode(&origin_bytes)?;
         let index_of = manifest
@@ -254,7 +254,7 @@ impl LiveTree {
                 }
                 let path = root.join(file.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
                 // Size is the cheap half of the version gate, and the half that
-                // catches a half-written mirror. `fofoca-blobs` holds the other
+                // catches a half-written seed. `fofoca-blobs` holds the other
                 // half for content this peer can prove.
                 match std::fs::metadata(&path) {
                     Ok(meta) if meta.len() == file.size => Some(path),
@@ -264,7 +264,7 @@ impl LiveTree {
             .collect();
 
         let (updates, _) = broadcast::channel(UPDATE_BACKLOG);
-        // Both off one decode: a mirror re-serves the creator's signature
+        // Both off one decode: a seed re-serves the creator's signature
         // verbatim and can mint none of its own.
         let origin = SignedManifest::decode(&envelope)?;
         let (version, signature) = (origin.version, origin.signature);
@@ -283,8 +283,8 @@ impl LiveTree {
                 version,
                 envelope: Arc::new(envelope),
                 signature,
-                // A mirror publishes no changes of its own, so it never has a
-                // difference to replay — see `LiveTree::mirrored`.
+                // A seed publishes no changes of its own, so it never has a
+                // difference to replay — see `LiveTree::seeded`.
                 history: VecDeque::new(),
                 history_bytes: 0,
             }),
@@ -295,7 +295,7 @@ impl LiveTree {
     /// How many slots this tree can actually serve, and how many exist.
     ///
     /// `(held, total)`, counting live slots only. Equal for an origin; a
-    /// partial mirror holds fewer.
+    /// partial seed holds fewer.
     pub(super) fn coverage(&self) -> (usize, usize) {
         let state = self.read();
         let total = state
@@ -309,7 +309,7 @@ impl LiveTree {
 
     /// Which slots this tree can serve, encoded for a peer card.
     ///
-    /// `"*"` for a complete tree, sorted ranges for a partial mirror, `None`
+    /// `"*"` for a complete tree, sorted ranges for a partial seed, `None`
     /// when it holds nothing or the answer will not fit a frame — see
     /// [`agent_share_proto::serving`].
     pub(super) fn serving(&self) -> Option<String> {
@@ -680,7 +680,7 @@ mod tests {
         fn new(files: &[(&str, usize)]) -> Self {
             use rand::RngCore as _;
             let root =
-                std::env::temp_dir().join(format!("agent-share-mirror-{}", rand::rng().next_u64()));
+                std::env::temp_dir().join(format!("agent-share-seed-{}", rand::rng().next_u64()));
             for (name, size) in files {
                 let path = root.join(name);
                 std::fs::create_dir_all(path.parent().expect("has a parent")).expect("mkdir");
@@ -705,7 +705,7 @@ mod tests {
     /// slot after the first gap, and a reader holding an index from the origin
     /// would silently get a different file.
     #[test]
-    fn a_partial_mirror_keeps_the_origins_indices() {
+    fn a_partial_seed_keeps_the_origins_indices() {
         // The origin's tree: three files. This peer fetched only the third.
         let origin = MountManifest {
             dirs: Vec::new(),
@@ -718,7 +718,7 @@ mod tests {
         let bytes = origin.encode();
         let copy = TempTree::new(&[("docs/big.bin", 64)]);
 
-        let tree = LiveTree::mirrored(copy.0.clone(), sealed(&bytes)).expect("mirrored");
+        let tree = LiveTree::seeded(copy.0.clone(), sealed(&bytes)).expect("seeded");
 
         assert_eq!(
             *tree.manifest_bytes(),
@@ -745,7 +745,7 @@ mod tests {
         };
         // On disk at the wrong length: an interrupted fetch.
         let copy = TempTree::new(&[("a.bin", 400)]);
-        let tree = LiveTree::mirrored(copy.0.clone(), sealed(&origin.encode())).expect("mirrored");
+        let tree = LiveTree::seeded(copy.0.clone(), sealed(&origin.encode())).expect("seeded");
 
         assert_eq!(
             tree.path_of(0),
@@ -756,13 +756,13 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_mirror_holds_everything() {
+    fn a_complete_seed_holds_everything() {
         let origin = MountManifest {
             dirs: Vec::new(),
             files: vec![entry("a.txt", 5), entry("b.txt", 9)],
         };
         let copy = TempTree::new(&[("a.txt", 5), ("b.txt", 9)]);
-        let tree = LiveTree::mirrored(copy.0.clone(), sealed(&origin.encode())).expect("mirrored");
+        let tree = LiveTree::seeded(copy.0.clone(), sealed(&origin.encode())).expect("seeded");
         assert_eq!(tree.coverage(), (2, 2));
     }
 
@@ -776,18 +776,18 @@ mod tests {
         seal(Some(&creator()), 1, bytes).0.as_ref().clone()
     }
 
-    /// **The requirement, as a test.** A mirror is handed the creator's
+    /// **The requirement, as a test.** A seed is handed the creator's
     /// signature and re-serves it byte for byte; it never makes one, and could
     /// not, because it holds no authorship key.
     #[test]
-    fn a_mirror_re_serves_the_creators_signature_rather_than_making_one() {
+    fn a_seed_re_serves_the_creators_signature_rather_than_making_one() {
         let origin = MountManifest {
             dirs: Vec::new(),
             files: vec![entry("a.txt", 5)],
         };
         let envelope = sealed(&origin.encode());
         let copy = TempTree::new(&[("a.txt", 5)]);
-        let tree = LiveTree::mirrored(copy.0.clone(), envelope.clone()).expect("mirrored");
+        let tree = LiveTree::seeded(copy.0.clone(), envelope.clone()).expect("seeded");
 
         assert_eq!(
             *tree.manifest_envelope(),
@@ -796,7 +796,7 @@ mod tests {
         );
         assert!(
             tree.author.is_none(),
-            "a mirror holding a signing key would be able to publish"
+            "a seed holding a signing key would be able to publish"
         );
     }
 

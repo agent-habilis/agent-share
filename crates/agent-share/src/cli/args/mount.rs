@@ -9,7 +9,7 @@ use super::password::PasswordArgs;
 use crate::protocol::SwarmId;
 
 /// The `agent-share serve` / `bench` actions. The consumer side is the bare
-/// `agent-share <ticket> <target>` form (positionals on the root command),
+/// `agent-share <ticket> [target]` form (positionals on the root command),
 /// so a ticket can never collide with the `serve` / `bench` literals.
 #[derive(Subcommand, Debug)]
 pub(crate) enum MountAction {
@@ -43,15 +43,15 @@ pub(crate) enum MountAction {
         #[arg(long, default_value = "human")]
         output: OutputFormat,
     },
-    /// Take a full copy of a share, so this machine can serve it too.
+    /// Take a full copy of a share, then serve it as a second source.
     ///
     /// The opposite trade from the lazy mount, on purpose: it downloads
     /// everything rather than nothing, because a peer holding no bytes cannot
     /// seed. Each file is hashed on arrival and cross-checked against the root
     /// the origin publishes, so a copy that was mangled in transit is refused
-    /// rather than written. The result is an ordinary directory — hand it to
-    /// `agent-share serve` to become a second source for the tree.
-    Mirror {
+    /// rather than written. Once the copy is complete it is served until
+    /// interrupted, as `agent-share serve` on the directory would.
+    Seed {
         /// Ticket for the share to copy.
         ticket: String,
         /// Directory to copy into. Created if it does not exist.
@@ -73,11 +73,24 @@ pub(crate) enum MountAction {
         #[arg(long)]
         transport: Option<String>,
         /// Password for a protected share. The copy records what it needs to
-        /// re-serve, so `agent-share serve` on the result asks for nothing.
+        /// re-serve, so serving it asks for nothing.
         #[command(flatten)]
         password: PasswordArgs,
+        /// Copy and exit without serving. The copy can be served later with
+        /// `agent-share serve`.
+        #[arg(long)]
+        copy_only: bool,
+        /// Swarm id whose discovery config the serve step uses. Same flag,
+        /// same meaning, as on `serve`.
+        #[arg(long, conflicts_with_all = ["public", "mdns", "dht", "relay"])]
+        swarm: Option<SwarmId>,
+        /// Which lookup mechanisms the serve step uses. Same flags, same
+        /// meaning, as on `serve`.
+        #[command(flatten)]
+        lookups: PublicLookupArgs,
         /// Output format: human (default) — a cargo-style progress and summary
-        /// — or json, a single `agent-share serve <dir>` line for machines.
+        /// — or json: the serve step's single `agent-share <ticket>` line, or
+        /// with `--copy-only` a single `agent-share serve <dir>` line.
         #[arg(long, default_value = "human")]
         output: OutputFormat,
     },

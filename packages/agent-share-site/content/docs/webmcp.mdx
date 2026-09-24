@@ -81,7 +81,7 @@ Two capabilities are therefore absent rather than broken. Nothing here downloads
 to a filesystem or mirrors into a local folder: both need `showSaveFilePicker`
 or `showDirectoryPicker`, which only a real click can open, and no directory
 handle is persisted anywhere. For bulk transfer to a filesystem, use
-`agent-share mirror`. To pull bytes into the browser instead — where later reads
+`agent-share seed`. To pull bytes into the browser instead — where later reads
 are local and the tab starts seeding — use `sync`.
 
 Every result is flat and carries `ok`. A failure is `{ ok: false, code, error }`
@@ -134,7 +134,7 @@ bytes are binary, plus `size`, `eof` and `nextOffset`. Follow `nextOffset` until
 The default window is 64 KiB and the maximum is 256 KiB, which is the protocol's
 own cap on a READ. Bulk transfer is deliberately not a tool: the browser cannot
 write to your filesystem without a person clicking a folder picker, so moving a
-large tree is still `agent-share mirror`'s job.
+large tree is still `agent-share seed`'s job.
 
 ### Publishing
 
@@ -146,7 +146,7 @@ the result is an ordinary share a native peer can read:
 publish { files: [{ path: "notes.md", content: "# hi\n" }] }
   -> { ticket: "SvL6pH…", url: "https://…/app/files/SvL6pH…", files: 1 }
 
-agent-share mirror SvL6pH… ./out     # works from the CLI
+agent-share seed SvL6pH… ./out       # works from the CLI
 ```
 
 It cannot share a folder that already exists on your disk — that needs

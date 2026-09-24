@@ -32,10 +32,10 @@
 //!
 //! - The **authorship key** names the share's creator across restarts and
 //!   across peers. It signs manifests, its public half rides the ticket, and it
-//!   is never written to a mirror's sidecar.
+//!   is never written to a seed's sidecar.
 //! - The **serving identity** is the per-peer endpoint key. Untouched.
 //!
-//! A mirror is handed the share's read capability on purpose — that is what
+//! A seed is handed the share's read capability on purpose — that is what
 //! makes a copy an extra source rather than a rival share — but never the
 //! authorship key. So it can serve every byte and still not publish a version.
 //! That is the requirement: *mutable share, mutable only by its creator*.
@@ -88,7 +88,7 @@ pub fn sign_manifest(author: &SecretKey, version: u64, manifest: &[u8]) -> [u8; 
 
 /// Wrap `manifest` in the envelope a producer serves, signed if it can sign.
 ///
-/// Shared by every producer — native, browser, and the mirror that re-serves
+/// Shared by every producer — native, browser, and the seed that re-serves
 /// what it was handed — so an unsigned share and a signed one differ in exactly
 /// one field and nowhere else.
 ///
@@ -234,7 +234,7 @@ mod tests {
         assert!(verify_manifest(&creator().public(), 3, &manifest, &signature).is_ok());
     }
 
-    /// The whole point: somebody else's key does not pass. A mirror holds the
+    /// The whole point: somebody else's key does not pass. A seed holds the
     /// *serving* identity and still cannot publish.
     #[test]
     fn another_key_cannot_publish() {
