@@ -72,7 +72,7 @@ await Bun.write(`./dist${asset.path}.gz`, Bun.gzipSync(asset.bytes, { level: 9 }
 // No `<link rel="preload">` for the binary, deliberately: Safari does not
 // match an `as="fetch"` preload to the glue's later `fetch()` (measured —
 // two resource-timing entries, `link` then `fetch`), so on a cold cache it
-// downloads the binary twice. The eager `loadWasm()` in `agent-share-web`'s `main.tsx`
+// downloads the binary twice. The eager `loadWasm()` in `agent-share-webapp`'s `main.tsx`
 // starts the real fetch within ~25 ms of where the preload would, in every
 // browser, with nothing to mismatch.
 //
@@ -97,6 +97,6 @@ console.log(`  dist${asset.path} (+.br, +.gz)`)
 // The landing page and docs: a Next static export, merged in at the root of
 // `dist/` around the app. It owns `/` and its own `404.html`; `serve.ts` gives
 // the SPA shell only to paths under `/app`.
-await Bun.$`bun run --filter agent-share-site build`
-await Bun.$`cp -R packages/agent-share-site/out/. dist/`
+await Bun.$`bun run --filter agent-share-docs build`
+await Bun.$`cp -R packages/agent-share-docs/out/. dist/`
 console.log('  dist/ (site: index.html, docs/, 404.html)')

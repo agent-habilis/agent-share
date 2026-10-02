@@ -141,14 +141,6 @@ article h2.nextra-border {
   padding-block: 1.5rem 0;
 }
 
-/* Retro-tech label: small caps, tracked. */
-.chip {
-  font-size: 0.75rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
 /* ------------------------------------------------------------ dot band */
 
 /* The grid runs edge to edge behind the hero and the install line only. The
@@ -203,15 +195,6 @@ body:has(.dots) {
     grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
     gap: 4rem;
   }
-}
-
-.chip {
-  display: inline-block;
-  padding: 0.25rem 0.6rem;
-  text-decoration: none;
-  /* The fill is the whole chip now. It is also what keeps the dot grid from
-     running through the label, which is what the border used to do. */
-  background: var(--tile-bg);
 }
 
 .hero-title {

@@ -21,7 +21,7 @@
  * Everything no route claims — the landing page and docs — is the site's
  * static export, served with the production rules from `serve.ts`. It is built
  * once by `bun run dev`, so docs edits need a restart; for live docs editing,
- * run `next dev` in `packages/agent-share-site`. That
+ * run `next dev` in `packages/agent-share-docs`. That
  * specificity is the point of the `/wasm/` prefix — at the URL root the
  * catch-all answered a stale hash with `index.html`, which reached the browser
  * as a wasm "expected magic word" error naming the wrong problem entirely.
@@ -38,8 +38,8 @@ import { stat } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import index from '../packages/agent-share-web/src/pages/index.html'
-import lab from '../packages/agent-share-web/src/pages/lab/index.html'
+import index from '../packages/agent-share-webapp/src/pages/index.html'
+import lab from '../packages/agent-share-webapp/src/pages/lab/index.html'
 import { SW_ENTRY } from './entrypoints.ts'
 import { createFetch } from './serve.ts'
 import {
@@ -166,7 +166,7 @@ const server = Bun.serve({
     '/app': index,
     '/app/*': index,
   },
-  fetch: createFetch(new URL('../packages/agent-share-site/out/', import.meta.url)),
+  fetch: createFetch(new URL('../packages/agent-share-docs/out/', import.meta.url)),
   development: {
     hmr: true,
     console: true,

@@ -1,9 +1,9 @@
 //! The browser cells: a real headless Chrome driving `/app/lab`.
 //!
 //! No application code changes to make this drivable. `/lab` is click-driven,
-//! but it is built on stable committed DOM ids (`packages/agent-share-web/src/pages/lab/consumer.tsx`,
-//! `packages/agent-share-web/src/pages/lab/producer.tsx`) and `runBench` already ends with
-//! `log('report', report)` — and the log writer (`packages/agent-share-web/src/pages/lab/parts.tsx`)
+//! but it is built on stable committed DOM ids (`packages/agent-share-webapp/src/pages/lab/consumer.tsx`,
+//! `packages/agent-share-webapp/src/pages/lab/producer.tsx`) and `runBench` already ends with
+//! `log('report', report)` — and the log writer (`packages/agent-share-webapp/src/pages/lab/parts.tsx`)
 //! `JSON.stringify`s any non-string. So the `BenchReport` is already sitting in
 //! `#rx-log` as JSON; nobody had read it.
 //!

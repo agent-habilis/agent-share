@@ -4,7 +4,7 @@
  * Registers the worker, hands it one file at a time, and answers the reads it
  * asks for. The worker parses `Range`; this side owns the bytes, because it is
  * the only process holding both the peer connection and the chunk store — see
- * the header of `agent-share-web`'s `service-worker/index.ts`.
+ * the header of `agent-share-webapp`'s `service-worker/index.ts`.
  *
  * **Every entry point returns `null` rather than throwing when the worker is
  * unavailable.** No service worker on this browser, an insecure context, Safari

@@ -16,8 +16,8 @@
  * losing a coin flip for 3000. The container always listens on 3000.
  */
 
-const IMAGE = 'agent-share-web:dev'
-const CONTAINER = 'agent-share-web-dev'
+const IMAGE = 'agent-share-webapp:dev'
+const CONTAINER = 'agent-share-webapp-dev'
 
 const port = Number(process.env.PORT ?? 3000)
 

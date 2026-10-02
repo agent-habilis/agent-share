@@ -4,7 +4,7 @@
   "type": "module",
   "workspaces": ["packages/*"],
   "scripts": {
-    "dev": "bun run --filter agent-share-site build && portless run bun --hot scripts/dev.ts",
+    "dev": "bun run --filter agent-share-docs build && portless run bun --hot scripts/dev.ts",
     "start": "bun scripts/start.ts",
     "dev:docker": "bun scripts/dev-docker.ts",
     "build": "bun scripts/build.ts",

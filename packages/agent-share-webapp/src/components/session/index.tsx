@@ -3,7 +3,7 @@
  *
  * Everything that survives a view switch lives here: the client, the mesh
  * membership, the `watch` subscription, the single sampler and the column
- * browser's selection. The pages under `agent-share-web` render inside its outlet
+ * browser's selection. The pages under `agent-share-webapp` render inside its outlet
  * and reach all of it through `SessionCtx` — so `/files` ↔ `/info` ↔
  * `/preview` swaps a page without redialling the share.
  *

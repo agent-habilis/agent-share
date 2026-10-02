@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { Footer, Layout, Navbar } from 'nextra-theme-docs'
 import { Head } from 'nextra/components'
 import { getPageMap } from 'nextra/page-map'
+import Script from 'next/script'
 
 import 'nextra-theme-docs/style.css'
 import './styles.css'
@@ -44,7 +45,7 @@ export default async function SiteLayout({ children }: { children: ReactNode }) 
       <body>
         <Layout
           pageMap={pageMap}
-          docsRepositoryBase="https://github.com/agent-habilis/agent-share/tree/main/packages/agent-share-site"
+          docsRepositoryBase="https://github.com/agent-habilis/agent-share/tree/main/packages/agent-share-docs"
           sidebar={{ defaultMenuCollapseLevel: 1, toggleButton: false }}
           // The site follows the OS color scheme; there is no switch to pick one.
           darkMode={false}
@@ -77,12 +78,14 @@ export default async function SiteLayout({ children }: { children: ReactNode }) 
           and nothing else. Hence this, rather than rebuilding the nav item by
           hand to hang two attributes off it. Without JavaScript the link still
           works — it opens in the same tab.
+
+          afterInteractive, not an inline script: the script ran between the
+          HTML parse and React's hydration pass, and React reported the
+          attributes it did not render as a hydration mismatch.
         */}
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `document.querySelectorAll('a[href^="/app"]').forEach(function(a){a.target="_blank";a.rel="noopener"})`,
-          }}
-        />
+        <Script id="webapp-new-tab" strategy="afterInteractive">
+          {`document.querySelectorAll('a[href^="/app"]').forEach(function(a){a.target="_blank";a.rel="noopener"})`}
+        </Script>
       </body>
     </html>
   )

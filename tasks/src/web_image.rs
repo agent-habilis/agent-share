@@ -16,7 +16,7 @@ use crate::TaskOutcome;
 use crate::util::{output, repo_root};
 
 /// The image's name under `<registry>/<owner>/`.
-const IMAGE: &str = "agent-share-web";
+const IMAGE: &str = "agent-share-webapp";
 
 /// Knobs, mirrored from the `WebImage` variant in `main.rs`.
 pub(crate) struct Options {

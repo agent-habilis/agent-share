@@ -1,7 +1,7 @@
 /**
  * What a page may ask of the session it is rendered inside.
  *
- * The pages under `agent-share-web` are mounted by the router's `Outlet`, which
+ * The pages under `agent-share-webapp` are mounted by the router's `Outlet`, which
  * passes no props, so this travels through context instead. Context is not
  * reactive on its own — the value is provided once and never replaced — so
  * every field here is either a signal, read inside a page's render thunk, or a
