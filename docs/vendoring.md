@@ -2,7 +2,7 @@
 
 Six of the members of `packages/` are copies of upstream libraries, not code
 written here. Nothing in the directory layout says so — they sit beside
-`agent-share-web` and the rest as equals — so this file is the list, and each
+`agent-share-webapp` and the rest as equals — so this file is the list, and each
 one's `package.json` carries a `description` pointing back at it.
 
 They were copied from the two visage-ui repos on 2026-08-06 (working trees, not
@@ -67,7 +67,7 @@ Re-apply these when re-vendoring:
   so a package whose non-test `.tsx` is bundled that way has to state those two
   options itself or compile against `react/jsx-dev-runtime` and fail to
   resolve. `moonspace-dom` is the only member in that position — the first-party
-  `.tsx` all lives in `agent-share-web`, which the bundler reaches by real path.
+  `.tsx` all lives in `agent-share-webapp`, which the bundler reaches by real path.
 - Per-package `bunfig.toml` files preload `../../scripts/test-setup.ts`, which
   is `scripts/test-setup.ts` — upstream's, plus a `beforeEach` that resets the
   happy-dom URL. The whole run shares one document and `visage-router`'s link

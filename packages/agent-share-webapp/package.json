@@ -1,5 +1,5 @@
 {
-  "name": "agent-share-web",
+  "name": "agent-share-webapp",
   "version": "0.0.0",
   "description": "The browser half: share domain logic under lib/, the UI kit under components/, and the routes, service worker and lab that bundle them.",
   "type": "module",

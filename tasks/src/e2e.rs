@@ -1703,7 +1703,7 @@ const FIXTURE_FILE_LEN: usize = "file 0 contents\n".len();
 
 /// Chrome below this cannot publish tools at all, so the rows would fail for a
 /// reason that is not a defect. 150 is the floor the WebMCP docs name
-/// (`packages/agent-share-site/content/docs/webmcp.mdx`).
+/// (`packages/agent-share-docs/content/docs/webmcp.mdx`).
 const WEBMCP_MIN_CHROME: u32 = 150;
 
 /// Run a row's assertions in the page, and turn its report into a verdict.
@@ -2088,7 +2088,7 @@ fn cell_reconnect(ctx: &Ctx<'_>) -> Res<()> {
     // `reconnecting` is rendered in exactly one place — `TechInfo`'s status —
     // because the breadcrumb deliberately never says it ("redialing is the
     // app's permanent background posture … naming it in the chrome would label
-    // the normal state of the world", `packages/agent-share-web/src/pages/files/index.tsx`). This
+    // the normal state of the world", `packages/agent-share-webapp/src/pages/files/index.tsx`). This
     // cell used to close the panel first and then wait for a word only the
     // panel renders.
     wait_for_true(

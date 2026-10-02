@@ -204,7 +204,7 @@ fn unwrap_router_name(name: &str) -> &str {
 }
 
 /// The zone's convention, plus the two spellings a file router imposes on the
-/// names under `packages/agent-share-site`.
+/// names under `packages/agent-share-docs`.
 fn is_valid(name: &str, zone: Zone) -> bool {
     if ALLOWED.contains(&name) {
         return true;
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn everything_outside_a_crate_is_kebab() {
-        assert!(zone("packages/agent-share-web/src/lib/peer-card") == Zone::Kebab);
+        assert!(zone("packages/agent-share-webapp/src/lib/peer-card") == Zone::Kebab);
         assert!(zone("scripts/build-ip-country.ts") == Zone::Kebab);
     }
 

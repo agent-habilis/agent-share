@@ -243,7 +243,7 @@ the roster forever — 100 churned consumers read as "(100 reading)".
 
 ## Nothing observably breaks when the zip entries are built eagerly
 
-`packages/agent-share-web/src/lib/download/index.ts` builds its ZIP entries from a generator, and the comment
+`packages/agent-share-webapp/src/lib/download/index.ts` builds its ZIP entries from a generator, and the comment
 there says an eager `.map()` "would have stalled on the first tick" past the
 producer's 100-stream ceiling. `cargo task e2e` says otherwise: reverting to
 `.map()` passed `web-download-zip` at 301 files and again at 1201. quinn queues

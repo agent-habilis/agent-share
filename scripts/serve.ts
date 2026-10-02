@@ -22,7 +22,7 @@
 
 import { pathToFileURL } from 'node:url'
 
-import { STREAM_PREFIX } from '../packages/agent-share-web/src/lib/stream/protocol.ts'
+import { STREAM_PREFIX } from '../packages/agent-share-webapp/src/lib/stream/protocol.ts'
 
 /** The directory served. See the header. */
 export const DIST_ROOT = process.env.DIST_DIR

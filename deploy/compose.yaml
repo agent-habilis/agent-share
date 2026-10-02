@@ -17,9 +17,9 @@
 # (`serve` keeps it tailnet-only; `funnel` would publish it to the internet.)
 
 services:
-  agent-share-web:
-    image: srvc-gitea.tetra-ostrich.ts.net/caiogondim/agent-share-web:latest
-    container_name: agent-share-web
+  agent-share-webapp:
+    image: srvc-gitea.tetra-ostrich.ts.net/caiogondim/agent-share-webapp:latest
+    container_name: agent-share-webapp
     restart: unless-stopped
     pull_policy: always
     environment:

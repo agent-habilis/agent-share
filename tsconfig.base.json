@@ -1,5 +1,5 @@
 // Shared compiler options for the `packages/` Bun workspace — the first-party
-// members that extend it (`agent-share-web`, `agent-share-wasm`; the node
+// members that extend it (`agent-share-webapp`, `agent-share-wasm`; the node
 // receiver carries a standalone config) and the vendored `visage-*` ones.
 // Adapted from visage's tsconfig.base.json.
 //

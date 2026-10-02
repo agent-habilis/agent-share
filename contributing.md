@@ -2,7 +2,7 @@
 
 Also see [docs/testing.md](docs/testing.md) for the test suites and
 [docs/vendoring.md](docs/vendoring.md) for the vendored packages. The user
-docs are in `packages/agent-share-site/content/docs/`.
+docs are in `packages/agent-share-docs/content/docs/`.
 
 ## Development
 
@@ -49,7 +49,7 @@ bun install && bun run build
 ```
 
 `packages/` is the JavaScript half — a Bun workspace beside the `crates/` cargo
-one, with the same flat shape. `agent-share-web` is the whole browser half in one
+one, with the same flat shape. `agent-share-webapp` is the whole browser half in one
 package, over `agent-share-wasm`: the share logic under `src/lib/`, the UI kit
 under `src/components/`, and the routes, service worker and lab that bundle them.
 The logic is not a package of its own because almost none of it could be shared
@@ -78,9 +78,9 @@ script when only the binary is wanted.
 `bun run dev` serves at `https://agent-share.localhost` — a name instead of a
 contended port, via [portless](https://github.com/vercel-labs/portless) — and
 expects the wasm to exist already. It builds the landing page and docs
-(`packages/agent-share-site`, Next + Nextra) once, then serves them around the
+(`packages/agent-share-docs`, Next + Nextra) once, then serves them around the
 app at `/app`, which hot-reloads. For live docs editing, run `bun run dev` in
-`packages/agent-share-site`. `bun run build && bun run start` is the
+`packages/agent-share-docs`. `bun run build && bun run start` is the
 production pair: `start` serves the built `dist/` on `PORT`, with the same
 routing the deployed image uses (`scripts/serve.ts`).
 

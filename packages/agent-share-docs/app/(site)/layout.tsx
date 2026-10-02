@@ -45,7 +45,7 @@ export default async function SiteLayout({ children }: { children: ReactNode }) 
       <body>
         <Layout
           pageMap={pageMap}
-          docsRepositoryBase="https://github.com/agent-habilis/agent-share/tree/main/packages/agent-share-site"
+          docsRepositoryBase="https://github.com/agent-habilis/agent-share/tree/main/packages/agent-share-docs"
           sidebar={{ defaultMenuCollapseLevel: 1, toggleButton: false }}
           // The site follows the OS color scheme; there is no switch to pick one.
           darkMode={false}

@@ -1,5 +1,5 @@
 {
-  "name": "agent-share-site",
+  "name": "agent-share-docs",
   "private": true,
   "type": "module",
   "description": "The landing page and docs, a Next + Nextra static export merged into dist/ beside the webapp at /app.",
