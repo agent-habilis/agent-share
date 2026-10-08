@@ -24,10 +24,13 @@ use agent_share_proto::framing::{
 use agent_share_proto::lookup::LookupOpts;
 use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_WEBRTC};
+use futures::StreamExt as _;
+use futures::channel::mpsc;
+use futures::channel::oneshot;
 use habilis_network::iroh::endpoint::{Connection, presets};
+use habilis_network::iroh::{Endpoint, SecretKey};
 use habilis_network::net::MAX_DIRECT_PEERS;
 use habilis_network::net::direct::SignalAdmission;
-use habilis_network::iroh::{Endpoint, SecretKey};
 use habilis_network_chunks::{
     CHUNK_BYTES, ChunkHash, ChunkMap, ChunkMapBuilder, Coverage, Root, chunk_hash,
 };
@@ -35,9 +38,6 @@ use habilis_network_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle,
     browser_answer, log_signal_sdps,
 };
-use futures::StreamExt as _;
-use futures::channel::mpsc;
-use futures::channel::oneshot;
 use js_sys::{Array, Reflect, Uint8Array};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
@@ -443,7 +443,10 @@ impl ShareProducer {
         // ticket exists — so a fast joiner still is not raced. Injecting the
         // endpoint keeps `setup_mesh` cheap: no key to mint, no second bind,
         // and no second relay registration.
-        let protocols: Vec<(Vec<u8>, Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>)> = vec![
+        let protocols: Vec<(
+            Vec<u8>,
+            Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
+        )> = vec![
             (
                 MOUNT_ALPN.to_vec(),
                 Box::new(MountHandler::new(
@@ -674,7 +677,10 @@ impl<S> std::fmt::Debug for MountHandler<S> {
 }
 
 impl<S: ServeSource> habilis_network::iroh::protocol::ProtocolHandler for MountHandler<S> {
-    async fn accept(&self, conn: Connection) -> Result<(), habilis_network::iroh::protocol::AcceptError> {
+    async fn accept(
+        &self,
+        conn: Connection,
+    ) -> Result<(), habilis_network::iroh::protocol::AcceptError> {
         let source = (*self.source).clone();
         let auth = self.auth;
         wasm_bindgen_futures::spawn_local(async move {
@@ -693,7 +699,10 @@ pub(crate) struct SignalHandler {
 }
 
 impl SignalHandler {
-    pub(crate) fn new(local: habilis_network::iroh::EndpointId, hub: Arc<BrowserHubTransport>) -> Self {
+    pub(crate) fn new(
+        local: habilis_network::iroh::EndpointId,
+        hub: Arc<BrowserHubTransport>,
+    ) -> Self {
         Self {
             local,
             hub: send_wrapper::SendWrapper::new(hub),
@@ -710,7 +719,10 @@ impl std::fmt::Debug for SignalHandler {
 }
 
 impl habilis_network::iroh::protocol::ProtocolHandler for SignalHandler {
-    async fn accept(&self, conn: Connection) -> Result<(), habilis_network::iroh::protocol::AcceptError> {
+    async fn accept(
+        &self,
+        conn: Connection,
+    ) -> Result<(), habilis_network::iroh::protocol::AcceptError> {
         let local = self.local;
         let hub = Arc::clone(&*self.hub);
         wasm_bindgen_futures::spawn_local(async move {

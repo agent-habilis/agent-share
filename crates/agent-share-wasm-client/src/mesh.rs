@@ -172,7 +172,9 @@ fn share_card_gate() -> SelfWriteGate {
 /// crates that see both. `agent-share-proto` stays wasm-clean and
 /// `iroh-base`-only, so it must not depend on the engine just to spare these
 /// ten lines; the CLI carries the same ones.
-fn mesh_lookups(share: &agent_share_proto::lookup::LookupOpts) -> habilis_network::protocol::LookupOpts {
+fn mesh_lookups(
+    share: &agent_share_proto::lookup::LookupOpts,
+) -> habilis_network::protocol::LookupOpts {
     use agent_share_proto::lookup::RelayChoice as ShareRelay;
     use habilis_network::protocol::RelayChoice as MeshRelay;
     habilis_network::protocol::LookupOpts {
@@ -498,13 +500,20 @@ impl MeshPeer {
         endpoint: habilis_network::iroh::Endpoint,
         webrtc: habilis_network_iroh_webrtc_transport::WebRtcHandle,
         admission: SignalAdmission,
-        protocols: Vec<(Vec<u8>, Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>)>,
+        protocols: Vec<(
+            Vec<u8>,
+            Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
+        )>,
         card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
         spawn_peer_inner(
             resolved,
             TransportOpts::default(),
-            Some(InjectedEndpoint { endpoint, webrtc, admission }),
+            Some(InjectedEndpoint {
+                endpoint,
+                webrtc,
+                admission,
+            }),
             protocols,
             card,
         )
@@ -524,14 +533,17 @@ impl MeshPeer {
             habilis_network_iroh_webrtc_transport::WebRtcHandle,
             SignalAdmission,
         )>,
-        protocols: Vec<(Vec<u8>, Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>)>,
+        protocols: Vec<(
+            Vec<u8>,
+            Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
+        )>,
         card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
         let injected = shared.map(|(endpoint, webrtc, admission)| InjectedEndpoint {
-        endpoint,
-        webrtc,
-        admission,
-    });
+            endpoint,
+            webrtc,
+            admission,
+        });
         spawn_peer_inner(
             resolved,
             TransportOpts::default(),
@@ -819,7 +831,10 @@ async fn spawn_peer_inner(
     resolved: Resolved,
     transports: TransportOpts,
     injected: Option<InjectedEndpoint>,
-    protocols: Vec<(Vec<u8>, Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>)>,
+    protocols: Vec<(
+        Vec<u8>,
+        Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
+    )>,
     card: CardParts,
 ) -> Result<MeshPeer, JsValue> {
     let Resolved { kind, author, .. } = resolved;

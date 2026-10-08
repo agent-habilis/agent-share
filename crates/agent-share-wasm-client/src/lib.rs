@@ -48,9 +48,11 @@ use agent_share_proto::manifest::MountManifest;
 use agent_share_proto::mesh_key::share_mesh_key;
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_WEBRTC};
 use habilis_network::iroh::endpoint::{Connection, presets};
+use habilis_network::iroh::{
+    Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr, Watcher as _,
+};
 use habilis_network::net::MAX_DIRECT_PEERS;
 use habilis_network::net::direct::SignalAdmission;
-use habilis_network::iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr, Watcher as _};
 use habilis_network_chunks::{
     ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, Coverage, FileId, IdbStore, Root,
     chunk_hash,
@@ -735,11 +737,13 @@ impl ShareClient {
         // the first sync fills it; the signal handler (WebRTC path only —
         // the relay path has no hub) lets another peer negotiate a data
         // channel to *us* the way we negotiate one to the producer.
-        let mut protocols: Vec<(Vec<u8>, Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>)> =
-            vec![(
-                MOUNT_ALPN.to_vec(),
-                Box::new(produce::MountHandler::new(client.seeder.clone(), auth)),
-            )];
+        let mut protocols: Vec<(
+            Vec<u8>,
+            Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
+        )> = vec![(
+            MOUNT_ALPN.to_vec(),
+            Box::new(produce::MountHandler::new(client.seeder.clone(), auth)),
+        )];
         if let Some((endpoint, webrtc, _)) = shared.as_ref() {
             protocols.push((
                 WEBRTC_SIGNAL_ALPN.to_vec(),
@@ -1799,7 +1803,8 @@ impl ShareClient {
             &own[..8.min(own.len())]
         )));
         for endpoint in candidates {
-            let Ok(id) = endpoint.parse::<habilis_network::protocol::iroh_base::EndpointId>() else {
+            let Ok(id) = endpoint.parse::<habilis_network::protocol::iroh_base::EndpointId>()
+            else {
                 continue;
             };
             // Take the channel before offering one. Two tabs on one mesh
@@ -4200,7 +4205,10 @@ async fn connect_via_seeder(
                 .bind()
                 .await
                 .map_err(|error| err("bind the seeder-mount endpoint", &error))?;
-            let protocols: Vec<(Vec<u8>, Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>)> = vec![
+            let protocols: Vec<(
+                Vec<u8>,
+                Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
+            )> = vec![
                 (
                     MOUNT_ALPN.to_vec(),
                     Box::new(produce::MountHandler::new(seeder.clone(), auth)),
@@ -5564,7 +5572,10 @@ fn js_stage(context: &str, error: JsValue) -> JsValue {
 /// a non-`Ok` status there is "I cannot answer for that", which is ordinary
 /// traffic rather than a protocol failure, and folding the two together would
 /// turn every polite refusal into an error.
-async fn read_len(recv: &mut habilis_network::iroh::endpoint::RecvStream, cap: u32) -> Result<u32, JsValue> {
+async fn read_len(
+    recv: &mut habilis_network::iroh::endpoint::RecvStream,
+    cap: u32,
+) -> Result<u32, JsValue> {
     let mut raw = [0u8; 4];
     recv.read_exact(&mut raw)
         .await
@@ -5677,8 +5688,14 @@ fn redeem_auth(ticket: &MountTicket, password: Option<&str>) -> Result<ShareAuth
 /// QUIC's keep-alive interval, so the connection goes quiet and expires. The
 /// message says so, because "timed out" alone sends the reader looking at the
 /// network.
-fn stream_open_failed(what: &str, error: &habilis_network::iroh::endpoint::ConnectionError) -> JsValue {
-    if matches!(error, habilis_network::iroh::endpoint::ConnectionError::TimedOut) {
+fn stream_open_failed(
+    what: &str,
+    error: &habilis_network::iroh::endpoint::ConnectionError,
+) -> JsValue {
+    if matches!(
+        error,
+        habilis_network::iroh::endpoint::ConnectionError::TimedOut
+    ) {
         return JsValue::from_str(&format!(
             "{what}: the connection to the producer expired while idle. \
              A backgrounded tab throttles timers below the keep-alive interval, \
