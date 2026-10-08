@@ -13,9 +13,9 @@ use agent_share_proto::framing::{
 };
 use agent_share_proto::ticket::{TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_WEBRTC};
 use anyhow::{Context, Result, bail};
-use fofoca::iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
-use fofoca::iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
-use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
+use habilis_network::iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
+use habilis_network::iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use habilis_network_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 use rand::RngCore;
 use serde::Serialize;
 

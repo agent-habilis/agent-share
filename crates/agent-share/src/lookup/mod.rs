@@ -8,11 +8,12 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use anyhow::{Context, Result};
-use fofoca::iroh::address_lookup::memory::MemoryLookup;
-use fofoca::iroh::{
+use habilis_network::iroh::address_lookup::memory::MemoryLookup;
+use habilis_network::iroh::{
     Endpoint, EndpointAddr, RelayMode, SecretKey,
     endpoint::{PortmapperConfig, presets},
 };
+use habilis_network::net::direct::SignalAdmission;
 
 pub(crate) use self::relay::pinned_ladder;
 use crate::protocol::swarm::{LookupOpts, RelayChoice};
@@ -38,10 +39,31 @@ pub(crate) async fn build_endpoint(
     secret_key: Option<SecretKey>,
     bind_port: Option<u16>,
     alpns: Vec<Vec<u8>>,
-    webrtc: Option<fofoca_iroh_webrtc_transport::WebRtcHandle>,
+    webrtc: Option<habilis_network_iroh_webrtc_transport::WebRtcHandle>,
     // When true, strip IP/UDP transports so the endpoint cannot hole-punch
     // or upgrade off a relay path (used by the relay bench).
     clear_ip: bool,
+) -> Result<Endpoint> {
+    build_endpoint_with_admission(
+        lookups, secret_key, bind_port, alpns, webrtc, clear_ip, None,
+    )
+    .await
+}
+
+/// [`build_endpoint`] for an endpoint that joins a mesh.
+///
+/// The mesh enforces its direct-peer cap on `admission`, and refuses a table
+/// that no endpoint reports to. So the table is made before the endpoint and
+/// its connection hook is installed here, and the caller hands that same table
+/// to the mesh in `InjectedEndpoint`.
+pub(crate) async fn build_endpoint_with_admission(
+    lookups: &LookupOpts,
+    secret_key: Option<SecretKey>,
+    bind_port: Option<u16>,
+    alpns: Vec<Vec<u8>>,
+    webrtc: Option<habilis_network_iroh_webrtc_transport::WebRtcHandle>,
+    clear_ip: bool,
+    admission: Option<&SignalAdmission>,
 ) -> Result<Endpoint> {
     // A pinned key alone no longer means "beacon": a producer pins one so the
     // WebRTC transport can advertise the same identity the endpoint binds.
@@ -101,6 +123,10 @@ pub(crate) async fn build_endpoint(
         // hole-punched IP path still wins; this only says the relay is a
         // rendezvous rather than a data path.
         builder = builder.path_selector(handle.path_selector());
+    }
+
+    if let Some(admission) = admission {
+        builder = builder.hooks(admission.connection_hook());
     }
 
     if clear_ip {

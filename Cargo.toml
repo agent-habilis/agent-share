@@ -28,24 +28,24 @@ rust-version = "1.93"
 # Shared by the crates here, pinned once so versions stay in lockstep. This
 # block was originally sized for the vendored mesh, which took most of its
 # dependencies as `workspace = true`; the mesh now lives in
-# `fofoca-network/fofoca` and brings its own, so entries here that nothing
+# `agent-habilis/habilis-network` and brings its own, so entries here that nothing
 # names any more can be pruned.
 [workspace.dependencies]
 # The gossip engine and its sibling crates, pinned by **rev** so this workspace
-# and agent-gossip provably build against the same fofoca. Declared here, not in
+# and agent-gossip provably build against the same habilis-network. Declared here, not in
 # the member manifests, so the rev is stated once -- four crates x two members
 # restating it is the drift this pin exists to prevent.
 #
 # The cost is deliberate: an engine change is now release-then-bump here, where
-# a path dep to a sibling checkout needed no round trip. fofoca cuts tags
+# a path dep to a sibling checkout needed no round trip. habilis-network cuts tags
 # (vX.Y.Z); name the tag, never a raw rev, and keep it in step with
 # agent-gossip's.
-fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "1c844051c95e83773e6d41a8436206c28df070dc" }
-fofoca-protocol = { git = "https://github.com/fofoca-network/fofoca", rev = "1c844051c95e83773e6d41a8436206c28df070dc", default-features = false }
-fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "1c844051c95e83773e6d41a8436206c28df070dc" }
+habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "2b468bb59a6430c0fea69674a8c010822cf33912" }
+habilis-network-protocol = { git = "https://github.com/agent-habilis/habilis-network", rev = "2b468bb59a6430c0fea69674a8c010822cf33912", default-features = false }
+habilis-network-iroh-webrtc-transport = { git = "https://github.com/agent-habilis/habilis-network", rev = "2b468bb59a6430c0fea69674a8c010822cf33912" }
 # The content-addressed chunk store, a member of the same monorepo since
-# v0.6.0 (it grew up in this repo under crates/fofoca-chunks and moved).
-fofoca-chunks = { git = "https://github.com/fofoca-network/fofoca", rev = "1c844051c95e83773e6d41a8436206c28df070dc" }
+# v0.6.0 (it grew up in this repo under crates/habilis-network-chunks and moved).
+habilis-network-chunks = { git = "https://github.com/agent-habilis/habilis-network", rev = "2b468bb59a6430c0fea69674a8c010822cf33912" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
@@ -56,8 +56,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 async-trait = "0.1.89"
 # NOTE: no `iroh` entry, and no `[patch.crates-io]` anywhere in this repo. The
-# iroh family is reached through `fofoca::iroh` / `fofoca_protocol::iroh_base`,
-# and `fofoca` owns which fork and revision that is. Declaring iroh here would
+# iroh family is reached through `habilis_network::iroh` / `habilis_network_protocol::iroh_base`,
+# and `habilis-network` owns which fork and revision that is. Declaring iroh here would
 # resolve the published crate alongside the engine's fork -- two `iroh` crates
 # in one graph, surfacing later as an E0308 on types that look identical. This
 # entry used to say 1.0.1 while every other manifest said 1.0.2; deleting the
@@ -121,7 +121,7 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 
-# NOTE: no local-testing [patch] here, ever. To test in-progress fofoca work
+# NOTE: no local-testing [patch] here, ever. To test in-progress habilis-network work
 # from the sibling checkout, patch in this repo's .cargo/config.toml instead:
 # a config-level [patch] applies to every workspace under this directory —
 # including the nested wasm-client workspace, which a manifest patch here

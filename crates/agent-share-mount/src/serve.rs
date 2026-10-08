@@ -13,8 +13,8 @@ use agent_share_proto::framing::{
 };
 use agent_share_proto::manifest::ReadStatus;
 use anyhow::{Context as _, Result};
-use fofoca::iroh::endpoint::{Connection, RecvStream, SendStream};
-use fofoca_chunks::{ChunkHash, ChunkMap, Coverage, Root};
+use habilis_network::iroh::endpoint::{Connection, RecvStream, SendStream};
+use habilis_network_chunks::{ChunkHash, ChunkMap, Coverage, Root};
 
 /// A live `OP_WATCH` subscription.
 ///

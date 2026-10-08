@@ -27,8 +27,10 @@ use agent_share_proto::PeerCard;
 use agent_share_proto::auth::ShareAuth;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use fofoca::iroh::{Endpoint, EndpointAddr, TransportAddr};
-use fofoca_chunks::{ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, FsStore, chunk_hash};
+use habilis_network::iroh::{Endpoint, EndpointAddr, TransportAddr};
+use habilis_network_chunks::{
+    ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, FsStore, chunk_hash,
+};
 
 use super::MountTicket;
 use super::consume::RemoteClient;
@@ -339,7 +341,7 @@ impl SourceSet {
     fn peer_client(&self, card: &PeerCard) -> Result<Arc<RemoteClient>> {
         let id = card
             .endpoint
-            .parse::<fofoca::iroh::EndpointId>()
+            .parse::<habilis_network::iroh::EndpointId>()
             .context("parsing a peer card's endpoint id")?;
         let ticket = MountTicket {
             addr: seeder_addr(id, &self.ticket.lookups),
@@ -478,11 +480,11 @@ fn vouches(card: &PeerCard, tree: &str, index: u32, total_slots: usize) -> bool 
 /// ladder (the mesh rendezvous uses the same rungs), and for a loopback share
 /// the empty list leaves resolution to mDNS/DHT discovery on the endpoint.
 pub(super) fn seeder_addr(
-    id: fofoca::iroh::EndpointId,
+    id: habilis_network::iroh::EndpointId,
     lookups: &agent_share_proto::lookup::LookupOpts,
 ) -> EndpointAddr {
     use agent_share_proto::lookup::RelayChoice;
-    let relays: Vec<fofoca::iroh::RelayUrl> = match &lookups.relay {
+    let relays: Vec<habilis_network::iroh::RelayUrl> = match &lookups.relay {
         RelayChoice::Disabled => Vec::new(),
         RelayChoice::Pinned => crate::lookup::pinned_ladder(),
         RelayChoice::Custom(ladder) => ladder.clone(),
@@ -542,7 +544,7 @@ mod tests {
     fn a_pinned_seeder_is_dialled_on_the_endpoint_ladder() {
         use agent_share_proto::lookup::LookupOpts;
 
-        let id = fofoca::iroh::SecretKey::generate().public();
+        let id = habilis_network::iroh::SecretKey::generate().public();
         let addr = super::seeder_addr(id, &LookupOpts::public_preset());
 
         let mut dialled: Vec<_> = addr.relay_urls().cloned().collect();
@@ -559,7 +561,7 @@ mod tests {
     fn a_loopback_seeder_names_no_relay() {
         use agent_share_proto::lookup::LookupOpts;
 
-        let id = fofoca::iroh::SecretKey::generate().public();
+        let id = habilis_network::iroh::SecretKey::generate().public();
         let addr = super::seeder_addr(id, &LookupOpts::loopback());
 
         assert_eq!(addr.relay_urls().count(), 0);

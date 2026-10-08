@@ -21,7 +21,7 @@ pub(crate) mod util;
 /// # Errors
 /// Propagates any error from the selected subcommand.
 pub async fn run_cli() -> Result<()> {
-    cli::run(cli::args::Cli::parse()).await
+    Box::pin(cli::run(cli::args::Cli::parse())).await
 }
 
 /// Producer internals reached by the integration tests.

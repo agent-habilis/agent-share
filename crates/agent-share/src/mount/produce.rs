@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use agent_share_proto::auth::ShareAuth;
 use anyhow::{Context, Result, bail};
-use fofoca::iroh::endpoint::Connection;
-use fofoca::iroh::{Endpoint, SecretKey};
-use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
+use habilis_network::iroh::endpoint::Connection;
+use habilis_network::iroh::{Endpoint, SecretKey};
+use habilis_network::net::direct::{MAX_DIRECT_PEERS, SignalAdmission};
+use habilis_network_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 use rand::RngCore;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -15,7 +16,7 @@ use super::WEBRTC_SIGNAL_ALPN;
 use super::live::LiveTree;
 use super::{MAX_READ_LEN, MOUNT_ALPN, SECRET_LEN, wait_online};
 use crate::file::human_bytes;
-use crate::lookup::build_endpoint;
+use crate::lookup::build_endpoint_with_admission;
 use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 
 /// Producer: share `dir` read-only. Scans at startup, then rescans whenever
@@ -51,7 +52,7 @@ pub(crate) async fn serve(
     let (tree, description) = open_tree(&root, authorship)?;
 
     let lookups = resolve_transfer_lookups(swarm, flags)?;
-    let (endpoint, mut ticket, secret, webrtc) = bind(lookups, inherited_secret).await?;
+    let (endpoint, mut ticket, secret, webrtc, admission) = bind(lookups, inherited_secret).await?;
     ticket.author = named_author;
     if ticket.author.is_some() {
         ticket.flags |= agent_share_proto::ticket::TICKET_FLAG_SIGNED;
@@ -121,10 +122,7 @@ pub(crate) async fn serve(
                 // that resolution is also where a wrong password would have been
                 // caught, and it must not wait on a background join.
                 target,
-                shared: fofoca::runtime::InjectedEndpoint {
-                    endpoint: endpoint.clone(),
-                    webrtc: webrtc.clone(),
-                },
+                shared: super::mesh::injected_endpoint(endpoint.clone(), webrtc.clone(), admission),
                 protocols: protocols(),
                 role: super::mesh::Role::Producer,
                 // Over the bytes `OP_MANIFEST` actually serves, not a re-encode of the
@@ -138,7 +136,7 @@ pub(crate) async fn serve(
                 // letting readers discover the gaps by asking.
                 serving: tree.serving(),
                 // The producer never clears IP: it is the peer everyone else dials.
-                transports: fofoca::net::TransportOpts::default(),
+                transports: habilis_network::net::TransportOpts::default(),
             })
             .await,
         ),
@@ -152,7 +150,7 @@ pub(crate) async fn serve(
         }
         Err(error) => {
             tracing::warn!(%error, "share mesh unavailable; serving without peer discovery");
-            let mut builder = fofoca::iroh::protocol::Router::builder(endpoint.clone());
+            let mut builder = habilis_network::iroh::protocol::Router::builder(endpoint.clone());
             for (alpn, handler) in protocols() {
                 builder = builder.accept(alpn, handler);
             }
@@ -336,7 +334,7 @@ fn open_tree(root: &Path, author: Option<SecretKey>) -> Result<(Arc<LiveTree>, S
 /// The mesh this producer joins, or `None` when it cannot join one.
 ///
 /// `None` has exactly one cause: a mirror re-serving a *protected* share it was
-/// given no password for. fofoca gates every mesh derivation behind the
+/// given no password for. habilis-network gates every mesh derivation behind the
 /// stretched password key, so such a peer genuinely cannot join — the token in
 /// its sidecar opens the mount protocol but says nothing about the mesh. It
 /// still serves every byte it holds to whoever dials it; it just does not appear
@@ -370,7 +368,10 @@ fn share_protocols(
     endpoint: &Endpoint,
     webrtc: &WebRtcHandle,
     ice: &IceConfig,
-) -> Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> {
+) -> Vec<(
+    Vec<u8>,
+    Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
+)> {
     vec![
         (
             MOUNT_ALPN.to_vec(),
@@ -430,7 +431,13 @@ fn open_hash_cache(_token: &[u8; SECRET_LEN]) -> Arc<super::hash::ChunkCache> {
 pub(super) async fn bind(
     lookups: LookupOpts,
     inherited: Option<[u8; SECRET_LEN]>,
-) -> Result<(Endpoint, MountTicket, [u8; SECRET_LEN], WebRtcHandle)> {
+) -> Result<(
+    Endpoint,
+    MountTicket,
+    [u8; SECRET_LEN],
+    WebRtcHandle,
+    SignalAdmission,
+)> {
     // Chicken and egg: the transport advertises `custom_addr(local_id)` as the
     // address peers dial it on, so it has to know the endpoint's identity —
     // but the endpoint is built *with* the transport. Mint the key first and
@@ -440,13 +447,15 @@ pub(super) async fn bind(
     rand::rng().fill_bytes(&mut key_bytes);
     let key = SecretKey::from_bytes(&key_bytes);
     let webrtc = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-    let endpoint = build_endpoint(
+    let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+    let endpoint = build_endpoint_with_admission(
         &lookups,
         Some(key),
         None,
         vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()],
         Some(webrtc.clone()),
         false,
+        Some(&admission),
     )
     .await?;
     debug_assert_eq!(
@@ -474,7 +483,7 @@ pub(super) async fn bind(
         mesh_id: None,
         author: None,
     };
-    Ok((endpoint, ticket, secret, webrtc))
+    Ok((endpoint, ticket, secret, webrtc, admission))
 }
 
 /// Serve every bi-stream on an established mount connection as an

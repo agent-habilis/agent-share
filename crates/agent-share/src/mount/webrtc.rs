@@ -46,7 +46,7 @@
 //! the network. Two things enforce it — [`super::consume::RemoteClient`] reaches
 //! this lane only through its `webrtc_only` flag, and the mesh negotiates a
 //! data channel only with peers advertising no IP transport
-//! (`fofoca::transport::webrtc::needs_webrtc_lane`).
+//! (`habilis_network::transport::webrtc::needs_webrtc_lane`).
 //!
 //! The browser client is the other half of the table and behaves differently on
 //! purpose: its default mode tries the data channel first and **does** fall back
@@ -67,9 +67,9 @@
 
 pub(crate) use agent_share_proto::framing::WEBRTC_SIGNAL_ALPN;
 use anyhow::{Context, Result};
-use fofoca::iroh::endpoint::Connection;
-use fofoca::iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
-use fofoca_iroh_webrtc_transport::{
+use habilis_network::iroh::endpoint::Connection;
+use habilis_network::iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
+use habilis_network_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, NegotiatedSession, SignalEnvelope, WebRtcHandle, answer_with,
     custom_addr, offer_with,
 };
@@ -100,7 +100,7 @@ pub(crate) fn path_summary(conn: &Connection) -> Vec<String> {
             } else if matches!(
                 path.remote_addr(),
                 TransportAddr::Custom(addr)
-                    if addr.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID
+                    if addr.id() == habilis_network_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID
             ) {
                 "webrtc"
             } else {
@@ -158,7 +158,7 @@ pub(crate) async fn ensure_webrtc_selected(conn: &Connection, whose: &str) -> Re
                     && matches!(
                         path.remote_addr(),
                         TransportAddr::Custom(addr)
-                            if addr.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID
+                            if addr.id() == habilis_network_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID
                     )
             })
         },

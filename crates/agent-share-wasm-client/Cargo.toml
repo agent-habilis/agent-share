@@ -5,7 +5,7 @@
 # `cargo task ci`'s default build.
 #
 # Path deps DO cross the boundary, so this still links the very same
-# `agent-share-proto` and `fofoca-iroh-webrtc-transport` the CLI does.
+# `agent-share-proto` and `habilis-network-iroh-webrtc-transport` the CLI does.
 [package]
 name = "agent-share-wasm-client"
 version = "0.1.0"
@@ -29,10 +29,10 @@ agent-share-mount = { path = "../agent-share-mount" }
 # socket, the filesystem and multihop, none of which exist in a tab. What
 # remains is the whole node runtime — `setup_mesh` → `Node::spawn` → the event
 # loop — so a browser peer is the same peer a CLI runs, not a reduced stand-in.
-fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "1c844051c95e83773e6d41a8436206c28df070dc", default-features = false }
-fofoca-iroh-webrtc-transport = { git = "https://github.com/fofoca-network/fofoca", rev = "1c844051c95e83773e6d41a8436206c28df070dc", features = ["web"] }
-# NOTE: no iroh entries -- taken from `fofoca::iroh` and
-# `fofoca_protocol::iroh_base`, which this crate already depends on.
+habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "2b468bb59a6430c0fea69674a8c010822cf33912", default-features = false }
+habilis-network-iroh-webrtc-transport = { git = "https://github.com/agent-habilis/habilis-network", rev = "2b468bb59a6430c0fea69674a8c010822cf33912", features = ["web"] }
+# NOTE: no iroh entries -- taken from `habilis_network::iroh` and
+# `habilis_network_protocol::iroh_base`, which this crate already depends on.
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -67,18 +67,18 @@ web-sys = { version = "0.3", features = [
 # 0.3+ additionally needs the `getrandom_backend` rustflag — see
 # `.cargo/config.toml`, and note the feature alone is NOT enough.
 # The chunk layer. Kept as a separate crate so nothing about addressing or
-# storage leaks into the share protocol — see `fofoca-chunks`'s isolation
-# tests. It grew up in this workspace and moved to `fofoca-network/fofoca` at
+# storage leaks into the share protocol — see `habilis-network-chunks`'s isolation
+# tests. It grew up in this workspace and moved to `agent-habilis/habilis-network` at
 # v0.6.0; restated here rather than inherited because this workspace stands
 # alone. The tag must stay in step with the root workspace's.
-fofoca-chunks = { git = "https://github.com/fofoca-network/fofoca", rev = "1c844051c95e83773e6d41a8436206c28df070dc" }
+habilis-network-chunks = { git = "https://github.com/agent-habilis/habilis-network", rev = "2b468bb59a6430c0fea69674a8c010822cf33912" }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 # The unit tests run on wasm32, because that is the only target this crate
-# builds for at all: `fofoca` turns on
-# `fofoca-iroh-webrtc-transport/native` off wasm32, and with both backends
+# builds for at all: `habilis-network` turns on
+# `habilis-network-iroh-webrtc-transport/native` off wasm32, and with both backends
 # enabled `WebRtcHandle` resolves to the host one — so a host build of this
 # crate cannot type-check by construction. Each `mod tests` renames the
 # attribute (see `transport_mode.rs`), so the tests stay plain `#[test]`.
@@ -87,7 +87,7 @@ wasm-bindgen-test = "0.3"
 
 # NOTE: no `[patch.crates-io]`. This nested workspace inherits no patches --
 # which used to mean duplicating the root's pins here. It now needs none:
-# every iroh-family fork rides a dependency edge inside `fofoca`.
+# every iroh-family fork rides a dependency edge inside `habilis-network`.
 
 # NOTE: no local-testing [patch] here either — see the root Cargo.toml. The
 # sibling-checkout redirect lives in the repo's .cargo/config.toml, which

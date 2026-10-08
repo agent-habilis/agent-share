@@ -22,9 +22,9 @@ use std::time::Duration;
 use agent_share_proto::framing::{self, MAX_SIGNED_MANIFEST_BYTES, MOUNT_ALPN, WEBRTC_SIGNAL_ALPN};
 use agent_share_proto::manifest::MountManifest;
 use agent_share_proto::ticket::MountTicket;
-use fofoca::iroh::endpoint::{Connection, presets};
-use fofoca::iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
-use fofoca_iroh_webrtc_transport::{
+use habilis_network::iroh::endpoint::{Connection, presets};
+use habilis_network::iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
+use habilis_network_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, WebRtcTransport, custom_addr,
     offer_with,
 };
@@ -98,7 +98,7 @@ async fn the_real_cli_serves_over_webrtc() {
     let handle = WebRtcHandle::new(WebRtcTransport::new(local));
     let consumer = Endpoint::builder(presets::Minimal)
         .secret_key(key)
-        .relay_mode(fofoca::iroh::RelayMode::Disabled)
+        .relay_mode(habilis_network::iroh::RelayMode::Disabled)
         .add_custom_transport(handle.transport())
         .bind()
         .await

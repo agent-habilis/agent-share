@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 pub(crate) use agent_share_proto::lookup::{LookupOpts, RelayChoice, read_u16};
 use anyhow::{Context, Result, bail};
-use fofoca::iroh::RelayUrl;
+use habilis_network::iroh::RelayUrl;
 
 /// Relay intent from the CLI: absent / default / custom. Resolved into a
 /// [`RelayChoice`] by [`resolve_lookups`]. `Custom` carries the ordered
@@ -254,8 +254,8 @@ mod lookup_tests {
 
     #[test]
     fn valued_relay_preserves_ladder_order() {
-        let rung0: fofoca::iroh::RelayUrl = "https://a.example".parse().unwrap();
-        let rung1: fofoca::iroh::RelayUrl = "https://b.example".parse().unwrap();
+        let rung0: habilis_network::iroh::RelayUrl = "https://a.example".parse().unwrap();
+        let rung1: habilis_network::iroh::RelayUrl = "https://b.example".parse().unwrap();
         let ladder: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
         let opts = resolve_lookups(false, lookups(false, false, RelaySelection::Custom(ladder)));
         assert_eq!(opts.relay, RelayChoice::Custom(vec![rung0, rung1]));
