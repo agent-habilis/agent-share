@@ -26,14 +26,14 @@ use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
 use agent_share_proto::roster::{Roster, entries_from_meta};
 use anyhow::{Context, Result};
-use fofoca::embed::{
+use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
     SilentSink,
 };
-use fofoca::net::TransportOpts;
-use fofoca::ops::{StateMergeParams, broadcast_state_merge};
-use fofoca::protocol::{Channel, Message, Nickname, Password};
-use fofoca::runtime::{
+use habilis_network::net::TransportOpts;
+use habilis_network::ops::{StateMergeParams, broadcast_state_merge};
+use habilis_network::protocol::{Channel, Message, Nickname, Password};
+use habilis_network::runtime::{
     InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh_with,
 };
 
@@ -46,10 +46,10 @@ use fofoca::runtime::{
 /// function. The browser peer carries the same ten lines for the same reason.
 pub(crate) fn mesh_lookups(
     share: &agent_share_proto::lookup::LookupOpts,
-) -> fofoca::protocol::LookupOpts {
+) -> habilis_network::protocol::LookupOpts {
     use agent_share_proto::lookup::RelayChoice as ShareRelay;
-    use fofoca::protocol::RelayChoice as MeshRelay;
-    fofoca::protocol::LookupOpts {
+    use habilis_network::protocol::RelayChoice as MeshRelay;
+    habilis_network::protocol::LookupOpts {
         mdns: share.mdns,
         dht: share.dht,
         relay_lookup: match &share.relay {
@@ -66,7 +66,28 @@ pub(crate) fn mesh_lookups(
 /// here, another in the browser peer, and the real one in the engine — so the
 /// number a UI rendered and the number the engine enforced could drift apart,
 /// and did.
-use fofoca::net::MAX_DIRECT_PEERS;
+use habilis_network::iroh::Endpoint;
+use habilis_network::net::MAX_DIRECT_PEERS;
+use habilis_network::net::direct::SignalAdmission;
+use habilis_network_iroh_webrtc_transport::WebRtcHandle;
+
+/// The endpoint a share hands to its mesh, with the admission table its
+/// connection hook reports to.
+///
+/// No `multihop` handle: the endpoint is bound by [`crate::lookup`], which adds
+/// the `WebRTC` transport only, so this node relays no multi-hop traffic.
+pub(crate) fn injected_endpoint(
+    endpoint: Endpoint,
+    webrtc: WebRtcHandle,
+    admission: SignalAdmission,
+) -> InjectedEndpoint {
+    InjectedEndpoint {
+        endpoint,
+        webrtc,
+        admission,
+        multihop: None,
+    }
+}
 
 /// Which side of the share a peer is on, as its meta card spells it.
 ///
@@ -308,7 +329,7 @@ impl ShareDriver {
     }
 }
 
-#[fofoca::async_trait]
+#[habilis_network::async_trait]
 impl NodeApp for ShareDriver {
     fn classify(&self, _message: &Message) -> AppClass {
         AppClass {
@@ -356,7 +377,7 @@ impl NodeApp for ShareDriver {
     }
 }
 
-#[fofoca::async_trait]
+#[habilis_network::async_trait]
 impl NodeDriver for ShareDriver {
     type Session = ShareRequest;
     type Http = ();
@@ -400,9 +421,9 @@ pub(crate) struct ShareMesh {
     mesh_id: String,
     /// Held, not used: dropping every clone aborts the accept task, and this
     /// Router is now the only thing accepting the share's own ALPNs.
-    _router: fofoca::iroh::protocol::Router,
+    _router: habilis_network::iroh::protocol::Router,
     live: Arc<AtomicUsize>,
-    webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
+    webrtc: WebRtcHandle,
     node: Option<Node<ShareDriver>>,
     book: CardBook,
     tree: SharedTree,
@@ -609,7 +630,10 @@ pub(crate) struct JoinOpts {
     /// ALPNs to serve on the mesh's Router. The producer's two ride here
     /// because iroh permits one accept loop per endpoint; a consumer serves
     /// none and passes an empty vec.
-    pub(crate) protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
+    pub(crate) protocols: Vec<(
+        Vec<u8>,
+        Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
+    )>,
     pub(crate) role: Role,
     /// Fingerprint of the manifest this peer is on, when it knows one.
     ///
@@ -669,9 +693,9 @@ impl std::fmt::Debug for ShareMeshTarget {
 /// The topic string a share's mesh is derived from.
 ///
 /// Off the **secret**, not the token. The password is applied on top by
-/// `fofoca`, which switches every derivation onto the stretched key
+/// `habilis-network`, which switches every derivation onto the stretched key
 /// (`Mesh::effective_seed`) — so the mesh is still unreachable without the
-/// password, but `fofoca` owns that gating rather than this crate re-deriving
+/// password, but `habilis-network` owns that gating rather than this crate re-deriving
 /// around it. Hashed first because the engine carries the topic string into its
 /// state file and user-facing lines.
 fn topic_string(secret: &[u8; SECRET_LEN]) -> String {
@@ -722,7 +746,7 @@ pub(crate) fn resolve(
     }
 }
 
-/// Hand `mesh_id` to `fofoca` and let it rule on the password.
+/// Hand `mesh_id` to `habilis-network` and let it rule on the password.
 ///
 /// This is the check. `JoinParams::resolve` decodes the id, stretches the
 /// password with Argon2id, and compares the result against the verifier the id
@@ -738,9 +762,9 @@ fn resolve_id(mesh_id: String, password: Option<&str>) -> Result<ShareMeshTarget
     Ok(ShareMeshTarget { resolved, mesh_id })
 }
 
-/// Rewrite `fofoca`'s password errors into this tool's vocabulary.
+/// Rewrite `habilis-network`'s password errors into this tool's vocabulary.
 ///
-/// Matched on the message because `fofoca` does not export a type for these
+/// Matched on the message because `habilis-network` does not export a type for these
 /// yet: `apply_password` fails with a bare `bail!("wrong password")` and its
 /// `PasswordRequired` is `pub(crate)`, despite its own doc calling it "typed for
 /// the frontends". Worth fixing there — until then a reword upstream silently
@@ -777,7 +801,7 @@ pub(crate) async fn join(opts: JoinOpts) -> Result<ShareMesh> {
     // Read before `shared` is moved into the setup params below.
     let local_endpoint = shared.endpoint.id().to_string();
     let live = Arc::new(AtomicUsize::new(0));
-    let config = fofoca::runtime::setup_mesh(
+    let config = habilis_network::runtime::setup_mesh(
         kind,
         SetupParams {
             author,
@@ -794,7 +818,7 @@ pub(crate) async fn join(opts: JoinOpts) -> Result<ShareMesh> {
             // The Router owns accept() now; the share's ALPNs ride along.
             protocols,
             transports,
-            multihop: false,
+            max_direct: MAX_DIRECT_PEERS,
             per_peer_gate: Some(share_card_gate()),
             cohost: None,
             live_count: Some(Arc::clone(&live)),
@@ -1067,32 +1091,33 @@ mod tests {
         role: Role,
         tree: Option<String>,
     ) -> super::ShareMesh {
-        use fofoca::runtime::InjectedEndpoint;
-        use fofoca_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+        use habilis_network_iroh_webrtc_transport::WebRtcTransport;
         use rand::RngCore;
 
         let mut key_bytes = [0u8; 32];
         rand::rng().fill_bytes(&mut key_bytes);
-        let key = fofoca::iroh::SecretKey::from_bytes(&key_bytes);
-        let webrtc = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-        let endpoint = crate::lookup::build_endpoint(
+        let key = habilis_network::iroh::SecretKey::from_bytes(&key_bytes);
+        let webrtc = super::WebRtcHandle::new(WebRtcTransport::new(key.public()));
+        let admission = super::SignalAdmission::new(super::MAX_DIRECT_PEERS);
+        let endpoint = crate::lookup::build_endpoint_with_admission(
             lookups,
             Some(key),
             None,
             Vec::new(),
             Some(webrtc.clone()),
             false,
+            Some(&admission),
         )
         .await
         .expect("bind endpoint");
         super::join(super::JoinOpts {
             target: super::mint(token, lookups, None).expect("mint the share mesh"),
-            shared: InjectedEndpoint { endpoint, webrtc },
+            shared: super::injected_endpoint(endpoint, webrtc, admission),
             protocols: Vec::new(),
             role,
             tree,
             serving: None,
-            transports: fofoca::net::TransportOpts::default(),
+            transports: habilis_network::net::TransportOpts::default(),
         })
         .await
         .expect("join the share mesh")

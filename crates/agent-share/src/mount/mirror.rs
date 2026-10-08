@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::authorship::SignedManifest;
 use anyhow::{Context, Result, bail};
-use fofoca_chunks::ChunkMap;
+use habilis_network_chunks::ChunkMap;
 
 use super::MountTicket;
 use super::consume::RemoteClient;
@@ -162,7 +162,8 @@ pub(crate) async fn mirror(
     // The same endpoint the mount form builds, for the same reason: it carries
     // the WebRTC handle, without which `--transport webrtc` has no lane to be
     // forced onto.
-    let (endpoint, webrtc) = super::consume::consumer_endpoint(&ticket, webrtc_only).await?;
+    let (endpoint, webrtc, _admission) =
+        super::consume::consumer_endpoint(&ticket, webrtc_only).await?;
     add_peer_addr(&endpoint, ticket.addr.clone())?;
     let client = RemoteClient::new(endpoint.clone(), ticket, auth)
         .with_webrtc(webrtc.clone())

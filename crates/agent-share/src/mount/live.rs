@@ -254,7 +254,7 @@ impl LiveTree {
                 }
                 let path = root.join(file.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
                 // Size is the cheap half of the version gate, and the half that
-                // catches a half-written mirror. `fofoca-blobs` holds the other
+                // catches a half-written mirror. `habilis-network-blobs` holds the other
                 // half for content this peer can prove.
                 match std::fs::metadata(&path) {
                     Ok(meta) if meta.len() == file.size => Some(path),

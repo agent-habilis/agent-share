@@ -19,10 +19,10 @@
 //! same machine twice — once for the mount session, once for the mesh session.
 
 use agent_share_proto::auth::ShareAuth;
-use fofoca::iroh::EndpointId;
-use fofoca::iroh::endpoint::Connection;
-use fofoca::iroh::protocol::{AcceptError, ProtocolHandler};
-use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
+use habilis_network::iroh::EndpointId;
+use habilis_network::iroh::endpoint::Connection;
+use habilis_network::iroh::protocol::{AcceptError, ProtocolHandler};
+use habilis_network_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
 
 /// Serves `MOUNT_ALPN`: one long-lived connection, one request per bi-stream.
 ///

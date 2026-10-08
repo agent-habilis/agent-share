@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use fofoca::iroh::Endpoint;
+use habilis_network::iroh::Endpoint;
 
 pub(crate) mod walk;
 pub(crate) mod wire;
