@@ -321,7 +321,10 @@ mod tests {
         ticket.flags = TICKET_FLAG_PASSWORD;
         ticket.mesh_id = Some("some-habilis-network-mesh-id".to_owned());
         let decoded = MountTicket::decode(&ticket.encode()).expect("decode");
-        assert_eq!(decoded.mesh_id.as_deref(), Some("some-habilis-network-mesh-id"));
+        assert_eq!(
+            decoded.mesh_id.as_deref(),
+            Some("some-habilis-network-mesh-id")
+        );
     }
 
     /// A protected ticket minted before the mesh id existed must still decode.

@@ -135,7 +135,10 @@ impl agent_share_mount::ServeSource for Never {
     async fn answer_chunk(&self, _address: habilis_network_chunks::ChunkHash) -> Option<Vec<u8>> {
         match *self {}
     }
-    async fn answer_have(&self, _root: habilis_network_chunks::Root) -> Option<habilis_network_chunks::Coverage> {
+    async fn answer_have(
+        &self,
+        _root: habilis_network_chunks::Root,
+    ) -> Option<habilis_network_chunks::Coverage> {
         match *self {}
     }
 }

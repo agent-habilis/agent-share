@@ -39,9 +39,9 @@ use std::sync::{Arc, RwLock};
 
 use agent_share_proto::framing::WATCH_FRAME_MANIFEST;
 use agent_share_proto::manifest::ReadStatus;
-use habilis_network_chunks::{ChunkHash, ChunkMap, ChunkSource, Coverage, Root};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
+use habilis_network_chunks::{ChunkHash, ChunkMap, ChunkSource, Coverage, Root};
 
 use crate::serve::{ServeSource, Watcher};
 
