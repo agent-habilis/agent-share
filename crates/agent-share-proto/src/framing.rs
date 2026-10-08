@@ -749,7 +749,7 @@ mod tests {
         assert_eq!(OP_BENCH, 4);
         // Added for RFC 03. The op number is the *only* thing about hashing
         // that belongs in this crate — the outboard format, the store and the
-        // verification all live in `habilis-network-blobs`, which knows nothing about
+        // verification all live in `habilis-network-chunks`, which knows nothing about
         // shares. Reserving a number is not learning about blobs.
         assert_eq!(OP_HASH, 5);
         assert_eq!(MAX_OUTBOARD_BYTES, 64 * 1024 * 1024);

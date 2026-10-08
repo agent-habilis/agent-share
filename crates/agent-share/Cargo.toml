@@ -44,7 +44,7 @@ agent-share-mount = { path = "../agent-share-mount" }
 # about shares — enforced on its side by `tests/isolation.rs`.
 #
 # It grew up in this repo and moved to `agent-habilis/habilis-network` at v0.6.0. It
-# replaces `habilis-network-blobs`, whose bao outboards prove *placement* rather than
+# replaces the engine's former blob store, whose bao outboards prove *placement* rather than
 # content and therefore can never dedup or be served by a peer that does not
 # know the file.
 habilis-network-chunks.workspace = true

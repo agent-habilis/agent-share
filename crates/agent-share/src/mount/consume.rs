@@ -28,7 +28,7 @@ use super::{
     OP_READ, OP_WATCH,
 };
 // The root type comes from the store, not from this crate: `agent-share` names
-// what `habilis-network-blobs` verifies against rather than defining a second one.
+// what `habilis-network-chunks` verifies against rather than defining a second one.
 use super::{MountManifest, ReadStatus};
 use crate::file::wire::read_u32;
 use crate::lookup::{add_peer_addr, build_endpoint_with_admission};
