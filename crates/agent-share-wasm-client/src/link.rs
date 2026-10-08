@@ -30,9 +30,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use fofoca::iroh::endpoint::Connection;
-use fofoca::iroh::{EndpointId, TransportAddr};
-use fofoca_iroh_webrtc_transport::BrowserHubTransport;
+use habilis_network::iroh::endpoint::Connection;
+use habilis_network::iroh::{EndpointId, TransportAddr};
+use habilis_network_iroh_webrtc_transport::BrowserHubTransport;
 
 /// Cumulative counters differenced into rates.
 ///
@@ -151,7 +151,7 @@ pub(crate) fn path_label(addr: &TransportAddr) -> String {
         TransportAddr::Relay(_) => "relay".to_owned(),
         TransportAddr::Ip(_) => "ip".to_owned(),
         TransportAddr::Custom(custom)
-            if custom.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID =>
+            if custom.id() == habilis_network_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID =>
         {
             "webrtc".to_owned()
         }

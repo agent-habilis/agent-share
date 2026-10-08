@@ -27,18 +27,18 @@ use agent_share_proto::PeerCard;
 use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
 use agent_share_proto::roster::{MetaEntry, Roster, entries_from_meta};
-use fofoca::embed::{
+use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
     SilentSink,
 };
-use fofoca::net::TransportOpts;
-use fofoca::ops::{StateMergeParams, broadcast_state_merge};
-use fofoca::protocol::Password;
-use fofoca::protocol::{
+use habilis_network::net::TransportOpts;
+use habilis_network::ops::{StateMergeParams, broadcast_state_merge};
+use habilis_network::protocol::Password;
+use habilis_network::protocol::{
     Channel, DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message, Nickname,
     TransportPolicy,
 };
-use fofoca::runtime::{
+use habilis_network::runtime::{
     CreateParams, InjectedEndpoint, JoinParams, Node, Resolved, SetupParams,
     derive_topic_mesh_with, setup_mesh,
 };
@@ -154,7 +154,8 @@ pub(crate) fn parse_card_parts(
 /// The engine's own constant, not a copy: this is both the number the tab
 /// enforces and the denominator its header renders, and when they were separate
 /// literals the header could show `18/16`.
-use fofoca::net::MAX_DIRECT_PEERS;
+use habilis_network::net::MAX_DIRECT_PEERS;
+use habilis_network::net::direct::SignalAdmission;
 
 /// Meta per-peer gate: only `<nick>` may write `/peers/<nick>/card`.
 /// Must match on every share-mesh replica (genesis identity).
@@ -171,10 +172,10 @@ fn share_card_gate() -> SelfWriteGate {
 /// crates that see both. `agent-share-proto` stays wasm-clean and
 /// `iroh-base`-only, so it must not depend on the engine just to spare these
 /// ten lines; the CLI carries the same ones.
-fn mesh_lookups(share: &agent_share_proto::lookup::LookupOpts) -> fofoca::protocol::LookupOpts {
+fn mesh_lookups(share: &agent_share_proto::lookup::LookupOpts) -> habilis_network::protocol::LookupOpts {
     use agent_share_proto::lookup::RelayChoice as ShareRelay;
-    use fofoca::protocol::RelayChoice as MeshRelay;
-    fofoca::protocol::LookupOpts {
+    use habilis_network::protocol::RelayChoice as MeshRelay;
+    habilis_network::protocol::LookupOpts {
         mdns: share.mdns,
         dht: share.dht,
         relay_lookup: match &share.relay {
@@ -304,7 +305,7 @@ impl ShareMeshDriver {
     }
 }
 
-#[fofoca::async_trait]
+#[habilis_network::async_trait]
 impl NodeApp for ShareMeshDriver {
     fn classify(&self, _message: &Message) -> AppClass {
         AppClass {
@@ -348,7 +349,7 @@ impl NodeApp for ShareMeshDriver {
     }
 }
 
-#[fofoca::async_trait]
+#[habilis_network::async_trait]
 impl NodeDriver for ShareMeshDriver {
     type Session = ShareRequest;
     type Http = ();
@@ -395,7 +396,7 @@ pub struct MeshPeer {
     /// and on its periodic refresh. Lock-free, so the UI can poll it per frame
     /// without a request/response hop into the loop.
     live: Arc<AtomicUsize>,
-    hub: Arc<fofoca_iroh_webrtc_transport::BrowserHubTransport>,
+    hub: Arc<habilis_network_iroh_webrtc_transport::BrowserHubTransport>,
     /// Peer cards from meta `/peers/<nick>/card`, keyed by endpoint id.
     clients: ClientBook,
     /// The manifest fingerprint on our card. See [`SharedTree`].
@@ -494,15 +495,16 @@ impl MeshPeer {
     /// mesh's Router rather than a loop of its own.
     pub(crate) async fn join_share_with(
         resolved: Resolved,
-        endpoint: fofoca::iroh::Endpoint,
-        webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
-        protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
+        endpoint: habilis_network::iroh::Endpoint,
+        webrtc: habilis_network_iroh_webrtc_transport::WebRtcHandle,
+        admission: SignalAdmission,
+        protocols: Vec<(Vec<u8>, Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>)>,
         card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
         spawn_peer_inner(
             resolved,
             TransportOpts::default(),
-            Some(InjectedEndpoint { endpoint, webrtc }),
+            Some(InjectedEndpoint { endpoint, webrtc, admission }),
             protocols,
             card,
         )
@@ -518,13 +520,18 @@ impl MeshPeer {
     pub(crate) async fn join_share(
         resolved: Resolved,
         shared: Option<(
-            fofoca::iroh::Endpoint,
-            fofoca_iroh_webrtc_transport::WebRtcHandle,
+            habilis_network::iroh::Endpoint,
+            habilis_network_iroh_webrtc_transport::WebRtcHandle,
+            SignalAdmission,
         )>,
-        protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
+        protocols: Vec<(Vec<u8>, Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>)>,
         card: CardParts,
     ) -> Result<MeshPeer, JsValue> {
-        let injected = shared.map(|(endpoint, webrtc)| InjectedEndpoint { endpoint, webrtc });
+        let injected = shared.map(|(endpoint, webrtc, admission)| InjectedEndpoint {
+        endpoint,
+        webrtc,
+        admission,
+    });
         spawn_peer_inner(
             resolved,
             TransportOpts::default(),
@@ -546,7 +553,7 @@ impl MeshPeer {
     }
 
     /// The WebRTC hub this peer negotiates mesh sessions on.
-    pub(crate) fn hub(&self) -> &Arc<fofoca_iroh_webrtc_transport::BrowserHubTransport> {
+    pub(crate) fn hub(&self) -> &Arc<habilis_network_iroh_webrtc_transport::BrowserHubTransport> {
         &self.hub
     }
 
@@ -709,7 +716,7 @@ pub(crate) struct ShareMeshRef<'a> {
 /// password is caught.
 ///
 /// The browser twin of the CLI's `mount::mesh`. `mesh_id` is what the ticket
-/// carried: on a protected share it holds the password verifier `fofoca` baked
+/// carried: on a protected share it holds the password verifier `habilis-network` baked
 /// in, so `JoinParams::resolve` can stretch the password and compare it here,
 /// locally, with no producer and no network. That matters because a share is
 /// designed to outlive its producer — a check that needs one usually cannot run.
@@ -745,7 +752,7 @@ pub(crate) fn resolve_share(share: ShareMeshRef<'_>) -> Result<Resolved, JsValue
 ///
 /// Hashes before deriving: the engine carries the topic string into its state
 /// file and user-facing lines, so it must not be the bearer secret. Derived
-/// from the *secret*, with the password layered on by `fofoca` — which switches
+/// from the *secret*, with the password layered on by `habilis-network` — which switches
 /// every derivation onto the stretched key, so the mesh stays unreachable
 /// without the password.
 pub(crate) fn mint_share_mesh_id(
@@ -763,9 +770,9 @@ pub(crate) fn mint_share_mesh_id(
     Ok(mesh.to_string())
 }
 
-/// Rewrite `fofoca`'s password errors so the page can act on them.
+/// Rewrite `habilis-network`'s password errors so the page can act on them.
 ///
-/// Matched on the message because `fofoca` does not export a type for these
+/// Matched on the message because `habilis-network` does not export a type for these
 /// yet — `apply_password` fails with a bare `bail!("wrong password")`. The
 /// `unauthorized:` prefix is what puts the password form back up.
 fn explain_password_error(error: anyhow::Error) -> JsValue {
@@ -794,12 +801,17 @@ async fn spawn_peer(
     resolved: Resolved,
     transports: TransportOpts,
     shared: Option<(
-        fofoca::iroh::Endpoint,
-        fofoca_iroh_webrtc_transport::WebRtcHandle,
+        habilis_network::iroh::Endpoint,
+        habilis_network_iroh_webrtc_transport::WebRtcHandle,
+        SignalAdmission,
     )>,
     card: CardParts,
 ) -> Result<MeshPeer, JsValue> {
-    let injected = shared.map(|(endpoint, webrtc)| InjectedEndpoint { endpoint, webrtc });
+    let injected = shared.map(|(endpoint, webrtc, admission)| InjectedEndpoint {
+        endpoint,
+        webrtc,
+        admission,
+    });
     spawn_peer_inner(resolved, transports, injected, Vec::new(), card).await
 }
 
@@ -807,7 +819,7 @@ async fn spawn_peer_inner(
     resolved: Resolved,
     transports: TransportOpts,
     injected: Option<InjectedEndpoint>,
-    protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
+    protocols: Vec<(Vec<u8>, Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>)>,
     card: CardParts,
 ) -> Result<MeshPeer, JsValue> {
     let Resolved { kind, author, .. } = resolved;
@@ -831,7 +843,7 @@ async fn spawn_peer_inner(
             runtime_base: None,
             state_file: None,
             sink: Arc::new(SilentSink),
-            multihop: false,
+            max_direct: MAX_DIRECT_PEERS,
             // Gate meta so only `<nick>` may write `/peers/<nick>/card`.
             per_peer_gate: Some(share_card_gate()),
             cohost: None,

@@ -7,7 +7,7 @@
 //! holdings served rather than withheld, and answers scoped to this share —
 //! live with the implementation.
 
-use fofoca_chunks::IdbStore;
+use habilis_network_chunks::IdbStore;
 
 /// What a seeding tab serves from.
 pub(crate) type SeederShared = agent_share_mount::Seeder<IdbStore>;

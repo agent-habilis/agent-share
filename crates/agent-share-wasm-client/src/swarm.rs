@@ -30,7 +30,7 @@
 //! handing assignments back means the interesting part is decided by code a unit
 //! test can drive, and the async half has nothing left to get wrong but I/O.
 
-use fofoca_chunks::Coverage;
+use habilis_network_chunks::Coverage;
 
 /// One peer's share of the work: the positions it was asked for, in the order
 /// they should be requested.
@@ -113,7 +113,7 @@ pub(crate) fn plan(missing: &[usize], holders: &[Coverage]) -> Plan {
 
 #[cfg(test)]
 mod tests {
-    use fofoca_chunks::Coverage;
+    use habilis_network_chunks::Coverage;
     // The crate only builds for wasm32, so its harness is wasm-bindgen's. The
     // alias keeps the tests looking like ordinary ones; `live_state` does the
     // same.

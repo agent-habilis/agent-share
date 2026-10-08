@@ -24,12 +24,14 @@ use agent_share_proto::framing::{
 use agent_share_proto::lookup::LookupOpts;
 use agent_share_proto::manifest::{DirEntry, FileEntry, ReadStatus};
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_WEBRTC};
-use fofoca::iroh::endpoint::{Connection, presets};
-use fofoca::iroh::{Endpoint, SecretKey};
-use fofoca_chunks::{
+use habilis_network::iroh::endpoint::{Connection, presets};
+use habilis_network::net::MAX_DIRECT_PEERS;
+use habilis_network::net::direct::SignalAdmission;
+use habilis_network::iroh::{Endpoint, SecretKey};
+use habilis_network_chunks::{
     CHUNK_BYTES, ChunkHash, ChunkMap, ChunkMapBuilder, Coverage, Root, chunk_hash,
 };
-use fofoca_iroh_webrtc_transport::{
+use habilis_network_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle,
     browser_answer, log_signal_sdps,
 };
@@ -419,12 +421,14 @@ impl ShareProducer {
         // not on, or dials a relay ladder this tab never homed on.
         let lookups = LookupOpts::public_preset();
 
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(crate::relay_mode(&lookups.relay))
             .alpns(vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()])
             .add_custom_transport(handle.transport())
             .path_selector(handle.path_selector())
+            .hooks(admission.connection_hook())
             .bind()
             .await
             .map_err(|error| err("bind producer endpoint", &error))?;
@@ -439,7 +443,7 @@ impl ShareProducer {
         // ticket exists — so a fast joiner still is not raced. Injecting the
         // endpoint keeps `setup_mesh` cheap: no key to mint, no second bind,
         // and no second relay registration.
-        let protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> = vec![
+        let protocols: Vec<(Vec<u8>, Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>)> = vec![
             (
                 MOUNT_ALPN.to_vec(),
                 Box::new(MountHandler::new(
@@ -461,7 +465,7 @@ impl ShareProducer {
             None => crate::mesh::default_card_parts("webrtc", Some("producer".to_owned())),
         };
         // Minted here so the id can go in the ticket. On a protected share it
-        // carries the verifier fofoca baked in, which is what lets a viewer rule
+        // carries the verifier habilis-network baked in, which is what lets a viewer rule
         // on its password locally instead of asking this producer — which may
         // not be running when they try.
         let mesh_id = crate::mesh::mint_share_mesh_id(&secret, &lookups, password.as_deref())?;
@@ -475,6 +479,7 @@ impl ShareProducer {
             resolved,
             endpoint.clone(),
             handle.clone(),
+            admission,
             protocols,
             card,
         )
@@ -668,8 +673,8 @@ impl<S> std::fmt::Debug for MountHandler<S> {
     }
 }
 
-impl<S: ServeSource> fofoca::iroh::protocol::ProtocolHandler for MountHandler<S> {
-    async fn accept(&self, conn: Connection) -> Result<(), fofoca::iroh::protocol::AcceptError> {
+impl<S: ServeSource> habilis_network::iroh::protocol::ProtocolHandler for MountHandler<S> {
+    async fn accept(&self, conn: Connection) -> Result<(), habilis_network::iroh::protocol::AcceptError> {
         let source = (*self.source).clone();
         let auth = self.auth;
         wasm_bindgen_futures::spawn_local(async move {
@@ -683,12 +688,12 @@ impl<S: ServeSource> fofoca::iroh::protocol::ProtocolHandler for MountHandler<S>
 
 #[derive(Clone)]
 pub(crate) struct SignalHandler {
-    local: fofoca::iroh::EndpointId,
+    local: habilis_network::iroh::EndpointId,
     hub: send_wrapper::SendWrapper<Arc<BrowserHubTransport>>,
 }
 
 impl SignalHandler {
-    pub(crate) fn new(local: fofoca::iroh::EndpointId, hub: Arc<BrowserHubTransport>) -> Self {
+    pub(crate) fn new(local: habilis_network::iroh::EndpointId, hub: Arc<BrowserHubTransport>) -> Self {
         Self {
             local,
             hub: send_wrapper::SendWrapper::new(hub),
@@ -704,8 +709,8 @@ impl std::fmt::Debug for SignalHandler {
     }
 }
 
-impl fofoca::iroh::protocol::ProtocolHandler for SignalHandler {
-    async fn accept(&self, conn: Connection) -> Result<(), fofoca::iroh::protocol::AcceptError> {
+impl habilis_network::iroh::protocol::ProtocolHandler for SignalHandler {
+    async fn accept(&self, conn: Connection) -> Result<(), habilis_network::iroh::protocol::AcceptError> {
         let local = self.local;
         let hub = Arc::clone(&*self.hub);
         wasm_bindgen_futures::spawn_local(async move {
@@ -856,8 +861,8 @@ async fn accept_bench_loop(
 }
 
 async fn accept_bench_one(
-    incoming: fofoca::iroh::endpoint::Incoming,
-    local: fofoca::iroh::EndpointId,
+    incoming: habilis_network::iroh::endpoint::Incoming,
+    local: habilis_network::iroh::EndpointId,
     hub: &BrowserHubTransport,
     secret: [u8; SECRET_LEN],
     with_webrtc: bool,
@@ -888,8 +893,8 @@ async fn serve_bench(conn: Connection, secret: [u8; SECRET_LEN]) -> Result<(), J
 
 async fn serve_bench_stream(
     conn: &Connection,
-    mut send: fofoca::iroh::endpoint::SendStream,
-    mut recv: fofoca::iroh::endpoint::RecvStream,
+    mut send: habilis_network::iroh::endpoint::SendStream,
+    mut recv: habilis_network::iroh::endpoint::RecvStream,
     secret: &[u8; SECRET_LEN],
 ) -> Result<(), JsValue> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
@@ -1049,7 +1054,7 @@ fn safe_rel_path(path: &str) -> bool {
 }
 async fn serve_signal(
     conn: &Connection,
-    local: fofoca::iroh::EndpointId,
+    local: habilis_network::iroh::EndpointId,
     hub: &BrowserHubTransport,
 ) -> Result<(), JsValue> {
     let remote = conn.remote_id();
