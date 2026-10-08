@@ -40,32 +40,32 @@ path = "src/main.rs"
 agent-share-proto = { path = "../agent-share-proto" }
 agent-share-mount = { path = "../agent-share-mount" }
 # The content-addressed chunk store. The dependency runs one way only:
-# `agent-share` knows about `fofoca-chunks`, and `fofoca-chunks` knows nothing
+# `agent-share` knows about `habilis-network-chunks`, and `habilis-network-chunks` knows nothing
 # about shares — enforced on its side by `tests/isolation.rs`.
 #
-# It grew up in this repo and moved to `fofoca-network/fofoca` at v0.6.0. It
-# replaces `fofoca-blobs`, whose bao outboards prove *placement* rather than
+# It grew up in this repo and moved to `agent-habilis/habilis-network` at v0.6.0. It
+# replaces `habilis-network-blobs`, whose bao outboards prove *placement* rather than
 # content and therefore can never dedup or be served by a peer that does not
 # know the file.
-fofoca-chunks.workspace = true
+habilis-network-chunks.workspace = true
 # The gossip engine. A share joins a mesh derived from its own ticket secret, so
 # everyone holding the link becomes a peer of everyone else rather than only of
 # the producer. Note this pulls the vendored mesh into `default-members`, which
 # the root manifest previously avoided — it is a real build-time cost.
-fofoca = { workspace = true }
+habilis-network = { workspace = true }
 # The WebRTC lane. `native` here — the browser client takes the same crate with
 # `web` instead.
-fofoca-iroh-webrtc-transport = { workspace = true, features = ["native"] }
+habilis-network-iroh-webrtc-transport = { workspace = true, features = ["native"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 clap = { version = "4", features = ["derive"] }
 anstyle = "1"
 anstream = "0.6"
 # NOTE: no `iroh` and no address-lookup entries. All three are reached through
-# `fofoca` -- `fofoca::iroh`, `fofoca::iroh_mdns_address_lookup`,
-# `fofoca::iroh_mainline_address_lookup` -- because the engine needs a forked
+# `habilis-network` -- `habilis_network::iroh`, `habilis_network::iroh_mdns_address_lookup`,
+# `habilis_network::iroh_mainline_address_lookup` -- because the engine needs a forked
 # iroh and a second declaration here would resolve the published crate beside
 # it. The `unstable-custom-transports` feature the WebRTC lane needs is enabled
-# by fofoca's own iroh entry, so it arrives with the re-export.
+# by habilis-network's own iroh entry, so it arrives with the re-export.
 anyhow = "1"
 sha2 = "0.10"
 bs58 = "0.5"
@@ -94,8 +94,8 @@ tempfile = "3"
 # and every other test here runs with `RelayMode::Disabled` precisely to stay
 # off the network.
 #
-# Enabled through fofoca rather than by naming iroh: this crate declares no iroh
-# of its own, so `fofoca/iroh-test-utils` is how an optional iroh feature is
+# Enabled through habilis-network rather than by naming iroh: this crate declares no iroh
+# of its own, so `habilis-network/iroh-test-utils` is how an optional iroh feature is
 # turned on without putting a second iroh in the graph. A dev-dependency, so
 # resolver 3 keeps the feature out of a plain build.
-fofoca = { workspace = true, features = ["iroh-test-utils"] }
+habilis-network = { workspace = true, features = ["iroh-test-utils"] }

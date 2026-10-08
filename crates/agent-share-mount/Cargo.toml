@@ -30,7 +30,7 @@ path = "src/lib.rs"
 # somebody else opened lives here instead.
 [dependencies]
 agent-share-proto = { path = "../agent-share-proto" }
-fofoca-chunks.workspace = true
+habilis-network-chunks.workspace = true
 anyhow.workspace = true
 # Channels for the seeder's watch feed. Wasm-clean and runtime-agnostic, which
 # is why the feed is a `futures` mpsc on both sides rather than each platform's
@@ -42,7 +42,7 @@ futures = "0.3"
 # opened.
 #
 # **Declared here rather than inherited, and the rev is restated as a result.**
-# `default-features = false` is not optional: with fofoca's defaults on, the
+# `default-features = false` is not optional: with habilis-network's defaults on, the
 # graph pulls tokio's `net` feature and therefore `mio`, which fails to compile
 # for `wasm32-unknown-unknown` outright. Cargo refuses to let a member turn
 # default features *off* for an inherited dependency ("`default-features =
@@ -52,4 +52,4 @@ futures = "0.3"
 # The tag must stay in step with the workspace root and with
 # `agent-share-wasm-client`, which restates it for the same reason. Three copies
 # is the cost of a dependency that means different things on two targets.
-fofoca = { git = "https://github.com/fofoca-network/fofoca", rev = "1c844051c95e83773e6d41a8436206c28df070dc", default-features = false }
+habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "2b468bb59a6430c0fea69674a8c010822cf33912", default-features = false }

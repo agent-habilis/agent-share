@@ -39,7 +39,7 @@ use std::sync::{Arc, RwLock};
 
 use agent_share_proto::framing::WATCH_FRAME_MANIFEST;
 use agent_share_proto::manifest::ReadStatus;
-use fofoca_chunks::{ChunkHash, ChunkMap, ChunkSource, Coverage, Root};
+use habilis_network_chunks::{ChunkHash, ChunkMap, ChunkSource, Coverage, Root};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 
@@ -498,7 +498,7 @@ impl<S: ChunkSource + 'static> ServeSource for Seeder<S> {
 mod tests {
     use std::sync::Arc;
 
-    use fofoca_chunks::{ChunkMap, MemStore, Root, chunk_hash};
+    use habilis_network_chunks::{ChunkMap, MemStore, Root, chunk_hash};
 
     use super::Seeder;
     use crate::ServeSource as _;
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn complete_slots_asks_the_store_and_not_the_row() {
         futures::executor::block_on(async {
-            use fofoca_chunks::ChunkStore as _;
+            use habilis_network_chunks::ChunkStore as _;
 
             let bytes = b"the bytes of a file";
             let store = Arc::new(MemStore::new());
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn holds_answers_for_one_slot_only() {
         futures::executor::block_on(async {
-            use fofoca_chunks::ChunkStore as _;
+            use habilis_network_chunks::ChunkStore as _;
 
             let bytes = b"the bytes of a file";
             let store = Arc::new(MemStore::new());
@@ -692,10 +692,10 @@ mod tests {
     #[test]
     fn one_chunk_is_enough_to_seed_that_chunk() {
         futures::executor::block_on(async {
-            use fofoca_chunks::ChunkStore as _;
+            use habilis_network_chunks::ChunkStore as _;
 
             // Two chunks, so "some" and "all" are genuinely different.
-            let bytes = vec![7u8; fofoca_chunks::CHUNK_BYTES_USIZE + 1];
+            let bytes = vec![7u8; habilis_network_chunks::CHUNK_BYTES_USIZE + 1];
             let store = Arc::new(MemStore::new());
             let (seeder, row) = armed(Arc::clone(&store), &bytes);
             assert!(row.len() >= 2, "the fixture must span more than one chunk");
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn a_row_is_not_servable_until_it_is_adopted() {
         futures::executor::block_on(async {
-            use fofoca_chunks::ChunkStore as _;
+            use habilis_network_chunks::ChunkStore as _;
 
             let bytes = b"the bytes of a file";
             let store = Arc::new(MemStore::new());

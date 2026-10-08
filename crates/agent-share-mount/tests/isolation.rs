@@ -7,7 +7,7 @@
 //! moment it can, the easy fix for any awkwardness is a `cfg` that quietly
 //! forks the behaviour, and the copies are back.
 //!
-//! `fofoca-chunks/tests/isolation.rs` guards a different rule with the same
+//! `habilis-network-chunks/tests/isolation.rs` guards a different rule with the same
 //! trick: it forbids the network layer. This one forbids *platforms*.
 //!
 //! A compile-time check would be better than reading the manifest, but a crate
@@ -129,20 +129,20 @@ impl agent_share_mount::ServeSource for Never {
     ) -> (agent_share_proto::manifest::ReadStatus, Vec<u8>) {
         match *self {}
     }
-    async fn answer_chunk_map(&self, _index: u32) -> Option<fofoca_chunks::ChunkMap> {
+    async fn answer_chunk_map(&self, _index: u32) -> Option<habilis_network_chunks::ChunkMap> {
         match *self {}
     }
-    async fn answer_chunk(&self, _address: fofoca_chunks::ChunkHash) -> Option<Vec<u8>> {
+    async fn answer_chunk(&self, _address: habilis_network_chunks::ChunkHash) -> Option<Vec<u8>> {
         match *self {}
     }
-    async fn answer_have(&self, _root: fofoca_chunks::Root) -> Option<fofoca_chunks::Coverage> {
+    async fn answer_have(&self, _root: habilis_network_chunks::Root) -> Option<habilis_network_chunks::Coverage> {
         match *self {}
     }
 }
 
 /// A `[target.'cfg(...)']` block would be the natural way to smuggle a
 /// platform-only dependency past the list above, so it is refused outright.
-/// `fofoca-chunks` legitimately has them — it has a browser storage backend —
+/// `habilis-network-chunks` legitimately has them — it has a browser storage backend —
 /// but this crate has no per-platform half, and the day it grows one is the day
 /// the copies start drifting again.
 #[test]
