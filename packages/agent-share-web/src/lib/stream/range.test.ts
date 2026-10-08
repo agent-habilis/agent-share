@@ -37,7 +37,7 @@ function ranged(header: string | null, size = 1000): Request {
 }
 
 /**
- * `fofoca_chunks::CHUNK_BYTES`, mirrored here for the same reason `range.ts`
+ * `habilis_network_chunks::CHUNK_BYTES`, mirrored here for the same reason `range.ts`
  * mirrors it: these tests assert what the page will be able to *keep*.
  */
 const CHUNK_BYTES = 64 * 1024
