@@ -56,8 +56,8 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     // kept in sync by a comment; peers that disagree on either fail to connect
     // with no useful error, so the de-duplication is worth a test.
     //
-    // Their one definition now lives in `fofoca-iroh-webrtc-transport`, which
-    // moved to the `fofoca-network/fofoca` workspace — so what this side can
+    // Their one definition now lives in `habilis-network-iroh-webrtc-transport`, which
+    // moved to the `agent-habilis/habilis-network` workspace — so what this side can
     // still assert is the half that matters here: neither is redeclared
     // locally. A copy in this tree is exactly the drift the original check
     // existed to catch, and it would compile.
@@ -71,7 +71,7 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         let files: Vec<_> = hits.lines().filter(|line| !line.is_empty()).collect();
         if !files.is_empty() {
             return Err(format!(
-                "`{needle}` is owned by fofoca-iroh-webrtc-transport and must not be \
+                "`{needle}` is owned by habilis-network-iroh-webrtc-transport and must not be \
                  redeclared here, found in {files:?}"
             )
             .into());
@@ -96,15 +96,15 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         .quiet()
         .run()?;
         // The engine's own wasm32 legs — a portable check and the
-        // `wasm_runtime` suite — moved with it to `fofoca-network/fofoca` and
+        // `wasm_runtime` suite — moved with it to `agent-habilis/habilis-network` and
         // run in that repo's CI. What is left here is this repo's own code.
         //
         // The wasm client is excluded from the workspace, so nothing above
         // reaches it — and its tests run *here*, on wasm32, rather than with
         // the other `cargo test` lines above.
         //
-        // Not a preference. Off wasm32 `fofoca` turns on
-        // `fofoca-iroh-webrtc-transport/native`, and with both backends enabled
+        // Not a preference. Off wasm32 `habilis-network` turns on
+        // `habilis-network-iroh-webrtc-transport/native`, and with both backends enabled
         // `WebRtcHandle` resolves to the host one while this crate hands it a
         // `BrowserHubTransport` — so a host build cannot type-check by
         // construction. CI ran it on the host anyway and had been red for it.
