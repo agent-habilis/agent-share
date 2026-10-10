@@ -29,8 +29,8 @@ agent-share-mount = { path = "../agent-share-mount" }
 # socket, the filesystem and multihop, none of which exist in a tab. What
 # remains is the whole node runtime — `setup_mesh` → `Node::spawn` → the event
 # loop — so a browser peer is the same peer a CLI runs, not a reduced stand-in.
-habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "2b468bb59a6430c0fea69674a8c010822cf33912", default-features = false }
-habilis-network-iroh-webrtc-transport = { git = "https://github.com/agent-habilis/habilis-network", rev = "2b468bb59a6430c0fea69674a8c010822cf33912", features = ["web"] }
+habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "1a5ae5ab24f032d1862b67cdda063d6f72bde49f", default-features = false }
+habilis-network-iroh-webrtc-transport = { git = "https://github.com/agent-habilis/habilis-network", rev = "1a5ae5ab24f032d1862b67cdda063d6f72bde49f", features = ["web"] }
 # NOTE: no iroh entries -- taken from `habilis_network::iroh` and
 # `habilis_network_protocol::iroh_base`, which this crate already depends on.
 anyhow = "1"
@@ -71,7 +71,7 @@ web-sys = { version = "0.3", features = [
 # tests. It grew up in this workspace and moved to `agent-habilis/habilis-network` at
 # v0.6.0; restated here rather than inherited because this workspace stands
 # alone. The tag must stay in step with the root workspace's.
-habilis-network-chunks = { git = "https://github.com/agent-habilis/habilis-network", rev = "2b468bb59a6430c0fea69674a8c010822cf33912" }
+habilis-network-chunks = { git = "https://github.com/agent-habilis/habilis-network", rev = "1a5ae5ab24f032d1862b67cdda063d6f72bde49f" }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
