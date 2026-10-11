@@ -34,7 +34,10 @@ use std::path::{Path, PathBuf};
 use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::authorship::SignedManifest;
 use anyhow::{Context, Result, bail};
+use habilis_network::iroh::Endpoint;
+use habilis_network::net::direct::SignalAdmission;
 use habilis_network_chunks::ChunkMap;
+use habilis_network_iroh_webrtc_transport::WebRtcHandle;
 
 use super::MountTicket;
 use super::consume::RemoteClient;
@@ -130,6 +133,22 @@ fn wanted(only: &[String], rel_path: &str) -> bool {
     })
 }
 
+/// The same endpoint the mount form builds, for the same reason: it carries
+/// the WebRTC handle, without which `--transport webrtc` has no lane to be
+/// forced onto.
+///
+/// # Errors
+/// The endpoint cannot bind, or the origin address is unusable.
+async fn mirror_endpoint(
+    ticket: &MountTicket,
+    webrtc_only: bool,
+) -> Result<(Endpoint, WebRtcHandle, SignalAdmission)> {
+    let (endpoint, webrtc, admission) =
+        super::consume::consumer_endpoint(ticket, webrtc_only).await?;
+    add_peer_addr(&endpoint, ticket.addr.clone())?;
+    Ok((endpoint, webrtc, admission))
+}
+
 /// Copy every file in the share behind `ticket` into `dest`.
 ///
 /// # Errors
@@ -159,12 +178,7 @@ pub(crate) async fn mirror(
     // The creator's public key, so the copy names the same author. Public: this
     // is what a copy is *given*, unlike the key that would let it publish.
     let author = ticket.author;
-    // The same endpoint the mount form builds, for the same reason: it carries
-    // the WebRTC handle, without which `--transport webrtc` has no lane to be
-    // forced onto.
-    let (endpoint, webrtc, _admission) =
-        super::consume::consumer_endpoint(&ticket, webrtc_only).await?;
-    add_peer_addr(&endpoint, ticket.addr.clone())?;
+    let (endpoint, webrtc, _admission) = mirror_endpoint(&ticket, webrtc_only).await?;
     let client = RemoteClient::new(endpoint.clone(), ticket, auth)
         .with_webrtc(webrtc.clone())
         .webrtc_only(webrtc_only);
@@ -625,6 +639,8 @@ mod tests {
 
     use super::wanted;
     use super::{ORIGIN_SECRET, origin_secret_for, safe_join, sidecar_dir, write_secret};
+    use crate::lookup::build_endpoint;
+    use crate::protocol::swarm::LookupOpts;
 
     /// **The property that makes a copy a source rather than a rival share.**
     ///
@@ -675,6 +691,34 @@ mod tests {
         assert_eq!(origin_secret_for(&root), None);
 
         let _ = std::fs::remove_dir_all(&sidecar);
+    }
+
+    /// The mount form's endpoint already holds the origin's address. Each
+    /// further registration adds one more address book to the endpoint for the
+    /// same peer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mirror_registers_the_origin_in_one_address_book() {
+        let (producer, ticket, _secret, _producer_webrtc, _producer_admission) =
+            crate::mount::produce::bind(LookupOpts::loopback(), None)
+                .await
+                .expect("bind producer");
+        let bare = build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
+            .await
+            .expect("bare endpoint");
+        let baseline = bare.address_lookup().expect("lookup services").len();
+
+        let (endpoint, _webrtc, _admission) = super::mirror_endpoint(&ticket, false)
+            .await
+            .expect("mirror endpoint");
+
+        assert_eq!(
+            endpoint.address_lookup().expect("lookup services").len(),
+            baseline + 1,
+            "the origin must be in exactly one address book"
+        );
+        endpoint.close().await;
+        bare.close().await;
+        producer.close().await;
     }
 
     #[test]
