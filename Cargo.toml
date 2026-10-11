@@ -40,12 +40,12 @@ rust-version = "1.93"
 # a path dep to a sibling checkout needed no round trip. habilis-network cuts tags
 # (vX.Y.Z); name the tag, never a raw rev, and keep it in step with
 # agent-gossip's.
-habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "1a5ae5ab24f032d1862b67cdda063d6f72bde49f" }
-habilis-network-protocol = { git = "https://github.com/agent-habilis/habilis-network", rev = "1a5ae5ab24f032d1862b67cdda063d6f72bde49f", default-features = false }
-habilis-network-iroh-webrtc-transport = { git = "https://github.com/agent-habilis/habilis-network", rev = "1a5ae5ab24f032d1862b67cdda063d6f72bde49f" }
+habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb" }
+habilis-network-protocol = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb", default-features = false }
+habilis-network-iroh-webrtc-transport = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb" }
 # The content-addressed chunk store, a member of the same monorepo since
 # v0.6.0 (it grew up in this repo under crates/habilis-network-chunks and moved).
-habilis-network-chunks = { git = "https://github.com/agent-habilis/habilis-network", rev = "1a5ae5ab24f032d1862b67cdda063d6f72bde49f" }
+habilis-network-chunks = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
