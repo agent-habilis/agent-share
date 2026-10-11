@@ -42,7 +42,6 @@ use habilis_network_iroh_webrtc_transport::WebRtcHandle;
 use super::MountTicket;
 use super::consume::RemoteClient;
 use crate::file::human_bytes;
-use crate::lookup::add_peer_addr;
 
 /// One file's outcome, for the summary line.
 #[derive(Default)]
@@ -135,7 +134,7 @@ fn wanted(only: &[String], rel_path: &str) -> bool {
 
 /// The same endpoint the mount form builds, for the same reason: it carries
 /// the WebRTC handle, without which `--transport webrtc` has no lane to be
-/// forced onto.
+/// forced onto. That endpoint already holds the origin's address.
 ///
 /// # Errors
 /// The endpoint cannot bind, or the origin address is unusable.
@@ -143,10 +142,7 @@ async fn mirror_endpoint(
     ticket: &MountTicket,
     webrtc_only: bool,
 ) -> Result<(Endpoint, WebRtcHandle, SignalAdmission)> {
-    let (endpoint, webrtc, admission) =
-        super::consume::consumer_endpoint(ticket, webrtc_only).await?;
-    add_peer_addr(&endpoint, ticket.addr.clone())?;
-    Ok((endpoint, webrtc, admission))
+    super::consume::consumer_endpoint(ticket, webrtc_only).await
 }
 
 /// Copy every file in the share behind `ticket` into `dest`.
