@@ -137,11 +137,12 @@ mod tests {
     use std::sync::Arc;
 
     use agent_share_proto::auth::{ShareAuth, share_token};
+    use habilis_network::net::{add_peer_addr, address_book};
     use rand::RngCore as _;
 
     use super::consume::RemoteClient;
     use super::{MAX_READ_LEN, MountTicket, SECRET_LEN, produce};
-    use crate::lookup::{add_peer_addr, build_endpoint};
+    use crate::lookup::build_endpoint;
     use crate::protocol::swarm::LookupOpts;
 
     /// Stand up a loopback producer serving `root` and a client connected to
@@ -186,7 +187,7 @@ mod tests {
             build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
                 .await
                 .expect("consumer endpoint");
-        add_peer_addr(&consumer_endpoint, ticket.addr.clone()).expect("add peer addr");
+        add_peer_addr(&address_book(&consumer_endpoint), ticket.addr.clone());
         let client = RemoteClient::new(consumer_endpoint, ticket, auth);
         (endpoint, client, producer)
     }
@@ -235,7 +236,7 @@ mod tests {
             build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
                 .await
                 .expect("consumer endpoint");
-        add_peer_addr(&consumer_endpoint, ticket.addr.clone()).expect("add peer addr");
+        add_peer_addr(&address_book(&consumer_endpoint), ticket.addr.clone());
         let client = RemoteClient::new(consumer_endpoint, ticket, auth);
         (endpoint, client, producer)
     }
@@ -304,7 +305,7 @@ mod tests {
         let endpoint = build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
             .await
             .expect("client endpoint");
-        add_peer_addr(&endpoint, ticket.addr.clone()).expect("add peer addr");
+        add_peer_addr(&address_book(&endpoint), ticket.addr.clone());
         RemoteClient::new(endpoint, ticket, auth)
     }
 
@@ -314,7 +315,7 @@ mod tests {
         let endpoint = build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
             .await
             .expect("client endpoint");
-        add_peer_addr(&endpoint, ticket.addr.clone()).expect("add peer addr");
+        add_peer_addr(&address_book(&endpoint), ticket.addr.clone());
         RemoteClient::new(endpoint, ticket, auth)
     }
 
@@ -825,7 +826,7 @@ mod tests {
         let bad_endpoint = build_endpoint(&bad_ticket.lookups, None, None, Vec::new(), None, false)
             .await
             .expect("bad-client endpoint");
-        add_peer_addr(&bad_endpoint, bad_ticket.addr.clone()).expect("add peer addr");
+        add_peer_addr(&address_book(&bad_endpoint), bad_ticket.addr.clone());
         let bad_auth = ShareAuth::new(&bad_ticket.secret, None);
         let bad = RemoteClient::new(bad_endpoint, bad_ticket, bad_auth);
         assert!(bad.fetch_manifest().await.is_err(), "bad secret must fail");

@@ -35,6 +35,7 @@ use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::authorship::SignedManifest;
 use anyhow::{Context, Result, bail};
 use habilis_network::iroh::Endpoint;
+use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::net::direct::SignalAdmission;
 use habilis_network_chunks::ChunkMap;
 use habilis_network_iroh_webrtc_transport::WebRtcHandle;
@@ -134,14 +135,15 @@ fn wanted(only: &[String], rel_path: &str) -> bool {
 
 /// The same endpoint the mount form builds, for the same reason: it carries
 /// the WebRTC handle, without which `--transport webrtc` has no lane to be
-/// forced onto. That endpoint already holds the origin's address.
+/// forced onto. That endpoint already holds the origin's address, in its one
+/// address book.
 ///
 /// # Errors
-/// The endpoint cannot bind, or the origin address is unusable.
+/// The endpoint cannot bind.
 async fn mirror_endpoint(
     ticket: &MountTicket,
     webrtc_only: bool,
-) -> Result<(Endpoint, WebRtcHandle, SignalAdmission)> {
+) -> Result<(Endpoint, WebRtcHandle, SignalAdmission, MemoryLookup)> {
     super::consume::consumer_endpoint(ticket, webrtc_only).await
 }
 
@@ -174,7 +176,7 @@ pub(crate) async fn mirror(
     // The creator's public key, so the copy names the same author. Public: this
     // is what a copy is *given*, unlike the key that would let it publish.
     let author = ticket.author;
-    let (endpoint, webrtc, _admission) = mirror_endpoint(&ticket, webrtc_only).await?;
+    let (endpoint, webrtc, _admission, _book) = mirror_endpoint(&ticket, webrtc_only).await?;
     let client = RemoteClient::new(endpoint.clone(), ticket, auth)
         .with_webrtc(webrtc.clone())
         .webrtc_only(webrtc_only);
@@ -633,6 +635,8 @@ fn report(tally: &Tally, dest: &Path, json: bool) {
 mod tests {
     use std::path::Path;
 
+    use habilis_network::net::add_peer_addr;
+
     use super::wanted;
     use super::{ORIGIN_SECRET, origin_secret_for, safe_join, sidecar_dir, write_secret};
     use crate::lookup::build_endpoint;
@@ -703,7 +707,7 @@ mod tests {
             .expect("bare endpoint");
         let baseline = bare.address_lookup().expect("lookup services").len();
 
-        let (endpoint, _webrtc, _admission) = super::mirror_endpoint(&ticket, false)
+        let (endpoint, _webrtc, _admission, book) = super::mirror_endpoint(&ticket, false)
             .await
             .expect("mirror endpoint");
 
@@ -711,6 +715,12 @@ mod tests {
             endpoint.address_lookup().expect("lookup services").len(),
             baseline + 1,
             "the origin must be in exactly one address book"
+        );
+        add_peer_addr(&book, ticket.addr.clone());
+        assert_eq!(
+            endpoint.address_lookup().expect("lookup services").len(),
+            baseline + 1,
+            "a later address must go into the same book"
         );
         endpoint.close().await;
         bare.close().await;

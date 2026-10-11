@@ -8,9 +8,8 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use anyhow::{Context, Result};
-use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::iroh::{
-    Endpoint, EndpointAddr, RelayMode, SecretKey,
+    Endpoint, RelayMode, SecretKey,
     endpoint::{PortmapperConfig, presets},
 };
 use habilis_network::net::direct::SignalAdmission;
@@ -161,18 +160,6 @@ pub(crate) async fn build_endpoint_with_admission(
         "endpoint bound"
     );
     Ok(endpoint)
-}
-
-/// Register a peer's address so the endpoint can connect to it.
-///
-/// # Errors
-/// The endpoint has no memory address-lookup registered to add to.
-pub fn add_peer_addr(endpoint: &Endpoint, addr: EndpointAddr) -> Result<()> {
-    let lookup = MemoryLookup::new();
-    lookup.add_endpoint_info(addr);
-    endpoint.address_lookup()?.add(lookup);
-    tracing::debug!("registered a direct peer address with the endpoint");
-    Ok(())
 }
 
 #[cfg(test)]

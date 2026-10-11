@@ -24,6 +24,7 @@ use agent_share_proto::manifest::MountManifest;
 use agent_share_proto::ticket::MountTicket;
 use habilis_network::iroh::endpoint::{Connection, presets};
 use habilis_network::iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
+use habilis_network::net::{add_peer_addr, address_book};
 use habilis_network_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, WebRtcTransport, custom_addr,
     offer_with,
@@ -103,8 +104,7 @@ async fn the_real_cli_serves_over_webrtc() {
         .bind()
         .await
         .expect("bind consumer");
-    agent_share::test_support::add_peer_addr(&consumer, ticket.addr.clone())
-        .expect("register the producer's address");
+    add_peer_addr(&address_book(&consumer), ticket.addr.clone());
 
     // 1. Signal.
     let signal = consumer

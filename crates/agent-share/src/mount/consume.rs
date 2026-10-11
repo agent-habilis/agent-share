@@ -12,8 +12,10 @@ use agent_share_proto::framing::{
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use habilis_network::iroh::Endpoint;
+use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::iroh::endpoint::{Connection, RecvStream, SendStream};
 use habilis_network::net::direct::{MAX_DIRECT_PEERS, SignalAdmission};
+use habilis_network::net::{add_peer_addr, address_book};
 use habilis_network_chunks::{ChunkHash, ChunkMap};
 use habilis_network_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
 use nfsserve::tcp::{NFSTcp, NFSTcpListener};
@@ -31,7 +33,7 @@ use super::{
 // what `habilis-network-chunks` verifies against rather than defining a second one.
 use super::{MountManifest, ReadStatus};
 use crate::file::wire::read_u32;
-use crate::lookup::{add_peer_addr, build_endpoint_with_admission};
+use crate::lookup::build_endpoint_with_admission;
 
 /// How long to keep retrying the dial while the producer's address propagates
 /// (mDNS is instant on a LAN; the DHT fallback can take tens of seconds).
@@ -155,7 +157,7 @@ pub(crate) async fn attach(
         auth,
         mesh: mesh_target,
     } = redeem_auth(&ticket, password)?;
-    let (endpoint, webrtc, admission) = consumer_endpoint(&ticket, webrtc_only).await?;
+    let (endpoint, webrtc, admission, _book) = consumer_endpoint(&ticket, webrtc_only).await?;
     // The template every peer client is built from, and the address half of
     // the dead-origin bootstrap.
     let origin_ticket = ticket.clone();
@@ -349,12 +351,15 @@ pub(crate) fn relay_only(addr: &habilis_network::iroh::EndpointAddr) -> bool {
 /// keeps its own UDP socket, so ICE is unaffected, and the relay stays for
 /// rendezvous.
 ///
+/// The returned book is the one address book of the endpoint, and it holds the
+/// producer address. A later address goes into it too.
+///
 /// # Errors
-/// The endpoint cannot bind, or the producer address is unusable.
+/// The endpoint cannot bind.
 pub(super) async fn consumer_endpoint(
     ticket: &MountTicket,
     webrtc_only: bool,
-) -> Result<(Endpoint, WebRtcHandle, SignalAdmission)> {
+) -> Result<(Endpoint, WebRtcHandle, SignalAdmission, MemoryLookup)> {
     let mut key_bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
     let key = habilis_network::iroh::SecretKey::from_bytes(&key_bytes);
@@ -372,8 +377,9 @@ pub(super) async fn consumer_endpoint(
         Some(&admission),
     )
     .await?;
-    add_peer_addr(&endpoint, ticket.addr.clone())?;
-    Ok((endpoint, webrtc, admission))
+    let book = address_book(&endpoint);
+    add_peer_addr(&book, ticket.addr.clone());
+    Ok((endpoint, webrtc, admission, book))
 }
 
 /// Try the OS mount and report either outcome; `true` when it mounted.
