@@ -47,7 +47,7 @@ pub mod test_support {
     use agent_share_proto::auth::ShareAuth;
     use agent_share_proto::manifest::MountManifest;
     use anyhow::Result;
-    use fofoca::iroh::endpoint::Connection;
+    use habilis_network::iroh::endpoint::Connection;
 
     use super::hash::ChunkCache;
     use super::live::LiveTree as Tree;
@@ -137,11 +137,12 @@ mod tests {
     use std::sync::Arc;
 
     use agent_share_proto::auth::{ShareAuth, share_token};
+    use habilis_network::net::{add_peer_addr, address_book};
     use rand::RngCore as _;
 
     use super::consume::RemoteClient;
     use super::{MAX_READ_LEN, MountTicket, SECRET_LEN, produce};
-    use crate::lookup::{add_peer_addr, build_endpoint};
+    use crate::lookup::build_endpoint;
     use crate::protocol::swarm::LookupOpts;
 
     /// Stand up a loopback producer serving `root` and a client connected to
@@ -149,7 +150,7 @@ mod tests {
     async fn producer_and_client(
         root: &std::path::Path,
     ) -> (
-        fofoca::iroh::Endpoint,
+        habilis_network::iroh::Endpoint,
         RemoteClient,
         tokio::task::JoinHandle<()>,
     ) {
@@ -159,9 +160,10 @@ mod tests {
             manifest,
             paths,
         ));
-        let (endpoint, ticket, secret, _webrtc) = produce::bind(LookupOpts::loopback(), None)
-            .await
-            .expect("bind producer");
+        let (endpoint, ticket, secret, _webrtc, _admission) =
+            produce::bind(LookupOpts::loopback(), None)
+                .await
+                .expect("bind producer");
         let auth = ShareAuth::new(&secret, None);
         let accept_endpoint = endpoint.clone();
         let producer = tokio::spawn(async move {
@@ -185,7 +187,7 @@ mod tests {
             build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
                 .await
                 .expect("consumer endpoint");
-        add_peer_addr(&consumer_endpoint, ticket.addr.clone()).expect("add peer addr");
+        add_peer_addr(&address_book(&consumer_endpoint), ticket.addr.clone());
         let client = RemoteClient::new(consumer_endpoint, ticket, auth);
         (endpoint, client, producer)
     }
@@ -196,7 +198,7 @@ mod tests {
         root: &std::path::Path,
         hashes: Option<Arc<super::hash::ChunkCache>>,
     ) -> (
-        fofoca::iroh::Endpoint,
+        habilis_network::iroh::Endpoint,
         RemoteClient,
         tokio::task::JoinHandle<()>,
     ) {
@@ -206,9 +208,10 @@ mod tests {
             manifest,
             paths,
         ));
-        let (endpoint, ticket, secret, _webrtc) = produce::bind(LookupOpts::loopback(), None)
-            .await
-            .expect("bind producer");
+        let (endpoint, ticket, secret, _webrtc, _admission) =
+            produce::bind(LookupOpts::loopback(), None)
+                .await
+                .expect("bind producer");
         let auth = ShareAuth::new(&secret, None);
         let accept_endpoint = endpoint.clone();
         let producer = tokio::spawn(async move {
@@ -233,7 +236,7 @@ mod tests {
             build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
                 .await
                 .expect("consumer endpoint");
-        add_peer_addr(&consumer_endpoint, ticket.addr.clone()).expect("add peer addr");
+        add_peer_addr(&address_book(&consumer_endpoint), ticket.addr.clone());
         let client = RemoteClient::new(consumer_endpoint, ticket, auth);
         (endpoint, client, producer)
     }
@@ -250,7 +253,7 @@ mod tests {
         secret: [u8; SECRET_LEN],
         password: Option<&str>,
     ) -> (
-        fofoca::iroh::Endpoint,
+        habilis_network::iroh::Endpoint,
         MountTicket,
         tokio::task::JoinHandle<()>,
     ) {
@@ -260,9 +263,10 @@ mod tests {
             manifest,
             paths,
         ));
-        let (endpoint, mut ticket, _minted, _webrtc) = produce::bind(LookupOpts::loopback(), None)
-            .await
-            .expect("bind re-seeder");
+        let (endpoint, mut ticket, _minted, _webrtc, _admission) =
+            produce::bind(LookupOpts::loopback(), None)
+                .await
+                .expect("bind re-seeder");
         // Advertise the origin's secret, not the freshly minted one.
         ticket.secret = secret;
         let auth = ShareAuth::new(&secret, password);
@@ -301,7 +305,7 @@ mod tests {
         let endpoint = build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
             .await
             .expect("client endpoint");
-        add_peer_addr(&endpoint, ticket.addr.clone()).expect("add peer addr");
+        add_peer_addr(&address_book(&endpoint), ticket.addr.clone());
         RemoteClient::new(endpoint, ticket, auth)
     }
 
@@ -311,7 +315,7 @@ mod tests {
         let endpoint = build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
             .await
             .expect("client endpoint");
-        add_peer_addr(&endpoint, ticket.addr.clone()).expect("add peer addr");
+        add_peer_addr(&address_book(&endpoint), ticket.addr.clone());
         RemoteClient::new(endpoint, ticket, auth)
     }
 
@@ -349,9 +353,11 @@ mod tests {
         assert_eq!(map.size(), contents.len() as u64);
         assert_eq!(
             map.len(),
-            contents.len().div_ceil(fofoca_chunks::CHUNK_BYTES_USIZE)
+            contents
+                .len()
+                .div_ceil(habilis_network_chunks::CHUNK_BYTES_USIZE)
         );
-        assert_eq!(map, fofoca_chunks::ChunkMap::build(&contents));
+        assert_eq!(map, habilis_network_chunks::ChunkMap::build(&contents));
 
         // Every chunk comes back by address alone, and reassembles the file.
         let mut rebuilt = Vec::new();
@@ -370,7 +376,7 @@ mod tests {
         // And an address this share knows nothing about is declined, which is
         // both the honest answer and what stops the op being a way to probe
         // what else this host holds.
-        let elsewhere = fofoca_chunks::chunk_hash(b"content from another share");
+        let elsewhere = habilis_network_chunks::chunk_hash(b"content from another share");
         assert!(
             client
                 .fetch_chunk(elsewhere)
@@ -404,7 +410,7 @@ mod tests {
         );
         assert!(
             client
-                .fetch_chunk(fofoca_chunks::chunk_hash(b"anything"))
+                .fetch_chunk(habilis_network_chunks::chunk_hash(b"anything"))
                 .await
                 .expect("chunk request")
                 .is_none()
@@ -572,8 +578,8 @@ mod tests {
         let mut secret = [0u8; SECRET_LEN];
         rand::rng().fill_bytes(&mut secret);
         let plain = MountTicket {
-            addr: fofoca::iroh::EndpointAddr::new(
-                fofoca::iroh::SecretKey::from_bytes(&[7u8; 32]).public(),
+            addr: habilis_network::iroh::EndpointAddr::new(
+                habilis_network::iroh::SecretKey::from_bytes(&[7u8; 32]).public(),
             ),
             secret,
             lookups: LookupOpts::loopback(),
@@ -613,7 +619,7 @@ mod tests {
     /// **The whole point of the mesh id in the ticket.**
     ///
     /// A wrong password is named with no producer, no seeder and no socket —
-    /// `fofoca` decodes the id, stretches the password, and compares it against
+    /// `habilis-network` decodes the id, stretches the password, and compares it against
     /// the verifier the id carries. Nothing here binds an endpoint, which is the
     /// assertion: a share is designed to outlive its producer, so a check that
     /// needs one is a check that usually cannot run.
@@ -820,7 +826,7 @@ mod tests {
         let bad_endpoint = build_endpoint(&bad_ticket.lookups, None, None, Vec::new(), None, false)
             .await
             .expect("bad-client endpoint");
-        add_peer_addr(&bad_endpoint, bad_ticket.addr.clone()).expect("add peer addr");
+        add_peer_addr(&address_book(&bad_endpoint), bad_ticket.addr.clone());
         let bad_auth = ShareAuth::new(&bad_ticket.secret, None);
         let bad = RemoteClient::new(bad_endpoint, bad_ticket, bad_auth);
         assert!(bad.fetch_manifest().await.is_err(), "bad secret must fail");

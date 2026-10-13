@@ -603,7 +603,7 @@ impl Cursor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use fofoca_protocol::iroh_base::SecretKey;
+    use habilis_network_protocol::iroh_base::SecretKey;
 
     use super::{
         DirEntry, FileEntry, ManifestDelta, MountManifest, ReadStatus, apply_since,

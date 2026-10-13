@@ -3,7 +3,7 @@
 //! [`RelayChoice`] to an iroh [`RelayMode`]. The rung-selection/failover
 //! machinery (beacon-only) is not needed by mount.
 
-use fofoca::iroh::RelayMode;
+use habilis_network::iroh::RelayMode;
 
 use crate::protocol::swarm::RelayChoice;
 
@@ -45,8 +45,8 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
 /// The engine parses the list, not us: `relay_ladder` is `LazyLock`-cached and
 /// its `RelayUrl`s are `Arc`-backed, so this costs a clone rather than five
 /// URL parses per endpoint.
-pub(crate) fn pinned_ladder() -> Vec<fofoca::iroh::RelayUrl> {
-    fofoca::net::relay_ladder(&fofoca::protocol::RelayChoice::Pinned)
+pub(crate) fn pinned_ladder() -> Vec<habilis_network::iroh::RelayUrl> {
+    habilis_network::net::relay_ladder(&habilis_network::protocol::RelayChoice::Pinned)
 }
 
 #[cfg(test)]
@@ -81,7 +81,7 @@ mod tests {
     fn a_disabled_choice_names_no_relay() {
         let offered = relay_mode(&RelayChoice::Disabled)
             .relay_map()
-            .urls::<Vec<fofoca::iroh::RelayUrl>>();
+            .urls::<Vec<habilis_network::iroh::RelayUrl>>();
         assert!(offered.is_empty());
     }
 }

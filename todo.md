@@ -12,7 +12,7 @@ failed with "no peer on the mesh vouches" after the full 30 s card wait,
 while a live seeding tab sat on the same mesh with `tree` + `serving`
 published. Same round, same mesh: one revival recovered fully, one expired.
 
-Mechanism, now **confirmed in fofoca source**: the producer is the mesh's
+Mechanism, now **confirmed in habilis-network source**: the producer is the mesh's
 *beacon*. Joiners bootstrap by dialing the seed-derived rendezvous identity
 homed at the relay, and that identity is bound by whichever member claims the
 beacon — always the share's first member, i.e. the native producer
@@ -24,7 +24,7 @@ island whose merge rides the same slow cadence. Failover therefore lands in
 1–10 minutes, and any client-side wait shorter than that reads as "the share
 is gone". The web app now simply outlasts it: it retries forever with one
 persistent mesh membership (`WAITING_MESHES` in the wasm client). The real
-fix is fofoca-side and still open: **event-driven beacon failover** — probe
+fix is habilis-network-side and still open: **event-driven beacon failover** — probe
 the rendezvous when the link to the beacon dies rather than on the 300 s
 cadence — plus pruning dead rendezvous registrants (the corpse's relay
 registration lingers and makes vacancy probes read "held").
@@ -86,14 +86,14 @@ goes: a full patient origin dial against a corpse, then the card wait, then
 the JSEP round — serial stages, each sized for the worst case, all paid on
 the happy path too.
 
-All three levers **landed 2026-08-07**, none needing fofoca changes: a tab
+All three levers **landed 2026-08-07**, none needing habilis-network changes: a tab
 whose localStorage holds a manifest locator gets `FORMER_SEEDER_ORIGIN_CAP_MS
 = 8 s` instead of the patient 30 s default; the page renders the tree
 offline from the persisted manifest (`ShareClient.peek_persisted_manifest` +
 the `offlineManifest` signal in the `connecting` phase) while the dial
 grinds; and the dynamic-mode origin dial concedes once the seeder lane sees
 a vouching card (`cards_seen` flag into `capped_origin_dial`, 5 s floor).
-The worst-case constants were also cut with the fofoca mitigations now in
+The worst-case constants were also cut with the habilis-network mitigations now in
 the pinned rev: card wait 45 → 12 s, channel wait 30 → 15 s (re-offer
 extracted to `reoffer_due`, still at wait/2), race deadline 60 → 35 s, web
 backoff ceilings 30 → 10 s.
@@ -105,7 +105,7 @@ a reloaded tab whose peers stayed alive reconnected in **2–9 s**; a fresh
 newcomer rendered and was ready in **38 s** (was ~80 s); and both-tabs
 -reloaded showed the tree in **~1 s** from the offline peek (was ~60 s of
 blank "connecting") with the byte lane ready at ~96 s — that last figure is
-fofoca's island-merge cadence (both identities re-minted, no `NeighborDown`
+habilis-network's island-merge cadence (both identities re-minted, no `NeighborDown`
 for either), which no client change can cut; the client no longer stacks
 its own waits on top of it. The download-through-seeders zip completed
 (1.5 MB in ~2 s, stubbed picker).
@@ -139,7 +139,7 @@ watcher to re-enable** — none was ever built (the wasm client's module doc
 explains why in-place upgrade is impossible; an upgrade is a redial). A
 relay-carried mount reaches the channel again only on a natural reconnect.
 The real defect is in the browser↔browser path of
-`fofoca-iroh-webrtc-transport` (bulk was only ever measured browser↔native);
+`habilis-network-iroh-webrtc-transport` (bulk was only ever measured browser↔native);
 fix it there, then drop the probe's demotion arm — and if relay wins should
 become temporary, build upgrade-by-redial (next entry).
 
@@ -177,7 +177,7 @@ farewell that `WaitingMesh::retire` now performs. A refactor across
 `produce.rs`, the waiting-mesh setup and the JSEP attach paths, so it wants
 its own session.
 
-## ICE restart needs transport renegotiation (fofoca-side)
+## ICE restart needs transport renegotiation (habilis-network-side)
 
 The wasm client now watches a webrtc mount's `connectionState` through
 `BrowserHubTransport::peer_connection` and closes the mount on `failed` /
@@ -188,8 +188,8 @@ connected-looking tab. But the *cheap* recovery is still unreachable:
 pays a full teardown, JSEP round and candidate race — and calling it is
 useless without a renegotiation lane, because the transport's JSEP is one
 envelope each way per session (`negotiate` builds a new session; nothing
-carries a second offer on an existing one). Fixing that is fofoca work in
-`fofoca-iroh-webrtc-transport`: accept a re-offer for an existing session
+carries a second offer on an existing one). Fixing that is habilis-network work in
+`habilis-network-iroh-webrtc-transport`: accept a re-offer for an existing session
 (`iceRestart: true`), or expose a renegotiation hook the client can drive.
 While there, expose `connectionstatechange` as an event instead of the 1 s
 property poll the client runs today.
@@ -206,7 +206,7 @@ negotiates cleanly and the mount can only settle on the channel. Verified in
 Chrome: producer killed, both tabs hard-reloaded, mount `paths webrtc`,
 `direct 2/16`, full zip (600,352 B) downloaded tab↔tab.
 
-Provenance: that drill ran against the sibling fofoca checkout at `52a72f76`
+Provenance: that drill ran against the sibling habilis-network checkout at `52a72f76`
 — the rev the workspace now pins. It would **fail** at the previous pin
 `e63a481f`, which predates the rival-probe, STUN and JSEP-datagram fixes the
 scenario exercises (the checkout may also have carried a then-uncommitted
@@ -226,7 +226,7 @@ identity per attempt (~84 s cadence).
 
 Root cause (high confidence, A/B verification staged): the workspace resolved
 the **unpatched** iroh-gossip — the connection-churn leak fix (upstream PR
-n0-computer/iroh-gossip#147) is pinned by `fofoca` but `[patch]` sections are
+n0-computer/iroh-gossip#147) is pinned by `habilis-network` but `[patch]` sections are
 not inherited across workspaces, so this graph never got it. Amplified by
 netwatch's RTM_MISS storm (net-tools#203; each failed transmit's route miss
 triggered a full interface rebuild + CoreWLAN XPC). Both pins were added to
@@ -290,7 +290,7 @@ regardless of timer drift.
   on a run of `|v|`/`|s|` closure parameters; two more of the same kind turned
   up elsewhere once the first crate compiled far enough to reveal them. The
   wasm client's *host*-target lib tests could never have compiled: off wasm32
-  `agent-habilis-mesh` enables `fofoca-iroh-webrtc-transport/native`, and with
+  `agent-habilis-mesh` enables `habilis-network-iroh-webrtc-transport/native`, and with
   both backends on `WebRtcHandle` takes an `Arc<WebRtcTransport>` while the
   client hands it an `Arc<BrowserHubTransport>`. Those 15 tests now run on
   wasm32, where the crate actually builds.

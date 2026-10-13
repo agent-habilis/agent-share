@@ -30,7 +30,9 @@
 //! it is the same one that already re-checks on every read.
 
 use anyhow::Result;
-use fofoca_chunks::{ChunkHash, ChunkMap, ChunkSource as _, Coverage, FileId, FsOrigin, Root};
+use habilis_network_chunks::{
+    ChunkHash, ChunkMap, ChunkSource as _, Coverage, FileId, FsOrigin, Root,
+};
 
 use super::live::LiveTree;
 
@@ -115,7 +117,7 @@ impl ChunkCache {
 mod tests {
     use std::sync::Arc;
 
-    use fofoca_chunks::{CHUNK_BYTES_USIZE, chunk_hash};
+    use habilis_network_chunks::{CHUNK_BYTES_USIZE, chunk_hash};
 
     use super::ChunkCache;
     use crate::mount::live::LiveTree;

@@ -34,12 +34,15 @@ use std::path::{Path, PathBuf};
 use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::authorship::SignedManifest;
 use anyhow::{Context, Result, bail};
-use fofoca_chunks::ChunkMap;
+use habilis_network::iroh::Endpoint;
+use habilis_network::iroh::address_lookup::memory::MemoryLookup;
+use habilis_network::net::direct::SignalAdmission;
+use habilis_network_chunks::ChunkMap;
+use habilis_network_iroh_webrtc_transport::WebRtcHandle;
 
 use super::MountTicket;
 use super::consume::RemoteClient;
 use crate::file::human_bytes;
-use crate::lookup::add_peer_addr;
 
 /// One file's outcome, for the summary line.
 #[derive(Default)]
@@ -130,6 +133,20 @@ fn wanted(only: &[String], rel_path: &str) -> bool {
     })
 }
 
+/// The same endpoint the mount form builds, for the same reason: it carries
+/// the WebRTC handle, without which `--transport webrtc` has no lane to be
+/// forced onto. That endpoint already holds the origin's address, in its one
+/// address book.
+///
+/// # Errors
+/// The endpoint cannot bind.
+async fn mirror_endpoint(
+    ticket: &MountTicket,
+    webrtc_only: bool,
+) -> Result<(Endpoint, WebRtcHandle, SignalAdmission, MemoryLookup)> {
+    super::consume::consumer_endpoint(ticket, webrtc_only).await
+}
+
 /// Copy every file in the share behind `ticket` into `dest`.
 ///
 /// # Errors
@@ -159,11 +176,7 @@ pub(crate) async fn mirror(
     // The creator's public key, so the copy names the same author. Public: this
     // is what a copy is *given*, unlike the key that would let it publish.
     let author = ticket.author;
-    // The same endpoint the mount form builds, for the same reason: it carries
-    // the WebRTC handle, without which `--transport webrtc` has no lane to be
-    // forced onto.
-    let (endpoint, webrtc) = super::consume::consumer_endpoint(&ticket, webrtc_only).await?;
-    add_peer_addr(&endpoint, ticket.addr.clone())?;
+    let (endpoint, webrtc, _admission, _book) = mirror_endpoint(&ticket, webrtc_only).await?;
     let client = RemoteClient::new(endpoint.clone(), ticket, auth)
         .with_webrtc(webrtc.clone())
         .webrtc_only(webrtc_only);
@@ -622,8 +635,12 @@ fn report(tally: &Tally, dest: &Path, json: bool) {
 mod tests {
     use std::path::Path;
 
+    use habilis_network::net::add_peer_addr;
+
     use super::wanted;
     use super::{ORIGIN_SECRET, origin_secret_for, safe_join, sidecar_dir, write_secret};
+    use crate::lookup::build_endpoint;
+    use crate::protocol::swarm::LookupOpts;
 
     /// **The property that makes a copy a source rather than a rival share.**
     ///
@@ -674,6 +691,40 @@ mod tests {
         assert_eq!(origin_secret_for(&root), None);
 
         let _ = std::fs::remove_dir_all(&sidecar);
+    }
+
+    /// The mount form's endpoint already holds the origin's address. Each
+    /// further registration adds one more address book to the endpoint for the
+    /// same peer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mirror_registers_the_origin_in_one_address_book() {
+        let (producer, ticket, _secret, _producer_webrtc, _producer_admission) =
+            crate::mount::produce::bind(LookupOpts::loopback(), None)
+                .await
+                .expect("bind producer");
+        let bare = build_endpoint(&ticket.lookups, None, None, Vec::new(), None, false)
+            .await
+            .expect("bare endpoint");
+        let baseline = bare.address_lookup().expect("lookup services").len();
+
+        let (endpoint, _webrtc, _admission, book) = super::mirror_endpoint(&ticket, false)
+            .await
+            .expect("mirror endpoint");
+
+        assert_eq!(
+            endpoint.address_lookup().expect("lookup services").len(),
+            baseline + 1,
+            "the origin must be in exactly one address book"
+        );
+        add_peer_addr(&book, ticket.addr.clone());
+        assert_eq!(
+            endpoint.address_lookup().expect("lookup services").len(),
+            baseline + 1,
+            "a later address must go into the same book"
+        );
+        endpoint.close().await;
+        bare.close().await;
+        producer.close().await;
     }
 
     #[test]

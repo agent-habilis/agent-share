@@ -14,7 +14,7 @@ use std::time::Duration;
 use agent_share_mount::{ServeSource, Watcher};
 use agent_share_proto::framing::ManifestSince;
 use agent_share_proto::manifest::ReadStatus;
-use fofoca_chunks::{ChunkHash, ChunkMap, Coverage, Root};
+use habilis_network_chunks::{ChunkHash, ChunkMap, Coverage, Root};
 use tokio::sync::broadcast;
 
 use super::hash::ChunkCache;
@@ -124,7 +124,7 @@ impl ServeSource for ProducerSource {
     /// especially — the teardown can race ahead of the last bytes. Wait for the
     /// consumer's acknowledgement, bounded, so a peer that never sends one
     /// costs two seconds rather than a stuck task.
-    async fn settle(&self, send: fofoca::iroh::endpoint::SendStream) {
+    async fn settle(&self, send: habilis_network::iroh::endpoint::SendStream) {
         let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
     }
 }
@@ -144,7 +144,7 @@ pub(super) enum NativeSource {
     /// A share read through to the files it was scanned from.
     Producer(ProducerSource),
     /// A mount serving what it has read into its own chunk store.
-    Seeding(agent_share_mount::Seeder<fofoca_chunks::FsStore>),
+    Seeding(agent_share_mount::Seeder<habilis_network_chunks::FsStore>),
 }
 
 /// The matching watcher, for the same reason.
@@ -224,7 +224,7 @@ impl ServeSource for NativeSource {
         }
     }
 
-    async fn settle(&self, send: fofoca::iroh::endpoint::SendStream) {
+    async fn settle(&self, send: habilis_network::iroh::endpoint::SendStream) {
         match self {
             Self::Producer(source) => source.settle(send).await,
             Self::Seeding(seeder) => seeder.settle(send).await,

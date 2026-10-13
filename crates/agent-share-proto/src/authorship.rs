@@ -49,13 +49,13 @@
 //! where the source may be offline.
 
 use anyhow::{Result, bail};
-use fofoca_protocol::iroh_base::Signature;
+use habilis_network_protocol::iroh_base::Signature;
 /// The keypair halves manifests are signed and checked with.
 ///
 /// Re-exported so a caller names one type rather than reaching for whichever
 /// of iroh's re-exports is closest — two paths to the same ed25519 key is the
 /// kind of thing that compiles everywhere except where it matters.
-pub use fofoca_protocol::iroh_base::{PublicKey, SecretKey};
+pub use habilis_network_protocol::iroh_base::{PublicKey, SecretKey};
 
 /// Domain separator, so a manifest signature cannot be replayed as a signature
 /// over anything else this keypair is ever asked to sign.
@@ -211,7 +211,7 @@ impl SignedManifest {
 
 #[cfg(test)]
 mod tests {
-    use fofoca_protocol::iroh_base::SecretKey;
+    use habilis_network_protocol::iroh_base::SecretKey;
 
     use super::{SignedManifest, sign_manifest, verify_manifest};
 

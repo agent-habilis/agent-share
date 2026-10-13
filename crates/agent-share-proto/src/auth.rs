@@ -16,14 +16,14 @@
 //! passwordless branch returns the secret *verbatim*, which is what keeps every
 //! byte this build emits identical to the byte it emitted before.
 //!
-//! The stretch itself is [`fofoca_protocol::TicketAuth`] — the same primitive
-//! fofoca uses for passworded blob tickets, at the same frozen Argon2id
+//! The stretch itself is [`habilis_network_protocol::TicketAuth`] — the same primitive
+//! habilis-network uses for passworded blob tickets, at the same frozen Argon2id
 //! parameters (19 `MiB`, t=2, p=1). Two consequences worth knowing before
 //! calling this:
 //!
 //! - It costs ~100 ms and 19 `MiB`, synchronously, on every target including
 //!   wasm. Derive once per share and hold the result; never per request.
-//! - Those parameters are a network-wide contract in fofoca. This crate does not
+//! - Those parameters are a network-wide contract in habilis-network. This crate does not
 //!   get to tune them.
 //!
 //! **There is deliberately no verifier.** A wrong password is not detectable
@@ -33,7 +33,7 @@
 //! that a wrong password against a *dead* origin is indistinguishable from a
 //! share that is simply gone, so callers must word that error to cover both.
 
-use fofoca_protocol::{Password, TicketAuth};
+use habilis_network_protocol::{Password, TicketAuth};
 
 use crate::framing::{CLOSE_BAD_SECRET, CLOSE_UNAUTHORIZED, SECRET_LEN};
 
@@ -41,7 +41,7 @@ use crate::framing::{CLOSE_BAD_SECRET, CLOSE_UNAUTHORIZED, SECRET_LEN};
 ///
 /// The label is mixed into the derivation, so it reaches the wire and is fixed
 /// for the life of this ticket kind — changing it strands every passworded
-/// ticket ever minted. It is distinct from fofoca's own `b"blob-ticket"` on
+/// ticket ever minted. It is distinct from habilis-network's own `b"blob-ticket"` on
 /// purpose: two ticket kinds sharing a secret must never derive the same token.
 pub const MOUNT_TICKET_LABEL: &[u8] = b"agent-share/mount-ticket/v1";
 
@@ -62,7 +62,7 @@ pub fn share_token(secret: &[u8; SECRET_LEN], password: Option<&str>) -> [u8; SE
 /// Re-exported rather than reimplemented: a short-circuiting `==` on the token
 /// is a timing oracle on the credential, and there is no reason for this crate
 /// to own a second copy of the fold.
-pub use fofoca_protocol::ct_eq;
+pub use habilis_network_protocol::ct_eq;
 
 /// What a producer checks an inbound mount request against.
 ///
@@ -155,7 +155,7 @@ impl ShareAuth {
 
 impl std::fmt::Debug for ShareAuth {
     /// The token is the live credential — redact it, keep the flag. Same shape
-    /// as `fofoca`'s own `TicketAuth`, and for the same reason: these values
+    /// as `habilis-network`'s own `TicketAuth`, and for the same reason: these values
     /// end up inside handler structs that derive `Debug` and get logged.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

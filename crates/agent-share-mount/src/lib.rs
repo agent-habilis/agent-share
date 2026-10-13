@@ -27,7 +27,7 @@
 //! browser gave it for a picked file, and a seeder of either kind reads from a
 //! chunk store. One dispatch loop drives all three.
 //!
-//! Futures here are `?Send`, for the reason [`fofoca_chunks`] gives: the same
+//! Futures here are `?Send`, for the reason [`habilis_network_chunks`] gives: the same
 //! code runs under tokio and in a browser, where the state is `Rc`-flavoured.
 //! Callers that need `Send` get it from their own source, so the CLI can
 //! `tokio::spawn` the very loop the browser drives with `spawn_local`.
