@@ -36,7 +36,6 @@ use agent_share_proto::authorship::SignedManifest;
 use anyhow::{Context, Result, bail};
 use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::address_lookup::memory::MemoryLookup;
-use habilis_network::net::direct::SignalAdmission;
 use habilis_network_chunks::ChunkMap;
 use habilis_network_iroh_webrtc_transport::WebRtcHandle;
 
@@ -143,7 +142,12 @@ fn wanted(only: &[String], rel_path: &str) -> bool {
 async fn mirror_endpoint(
     ticket: &MountTicket,
     webrtc_only: bool,
-) -> Result<(Endpoint, WebRtcHandle, SignalAdmission, MemoryLookup)> {
+) -> Result<(
+    Endpoint,
+    WebRtcHandle,
+    habilis_network::runtime::InjectedEndpoint,
+    MemoryLookup,
+)> {
     super::consume::consumer_endpoint(ticket, webrtc_only).await
 }
 

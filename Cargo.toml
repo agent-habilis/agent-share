@@ -40,12 +40,15 @@ rust-version = "1.93"
 # a path dep to a sibling checkout needed no round trip. habilis-network cuts tags
 # (vX.Y.Z); name the tag, never a raw rev, and keep it in step with
 # agent-gossip's.
-habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb" }
-habilis-network-protocol = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb", default-features = false }
-habilis-network-iroh-webrtc-transport = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb" }
+habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "db51d4ba27916ef9119ee816a02b6ae699d1dea6" }
+habilis-network-protocol = { git = "https://github.com/agent-habilis/habilis-network", rev = "db51d4ba27916ef9119ee816a02b6ae699d1dea6", default-features = false }
+habilis-network-iroh-webrtc-transport = { git = "https://github.com/agent-habilis/habilis-network", rev = "db51d4ba27916ef9119ee816a02b6ae699d1dea6" }
+# For `ProtocolSet`, the type `SetupParams::with_protocols` takes; neither
+# `runtime` nor `net` re-exports it.
+habilis-network-iroh-transport-util = { git = "https://github.com/agent-habilis/habilis-network", rev = "db51d4ba27916ef9119ee816a02b6ae699d1dea6" }
 # The content-addressed chunk store, a member of the same monorepo since
 # v0.6.0 (it grew up in this repo under crates/habilis-network-chunks and moved).
-habilis-network-chunks = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb" }
+habilis-network-chunks = { git = "https://github.com/agent-habilis/habilis-network", rev = "db51d4ba27916ef9119ee816a02b6ae699d1dea6" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

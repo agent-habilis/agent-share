@@ -29,11 +29,10 @@ use futures::channel::mpsc;
 use futures::channel::oneshot;
 use habilis_network::iroh::endpoint::{Connection, presets};
 use habilis_network::iroh::{Endpoint, SecretKey};
-use habilis_network::net::MAX_DIRECT_PEERS;
-use habilis_network::net::direct::SignalAdmission;
 use habilis_network_chunks::{
     CHUNK_BYTES, ChunkHash, ChunkMap, ChunkMapBuilder, Coverage, Root, chunk_hash,
 };
+use habilis_network_iroh_transport_util::ProtocolSet;
 use habilis_network_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle,
     browser_answer, log_signal_sdps,
@@ -421,17 +420,14 @@ impl ShareProducer {
         // not on, or dials a relay ladder this tab never homed on.
         let lookups = LookupOpts::public_preset();
 
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .secret_key(key)
-            .relay_mode(crate::relay_mode(&lookups.relay))
-            .alpns(vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()])
-            .add_custom_transport(handle.transport())
-            .path_selector(handle.path_selector())
-            .hooks(admission.connection_hook())
-            .bind()
-            .await
-            .map_err(|error| err("bind producer endpoint", &error))?;
+        let shared_endpoint = crate::mesh::bind_shared(
+            &lookups,
+            key,
+            handle,
+            vec![MOUNT_ALPN.to_vec(), WEBRTC_SIGNAL_ALPN.to_vec()],
+        )
+        .await?;
+        let endpoint = shared_endpoint.endpoint().clone();
 
         let mut secret = [0u8; SECRET_LEN];
         getrandom::fill(&mut secret).map_err(|error| err("mint secret", &error))?;
@@ -443,22 +439,15 @@ impl ShareProducer {
         // ticket exists — so a fast joiner still is not raced. Injecting the
         // endpoint keeps `setup_mesh` cheap: no key to mint, no second bind,
         // and no second relay registration.
-        let protocols: Vec<(
-            Vec<u8>,
-            Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
-        )> = vec![
-            (
+        let protocols = ProtocolSet::default()
+            .protocol(
                 MOUNT_ALPN.to_vec(),
-                Box::new(MountHandler::new(
-                    ProducerSource::new(Rc::clone(&shared)),
-                    auth,
-                )),
-            ),
-            (
+                MountHandler::new(ProducerSource::new(Rc::clone(&shared)), auth),
+            )
+            .protocol(
                 WEBRTC_SIGNAL_ALPN.to_vec(),
-                Box::new(SignalHandler::new(local, Arc::clone(&hub))),
-            ),
-        ];
+                SignalHandler::new(local, Arc::clone(&hub)),
+            );
         // One identity for this tab: the mount peer and the mesh peer are the
         // same node, so a viewer counts this producer once rather than twice.
         let card = match card.as_ref() {
@@ -478,15 +467,9 @@ impl ShareProducer {
             lookups: &lookups,
             password: password.as_deref(),
         })?;
-        let mesh = crate::mesh::MeshPeer::join_share_with(
-            resolved,
-            endpoint.clone(),
-            handle.clone(),
-            admission,
-            protocols,
-            card,
-        )
-        .await?;
+        let mesh =
+            crate::mesh::MeshPeer::join_share_with(resolved, shared_endpoint, protocols, card)
+                .await?;
 
         // Ticket must carry a relay URL — the browser consumer has no mdns/dht
         // and dials the signal ALPN from `ticket.addr` alone.

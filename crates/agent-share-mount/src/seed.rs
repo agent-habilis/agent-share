@@ -3,7 +3,7 @@
 //! A viewer that fetched chunks into its store used to *advertise* them and
 //! serve nothing — the card said "seeding" while no handler existed to answer a
 //! read. This is that listener, and it is generic over the store so the browser
-//! serves from `IdbStore` and the CLI from `FsStore` with one implementation
+//! serves from `IdbStore` and the CLI from `DiskStore` with one implementation
 //! between them.
 //!
 //! Three properties, each load-bearing:
@@ -498,16 +498,16 @@ impl<S: ChunkSource + 'static> ServeSource for Seeder<S> {
 mod tests {
     use std::sync::Arc;
 
-    use habilis_network_chunks::{ChunkMap, MemStore, Root, chunk_hash};
+    use habilis_network_chunks::{ChunkMap, InMemoryStore, Root, chunk_hash};
 
     use super::Seeder;
     use crate::ServeSource as _;
 
-    /// Typed once so every case names the same store. `MemStore` rather than a
+    /// Typed once so every case names the same store. `InMemoryStore` rather than a
     /// real backend on purpose: these are about what a seeder *refuses*, which
     /// is decided before any storage is touched — and it lets the browser's
     /// rules be tested on the host, where they never ran before.
-    fn empty() -> Seeder<MemStore> {
+    fn empty() -> Seeder<InMemoryStore> {
         Seeder::new()
     }
 
@@ -570,7 +570,7 @@ mod tests {
     ///
     /// The envelope is a real [`SignedManifest`] because `update` unwraps one
     /// for its watch frame; its contents do not matter to any case here.
-    fn armed(store: Arc<MemStore>, bytes: &[u8]) -> (Seeder<MemStore>, ChunkMap) {
+    fn armed(store: Arc<InMemoryStore>, bytes: &[u8]) -> (Seeder<InMemoryStore>, ChunkMap) {
         use agent_share_proto::authorship::{SIGNATURE_LEN, SignedManifest};
 
         let row = ChunkMap::build(bytes);
@@ -595,7 +595,7 @@ mod tests {
     fn a_hole_reports_the_slot_it_refused() {
         futures::executor::block_on(async {
             // A row whose chunks were never stored: what an eviction leaves.
-            let (seeder, _) = armed(Arc::new(MemStore::new()), b"the bytes of a file");
+            let (seeder, _) = armed(Arc::new(InMemoryStore::new()), b"the bytes of a file");
             let mut holes = seeder.holes();
             let (status, _) = seeder.answer_read(7, 0, 8).await;
             assert_eq!(status, agent_share_proto::manifest::ReadStatus::BadIndex);
@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn an_unknown_slot_is_refused_without_a_report() {
         futures::executor::block_on(async {
-            let (seeder, _) = armed(Arc::new(MemStore::new()), b"the bytes of a file");
+            let (seeder, _) = armed(Arc::new(InMemoryStore::new()), b"the bytes of a file");
             let mut holes = seeder.holes();
             let (status, _) = seeder.answer_read(99, 0, 8).await;
             assert_eq!(status, agent_share_proto::manifest::ReadStatus::BadIndex);
@@ -627,7 +627,7 @@ mod tests {
             use habilis_network_chunks::ChunkStore as _;
 
             let bytes = b"the bytes of a file";
-            let store = Arc::new(MemStore::new());
+            let store = Arc::new(InMemoryStore::new());
             let (seeder, row) = armed(Arc::clone(&store), bytes);
             assert!(
                 seeder.complete_slots().await.is_empty(),
@@ -660,7 +660,7 @@ mod tests {
             use habilis_network_chunks::ChunkStore as _;
 
             let bytes = b"the bytes of a file";
-            let store = Arc::new(MemStore::new());
+            let store = Arc::new(InMemoryStore::new());
             let (seeder, row) = armed(Arc::clone(&store), bytes);
             assert!(!seeder.holds(7).await, "nothing is stored yet");
             assert!(!seeder.holds(99).await, "a slot with no row is never held");
@@ -696,7 +696,7 @@ mod tests {
 
             // Two chunks, so "some" and "all" are genuinely different.
             let bytes = vec![7u8; habilis_network_chunks::CHUNK_BYTES_USIZE + 1];
-            let store = Arc::new(MemStore::new());
+            let store = Arc::new(InMemoryStore::new());
             let (seeder, row) = armed(Arc::clone(&store), &bytes);
             assert!(row.len() >= 2, "the fixture must span more than one chunk");
 
@@ -734,7 +734,7 @@ mod tests {
             use habilis_network_chunks::ChunkStore as _;
 
             let bytes = b"the bytes of a file";
-            let store = Arc::new(MemStore::new());
+            let store = Arc::new(InMemoryStore::new());
             let (seeder, _) = armed(Arc::clone(&store), b"a different file");
 
             // A second file, stored but never adopted.
@@ -761,7 +761,7 @@ mod tests {
     /// and store alive.
     #[test]
     fn a_weak_handle_does_not_keep_the_seeder_alive() {
-        let (seeder, _) = armed(Arc::new(MemStore::new()), b"the bytes of a file");
+        let (seeder, _) = armed(Arc::new(InMemoryStore::new()), b"the bytes of a file");
         let weak = seeder.downgrade();
         assert!(weak.upgrade().is_some());
         drop(seeder);

@@ -29,8 +29,10 @@ agent-share-mount = { path = "../agent-share-mount" }
 # socket, the filesystem and multihop, none of which exist in a tab. What
 # remains is the whole node runtime — `setup_mesh` → `Node::spawn` → the event
 # loop — so a browser peer is the same peer a CLI runs, not a reduced stand-in.
-habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb", default-features = false }
-habilis-network-iroh-webrtc-transport = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb", features = ["web"] }
+habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "db51d4ba27916ef9119ee816a02b6ae699d1dea6", default-features = false }
+habilis-network-iroh-webrtc-transport = { git = "https://github.com/agent-habilis/habilis-network", rev = "db51d4ba27916ef9119ee816a02b6ae699d1dea6", features = ["web"] }
+# For `ProtocolSet`, the type `SetupParams::with_protocols` takes.
+habilis-network-iroh-transport-util = { git = "https://github.com/agent-habilis/habilis-network", rev = "db51d4ba27916ef9119ee816a02b6ae699d1dea6" }
 # NOTE: no iroh entries -- taken from `habilis_network::iroh` and
 # `habilis_network_protocol::iroh_base`, which this crate already depends on.
 anyhow = "1"
@@ -71,7 +73,7 @@ web-sys = { version = "0.3", features = [
 # tests. It grew up in this workspace and moved to `agent-habilis/habilis-network` at
 # v0.6.0; restated here rather than inherited because this workspace stands
 # alone. The tag must stay in step with the root workspace's.
-habilis-network-chunks = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb" }
+habilis-network-chunks = { git = "https://github.com/agent-habilis/habilis-network", rev = "db51d4ba27916ef9119ee816a02b6ae699d1dea6" }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }

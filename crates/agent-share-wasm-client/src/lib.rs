@@ -51,12 +51,11 @@ use habilis_network::iroh::endpoint::{Connection, presets};
 use habilis_network::iroh::{
     Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr, Watcher as _,
 };
-use habilis_network::net::MAX_DIRECT_PEERS;
-use habilis_network::net::direct::SignalAdmission;
 use habilis_network_chunks::{
     ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, Coverage, FileId, IdbStore, Root,
     chunk_hash,
 };
+use habilis_network_iroh_transport_util::ProtocolSet;
 use habilis_network_iroh_webrtc_transport::{
     BrowserHubTransport, BrowserSession, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope,
     WebRtcHandle, browser_offer, custom_addr, log_signal_sdps,
@@ -83,11 +82,9 @@ mod transport_mode;
 /// so the mesh builds its own endpoint as before — one identity is the goal, but
 /// a relay-only viewer has no WebRTC sessions to miscount anyway.
 struct MeshEndpoint {
-    endpoint: Endpoint,
-    webrtc: WebRtcHandle,
-    /// The table the endpoint's connection hook reports to. The mesh enforces
-    /// its direct-peer cap on it, so it must be the one the endpoint was built with.
-    admission: SignalAdmission,
+    /// Bound by the engine with the admission hook the mesh enforces its
+    /// direct-peer cap on; the endpoint and its handle are read back from it.
+    shared: habilis_network::runtime::InjectedEndpoint,
 }
 
 /// Cached ICE remote candidate for one peer endpoint id.
@@ -354,7 +351,9 @@ fn new_share_client(
         link_cache: RefCell::new(HashMap::new()),
         _hub: hub,
         _session: session,
-        signal_endpoint: mesh_endpoint.as_ref().map(|shared| shared.endpoint.clone()),
+        signal_endpoint: mesh_endpoint
+            .as_ref()
+            .map(|mesh| mesh.shared.endpoint().clone()),
         mesh_endpoint,
         _endpoint: endpoint,
         mesh: Rc::new(RefCell::new(MeshSlot::Pending)),
@@ -714,10 +713,7 @@ impl ShareClient {
         // so it must never turn a working share into a failed connect — and,
         // since it is additive, it runs in the background instead of holding
         // the connect (its relay work cost real time on the critical path).
-        let shared = client
-            .mesh_endpoint
-            .take()
-            .map(|shared| (shared.endpoint, shared.webrtc, shared.admission));
+        let shared = client.mesh_endpoint.take().map(|mesh| mesh.shared);
         // Parsed eagerly so a malformed card from JS still fails the connect.
         // The transport label is already final: every mount settles its path
         // before `connect` resolves.
@@ -737,21 +733,15 @@ impl ShareClient {
         // the first sync fills it; the signal handler (WebRTC path only —
         // the relay path has no hub) lets another peer negotiate a data
         // channel to *us* the way we negotiate one to the producer.
-        let mut protocols: Vec<(
-            Vec<u8>,
-            Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
-        )> = vec![(
+        let mut protocols = ProtocolSet::default().protocol(
             MOUNT_ALPN.to_vec(),
-            Box::new(produce::MountHandler::new(client.seeder.clone(), auth)),
-        )];
-        if let Some((endpoint, webrtc, _)) = shared.as_ref() {
-            protocols.push((
+            produce::MountHandler::new(client.seeder.clone(), auth),
+        );
+        if let Some(shared) = shared.as_ref() {
+            protocols = protocols.protocol(
                 WEBRTC_SIGNAL_ALPN.to_vec(),
-                Box::new(produce::SignalHandler::new(
-                    endpoint.id(),
-                    webrtc.transport(),
-                )),
-            ));
+                produce::SignalHandler::new(shared.endpoint().id(), shared.webrtc().transport()),
+            );
         }
         let mesh_slot = Rc::clone(&client.mesh);
         let last_tree = Rc::clone(&client.last_tree);
@@ -2249,7 +2239,7 @@ impl ShareClient {
         // The root is recomputed from the row rather than taken on trust, so a
         // peer whose row and root disagree is caught here instead of at every
         // later verification.
-        let row = ChunkMap::from_leaves(leaves, size)
+        let row = ChunkMap::build_tree(leaves, size)
             .map_err(|error| JsValue::from_str(&format!("{error}")))?;
         if row.root().as_bytes() != &root {
             return Err(JsValue::from_str(
@@ -3010,7 +3000,7 @@ async fn fetch_have_on(
     if claimed as usize != chunks {
         return None;
     }
-    Coverage::from_bits(&bitmap, chunks).ok()
+    Coverage::decode_bits(&bitmap, chunks).ok()
 }
 
 /// One `OP_MANIFEST_SINCE` round on `conn`.
@@ -3644,7 +3634,7 @@ async fn load_persisted_manifest(
     let raw = storage.get_item(&manifest_locator_key(token)).ok()??;
     let locator: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let tree = locator.get("tree")?.as_str()?;
-    let root = Root::from_hex(locator.get("root")?.as_str()?).ok()?;
+    let root = Root::try_from(locator.get("root")?.as_str()?).ok()?;
     // Adopt-only: a tab reaching this path has a locator, which only a sync in
     // this origin could have written — so the database exists, and creating one
     // here would leave storage behind for somebody who merely browsed.
@@ -4173,16 +4163,9 @@ async fn connect_via_seeder(
             let local = key.public();
             let mesh_hub = BrowserHubTransport::new(local);
             let mesh_handle = WebRtcHandle::new(Arc::clone(&mesh_hub));
-            let mesh_admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-            let endpoint = Endpoint::builder(presets::Minimal)
-                .secret_key(key)
-                .relay_mode(relay_mode(&ticket.lookups.relay))
-                .add_custom_transport(mesh_handle.transport())
-                .path_selector(mesh_handle.path_selector())
-                .hooks(mesh_admission.connection_hook())
-                .bind()
-                .await
-                .map_err(|error| err("bind the waiting mesh endpoint", &error))?;
+            let mesh_shared =
+                mesh::bind_shared(&ticket.lookups, key, mesh_handle, Vec::new()).await?;
+            let endpoint = mesh_shared.endpoint().clone();
             let mount_key = SecretKey::generate();
             let mount_local = mount_key.public();
             let mount_hub = BrowserHubTransport::new(mount_local);
@@ -4205,19 +4188,15 @@ async fn connect_via_seeder(
                 .bind()
                 .await
                 .map_err(|error| err("bind the seeder-mount endpoint", &error))?;
-            let protocols: Vec<(
-                Vec<u8>,
-                Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
-            )> = vec![
-                (
+            let protocols = ProtocolSet::default()
+                .protocol(
                     MOUNT_ALPN.to_vec(),
-                    Box::new(produce::MountHandler::new(seeder.clone(), auth)),
-                ),
-                (
+                    produce::MountHandler::new(seeder.clone(), auth),
+                )
+                .protocol(
                     WEBRTC_SIGNAL_ALPN.to_vec(),
-                    Box::new(produce::SignalHandler::new(local, Arc::clone(&mesh_hub))),
-                ),
-            ];
+                    produce::SignalHandler::new(local, Arc::clone(&mesh_hub)),
+                );
             let card_parts = match card.as_ref() {
                 Some(value) => {
                     mesh::parse_card_parts(value, "webrtc", Some("consumer".to_owned()))?
@@ -4230,21 +4209,17 @@ async fn connect_via_seeder(
                 lookups: &lookups,
                 password,
             })?;
-            let peer = mesh::MeshPeer::join_share(
-                resolved,
-                Some((endpoint.clone(), mesh_handle, mesh_admission)),
-                protocols,
-                card_parts,
-            )
-            .await
-            .map_err(|mesh_error| {
-                JsValue::from_str(&format!(
-                    "the origin is unreachable ({}) and the share's mesh could not be \
+            let peer =
+                mesh::MeshPeer::join_share(resolved, Some(mesh_shared), protocols, card_parts)
+                    .await
+                    .map_err(|mesh_error| {
+                        JsValue::from_str(&format!(
+                            "the origin is unreachable ({}) and the share's mesh could not be \
                      joined ({})",
-                    describe(origin_error),
-                    describe(&mesh_error),
-                ))
-            })?;
+                            describe(origin_error),
+                            describe(&mesh_error),
+                        ))
+                    })?;
             let entry = WaitingMesh {
                 peer: Rc::new(peer),
                 seeder,
@@ -5283,11 +5258,7 @@ fn wanted(only: &[String], rel_path: &str) -> bool {
 /// because they are what the *origin* says this version is. That is the
 /// comparison the store's version gate makes on every read.
 pub(crate) fn file_id(entry: &agent_share_proto::manifest::FileEntry) -> FileId {
-    FileId {
-        key: entry.rel_path.clone(),
-        size: entry.size,
-        mtime: entry.mtime,
-    }
+    FileId::new(entry.rel_path.clone(), entry.size, entry.mtime)
 }
 
 async fn wait_ms(millis: i32) {
@@ -5347,18 +5318,7 @@ async fn connect_webrtc(
     // `peers_direct` unions the two so the count stays honest.
     let mesh_hub = BrowserHubTransport::new(local);
     let mesh_handle = WebRtcHandle::new(Arc::clone(&mesh_hub));
-    let mesh_admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-    let signal_bind = async {
-        Endpoint::builder(presets::Minimal)
-            .secret_key(key.clone())
-            .relay_mode(relay_mode(&ticket.lookups.relay))
-            .add_custom_transport(mesh_handle.transport())
-            .path_selector(mesh_handle.path_selector())
-            .hooks(mesh_admission.connection_hook())
-            .bind()
-            .await
-            .map_err(|error| err("bind signal endpoint", &error))
-    };
+    let signal_bind = mesh::bind_shared(&ticket.lookups, key.clone(), mesh_handle, Vec::new());
 
     let hub = BrowserHubTransport::new(local);
     let handle = WebRtcHandle::new(Arc::clone(&hub));
@@ -5375,7 +5335,8 @@ async fn connect_webrtc(
             .map_err(|error| err("bind mount endpoint", &error))
     };
     // Nothing links the two binds but the shared key, so they run together.
-    let (signal_endpoint, endpoint) = futures::future::try_join(signal_bind, mount_bind).await?;
+    let (mesh_shared, endpoint) = futures::future::try_join(signal_bind, mount_bind).await?;
+    let signal_endpoint = mesh_shared.endpoint().clone();
 
     // JSEP on the signal endpoint, attached into the *mount* endpoint's hub.
     // Decoupling those two is the point: the producer keys the session by the
@@ -5429,13 +5390,11 @@ async fn connect_webrtc(
                 author,
                 data_path,
                 Some(hub),
-                Some(session),
+                session,
                 // The mesh rides the *signal* endpoint, the one with a relay to
                 // gossip over, with its own hub.
                 Some(MeshEndpoint {
-                    endpoint: signal_endpoint,
-                    webrtc: mesh_handle,
-                    admission: mesh_admission,
+                    shared: mesh_shared,
                 }),
                 endpoint,
             );
@@ -5466,12 +5425,15 @@ fn ensure_reachable_addr(addr: &EndpointAddr) -> Result<(), JsValue> {
 }
 
 /// Swap one JSEP envelope each way over the signal ALPN, then attach into `hub`.
+///
+/// `None` when `hub` already holds a session for the producer: there is nothing
+/// new to hold, and the engine no longer lets a caller mint a `BrowserSession`.
 async fn negotiate(
     endpoint: &Endpoint,
     producer: EndpointAddr,
     local: habilis_network::protocol::iroh_base::EndpointId,
     hub: &BrowserHubTransport,
-) -> Result<BrowserSession, JsValue> {
+) -> Result<Option<BrowserSession>, JsValue> {
     let producer_id = producer.id;
     // Today the hub is built a few lines above this call and is provably empty,
     // so this cannot fire. It is here because the invariant is "the hub is
@@ -5479,9 +5441,7 @@ async fn negotiate(
     // natural next refactor — a second negotiation for a peer we already reach
     // would burn a full ICE budget and then be refused at attach.
     if hub.has_session(&producer_id) {
-        return Ok(BrowserSession {
-            remote: producer_id,
-        });
+        return Ok(None);
     }
     // The relay dial and the offer are independent — the offer needs only
     // `local` and `ice` — so the dial's latency hides inside ICE gathering.
@@ -5533,9 +5493,7 @@ async fn negotiate(
     // stage called "build offer" — true but useless.
     if let SignalEnvelope::Error { reason, .. } = &answer {
         if hub.has_session(&producer_id) {
-            return Ok(BrowserSession {
-                remote: producer_id,
-            });
+            return Ok(None);
         }
         return Err(JsValue::from_str(&format!(
             "producer refused WebRTC signalling: {reason}"
@@ -5558,7 +5516,7 @@ async fn negotiate(
     }
 
     conn.close(0u32.into(), b"jsep done");
-    Ok(session)
+    Ok(Some(session))
 }
 
 fn js_stage(context: &str, error: JsValue) -> JsValue {
@@ -5716,7 +5674,7 @@ fn serde_wasm<T: serde::Serialize>(value: &T) -> Result<JsValue, JsValue> {
 /// its `RelayUrl`s are `Arc`-backed, so this costs a clone rather than five URL
 /// parses per endpoint. The CLI reaches the same list through the same call.
 fn pinned_ladder() -> Vec<habilis_network::iroh::RelayUrl> {
-    habilis_network::net::relay_ladder(&habilis_network::protocol::RelayChoice::Pinned)
+    habilis_network::net::relay_ladder(&habilis_network::protocol::RelayChoice::Pinned).collect()
 }
 
 #[cfg(test)]

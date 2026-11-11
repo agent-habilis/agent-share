@@ -46,7 +46,7 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
 /// its `RelayUrl`s are `Arc`-backed, so this costs a clone rather than five
 /// URL parses per endpoint.
 pub(crate) fn pinned_ladder() -> Vec<habilis_network::iroh::RelayUrl> {
-    habilis_network::net::relay_ladder(&habilis_network::protocol::RelayChoice::Pinned)
+    habilis_network::net::relay_ladder(&habilis_network::protocol::RelayChoice::Pinned).collect()
 }
 
 #[cfg(test)]

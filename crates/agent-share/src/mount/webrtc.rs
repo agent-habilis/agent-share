@@ -193,7 +193,7 @@ fn attach_or_reuse(
             tracing::debug!(%remote, %error, "another lane attached first; reusing that session");
             Ok(())
         }
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     }
 }
 

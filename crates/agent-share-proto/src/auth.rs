@@ -33,7 +33,7 @@
 //! that a wrong password against a *dead* origin is indistinguishable from a
 //! share that is simply gone, so callers must word that error to cover both.
 
-use habilis_network_protocol::{Password, TicketAuth};
+use habilis_network_protocol::{Password, TicketAuth, TicketSecret};
 
 use crate::framing::{CLOSE_BAD_SECRET, CLOSE_UNAUTHORIZED, SECRET_LEN};
 
@@ -54,7 +54,13 @@ pub const MOUNT_TICKET_LABEL: &[u8] = b"agent-share/mount-ticket/v1";
 #[must_use]
 pub fn share_token(secret: &[u8; SECRET_LEN], password: Option<&str>) -> [u8; SECRET_LEN] {
     let password = password.map(|value| Password::new(value.to_owned()));
-    TicketAuth::derive(secret, password.as_ref(), MOUNT_TICKET_LABEL).token
+    *TicketAuth::derive(
+        &TicketSecret::from_bytes(*secret),
+        password.as_ref(),
+        MOUNT_TICKET_LABEL,
+    )
+    .token
+    .as_bytes()
 }
 
 /// Constant-time equality for two share tokens.

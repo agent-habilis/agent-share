@@ -144,7 +144,7 @@ pub(super) enum NativeSource {
     /// A share read through to the files it was scanned from.
     Producer(ProducerSource),
     /// A mount serving what it has read into its own chunk store.
-    Seeding(agent_share_mount::Seeder<habilis_network_chunks::FsStore>),
+    Seeding(agent_share_mount::Seeder<habilis_network_chunks::DiskStore>),
 }
 
 /// The matching watcher, for the same reason.

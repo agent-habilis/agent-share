@@ -56,6 +56,7 @@ habilis-network = { workspace = true }
 # The WebRTC lane. `native` here — the browser client takes the same crate with
 # `web` instead.
 habilis-network-iroh-webrtc-transport = { workspace = true, features = ["native"] }
+habilis-network-iroh-transport-util.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "net", "process"] }
 clap = { version = "4", features = ["derive"] }
 anstyle = "1"

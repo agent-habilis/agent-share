@@ -52,4 +52,4 @@ futures = "0.3"
 # The tag must stay in step with the workspace root and with
 # `agent-share-wasm-client`, which restates it for the same reason. Three copies
 # is the cost of a dependency that means different things on two targets.
-habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "8e3874c308a206a8e835879bc5394acd5b7176cb", default-features = false }
+habilis-network = { git = "https://github.com/agent-habilis/habilis-network", rev = "db51d4ba27916ef9119ee816a02b6ae699d1dea6", default-features = false }

@@ -29,7 +29,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use habilis_network::iroh::{Endpoint, EndpointAddr, TransportAddr};
 use habilis_network_chunks::{
-    ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, FsStore, chunk_hash,
+    ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, DiskStore, chunk_hash,
 };
 
 use super::MountTicket;
@@ -78,10 +78,10 @@ pub(super) struct SourceSet {
     /// Where bytes this mount reads are kept, so reading is what makes this
     /// peer a seeder. `None` when the store could not be opened, which costs
     /// seeding and never a read.
-    store: Option<Arc<FsStore>>,
+    store: Option<Arc<DiskStore>>,
     /// What this mount serves to others. Fed from `store` and `rows` after
     /// every read that landed something new.
-    seeder: Seeder<FsStore>,
+    seeder: Seeder<DiskStore>,
     /// Chunk rows for slots this mount has addressed. Both halves of the job:
     /// finding the chunk that covers an offset, and telling the seeder which
     /// addresses belong to *this* share.
@@ -104,9 +104,9 @@ pub(super) struct SourceSetOpts {
     pub(super) tree: String,
     pub(super) total_slots: usize,
     pub(super) cards: Option<super::mesh::CardBook>,
-    pub(super) store: Option<Arc<FsStore>>,
+    pub(super) store: Option<Arc<DiskStore>>,
     pub(super) envelope: Arc<Vec<u8>>,
-    pub(super) seeder: Seeder<FsStore>,
+    pub(super) seeder: Seeder<DiskStore>,
 }
 
 impl SourceSet {

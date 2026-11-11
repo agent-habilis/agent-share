@@ -13,10 +13,12 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::address_lookup::memory::MemoryLookup;
+use habilis_network::iroh::endpoint::ConnectionError;
 use habilis_network::iroh::endpoint::{Connection, RecvStream, SendStream};
-use habilis_network::net::direct::{MAX_DIRECT_PEERS, SignalAdmission};
 use habilis_network::net::{add_peer_addr, address_book};
+use habilis_network::runtime::InjectedEndpoint;
 use habilis_network_chunks::{ChunkHash, ChunkMap};
+use habilis_network_iroh_transport_util::ProtocolSet;
 use habilis_network_iroh_webrtc_transport::{IceConfig, WebRtcHandle};
 use nfsserve::tcp::{NFSTcp, NFSTcpListener};
 use tokio::sync::Mutex;
@@ -33,7 +35,6 @@ use super::{
 // what `habilis-network-chunks` verifies against rather than defining a second one.
 use super::{MountManifest, ReadStatus};
 use crate::file::wire::read_u32;
-use crate::lookup::build_endpoint_with_admission;
 
 /// How long to keep retrying the dial while the producer's address propagates
 /// (mDNS is instant on a LAN; the DHT fallback can take tens of seconds).
@@ -49,10 +50,10 @@ const SEEDER_CARDS_DEADLINE: Duration = Duration::from_secs(30);
 /// Matched on the application close code the producer chose
 /// ([`agent_share_proto::framing::CLOSE_UNAUTHORIZED`]) rather than on the
 /// reason string, which is a human label and not wire format.
-fn unauthorized_close(reason: &habilis_network::iroh::endpoint::ConnectionError) -> bool {
+fn unauthorized_close(reason: &ConnectionError) -> bool {
     matches!(
         reason,
-        habilis_network::iroh::endpoint::ConnectionError::ApplicationClosed(close)
+        ConnectionError::ApplicationClosed(close)
             if u64::from(close.error_code) == u64::from(agent_share_proto::framing::CLOSE_UNAUTHORIZED)
     )
 }
@@ -157,7 +158,7 @@ pub(crate) async fn attach(
         auth,
         mesh: mesh_target,
     } = redeem_auth(&ticket, password)?;
-    let (endpoint, webrtc, admission, _book) = consumer_endpoint(&ticket, webrtc_only).await?;
+    let (endpoint, webrtc, shared, _book) = consumer_endpoint(&ticket, webrtc_only).await?;
     // The template every peer client is built from, and the address half of
     // the dead-origin bootstrap.
     let origin_ticket = ticket.clone();
@@ -174,12 +175,10 @@ pub(crate) async fn attach(
     // Created before the join because the join needs something to register, and
     // armed after the first read. **Reading is seeding**: from here on a mount
     // is a peer, not a client.
-    let seeder = agent_share_mount::Seeder::<habilis_network_chunks::FsStore>::new();
+    let seeder = agent_share_mount::Seeder::<habilis_network_chunks::DiskStore>::new();
     let mut mesh_task = Some(tokio::spawn(join_share_mesh(MeshJoin {
         target: mesh_target,
-        endpoint: endpoint.clone(),
-        webrtc: webrtc.clone(),
-        admission,
+        shared,
         webrtc_only,
         seeder: seeder.clone(),
         auth,
@@ -359,27 +358,16 @@ pub(crate) fn relay_only(addr: &habilis_network::iroh::EndpointAddr) -> bool {
 pub(super) async fn consumer_endpoint(
     ticket: &MountTicket,
     webrtc_only: bool,
-) -> Result<(Endpoint, WebRtcHandle, SignalAdmission, MemoryLookup)> {
+) -> Result<(Endpoint, WebRtcHandle, InjectedEndpoint, MemoryLookup)> {
     let mut key_bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
     let key = habilis_network::iroh::SecretKey::from_bytes(&key_bytes);
-    let webrtc = WebRtcHandle::new(habilis_network_iroh_webrtc_transport::WebRtcTransport::new(
-        key.public(),
-    ));
-    let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-    let endpoint = build_endpoint_with_admission(
-        &ticket.lookups,
-        Some(key),
-        None,
-        Vec::new(),
-        Some(webrtc.clone()),
-        webrtc_only,
-        Some(&admission),
-    )
-    .await?;
+    let shared = super::mesh::bind_shared(&ticket.lookups, key, Vec::new(), webrtc_only).await?;
+    let endpoint = shared.endpoint().clone();
+    let webrtc = shared.webrtc().clone();
     let book = address_book(&endpoint);
     add_peer_addr(&book, ticket.addr.clone());
-    Ok((endpoint, webrtc, admission, book))
+    Ok((endpoint, webrtc, shared, book))
 }
 
 /// Try the OS mount and report either outcome; `true` when it mounted.
@@ -433,9 +421,8 @@ async fn mount_and_report(
 /// with the manifest fetch, so it cannot borrow from `attach`'s stack.
 struct MeshJoin {
     target: super::mesh::ShareMeshTarget,
-    endpoint: Endpoint,
-    webrtc: WebRtcHandle,
-    admission: SignalAdmission,
+    /// The endpoint the mount dials on, shared with the mesh.
+    shared: InjectedEndpoint,
     webrtc_only: bool,
     /// What this mount serves to other peers.
     ///
@@ -444,7 +431,7 @@ struct MeshJoin {
     /// up — deliberately, so a slow relay never delays a share — so there is
     /// nothing to serve *yet* at this point, and a handle that arms itself
     /// later is how both facts stay true.
-    seeder: agent_share_mount::Seeder<habilis_network_chunks::FsStore>,
+    seeder: agent_share_mount::Seeder<habilis_network_chunks::DiskStore>,
     auth: ShareAuth,
 }
 
@@ -465,22 +452,18 @@ struct MeshJoin {
 async fn join_share_mesh(join: MeshJoin) -> Option<ShareMesh> {
     let result = super::mesh::join(super::mesh::JoinOpts {
         target: join.target,
-        shared: super::mesh::injected_endpoint(
-            join.endpoint.clone(),
-            join.webrtc.clone(),
-            join.admission,
-        ),
+        shared: join.shared,
         // A consumer answers the mount protocol now. It used to answer no ALPN
         // of its own — "it dials the mount protocol, it does not serve it" —
         // but a mount keeps the chunks it reads, so it has bytes other peers
         // want and refusing to hand them over would waste the swarm.
-        protocols: vec![(
+        protocols: ProtocolSet::default().protocol(
             MOUNT_ALPN.to_vec(),
-            Box::new(super::handlers::MountHandler::new(
+            super::handlers::MountHandler::new(
                 join.auth,
                 super::source::NativeSource::Seeding(join.seeder),
-            )) as Box<dyn habilis_network::iroh::protocol::DynProtocolHandler>,
-        )],
+            ),
+        ),
         role: super::mesh::Role::Consumer,
         // Both filled in by the mount once it has a manifest and has read
         // something — see `SourceSet::refresh_seeder`. Empty here is honest: at
@@ -490,11 +473,7 @@ async fn join_share_mesh(join: MeshJoin) -> Option<ShareMesh> {
         // Match the endpoint: `--transport webrtc` built it with IP cleared,
         // and a mesh advertising paths its endpoint does not have is a mesh
         // whose peers dial nowhere.
-        transports: if join.webrtc_only {
-            habilis_network::net::TransportOpts::webrtc_only()
-        } else {
-            habilis_network::net::TransportOpts::default()
-        },
+        transports: super::mesh::share_transports(join.webrtc_only),
     })
     .await;
     match result {
@@ -1025,7 +1004,7 @@ impl RemoteClient {
         // The root is **recomputed** from the row and the size rather than
         // taken on trust, so a peer that sends a row and a root which disagree
         // is caught right here instead of at every later verification.
-        let map = ChunkMap::from_leaves(leaves, size)?;
+        let map = ChunkMap::build_tree(leaves, size)?;
         if map.root().as_bytes() != &root {
             bail!("a peer sent a chunk map whose root does not match its own addresses");
         }
@@ -1423,14 +1402,14 @@ fn spawn_serving_updates(sources: Arc<super::sources::SourceSet>, mesh: Arc<Shar
 /// `None` on any failure. A peer that cannot store still reads.
 fn open_chunk_store(
     token: &[u8; agent_share_proto::framing::SECRET_LEN],
-) -> Option<Arc<habilis_network_chunks::FsStore>> {
+) -> Option<Arc<habilis_network_chunks::DiskStore>> {
     let mut name = String::with_capacity(16);
     for byte in &token[..8] {
         use std::fmt::Write as _;
         let _ = write!(name, "{byte:02x}");
     }
     let root = chunk_cache_dir()?.join(name);
-    match habilis_network_chunks::FsStore::open(&root) {
+    match habilis_network_chunks::DiskStore::open(&root) {
         Ok(store) => Some(Arc::new(store)),
         Err(error) => {
             tracing::warn!(%error, path = %root.display(), "no chunk store; this mount will not seed");

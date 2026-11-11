@@ -16,9 +16,9 @@ Mechanism, now **confirmed in habilis-network source**: the producer is the mesh
 *beacon*. Joiners bootstrap by dialing the seed-derived rendezvous identity
 homed at the relay, and that identity is bound by whichever member claims the
 beacon — always the share's first member, i.e. the native producer
-(`CoHostPolicy::Deferred` + `BEACON_COHOST_GRACE_SECS = 10`). Kill it and the
+(`CoHostPolicy::Deferred` + `BEACON_COHOST_GRACE` = 10 s). Kill it and the
 mesh's front door goes dark: surviving *meshed* tabs only re-probe the vacancy
-on the heal cadence (`RIVAL_RECHECK_MESHED_SECS = 300` plus up to 300 s
+on the heal cadence (`RIVAL_RECHECK_MESHED` = 300 s plus up to 300 s
 jitter), and a fresh joiner claiming after its own 10 s grace becomes a lone
 island whose merge rides the same slow cadence. Failover therefore lands in
 1–10 minutes, and any client-side wait shorter than that reads as "the share
