@@ -13,9 +13,10 @@ use agent_share_proto::framing::{
 };
 use agent_share_proto::ticket::{TICKET_KIND_BENCH_QUIC, TICKET_KIND_BENCH_WEBRTC};
 use anyhow::{Context, Result, bail};
-use fofoca::iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
-use fofoca::iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
-use fofoca_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
+use habilis_network::iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
+use habilis_network::iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use habilis_network::net::{add_peer_addr, address_book};
+use habilis_network_iroh_webrtc_transport::{IceConfig, WebRtcHandle, WebRtcTransport};
 use rand::RngCore;
 use serde::Serialize;
 
@@ -23,7 +24,7 @@ use super::MountTicket;
 use super::ReadStatus;
 use super::{MOUNT_ALPN, OP_BENCH, REQUEST_HEADER_LEN, SECRET_LEN, WEBRTC_SIGNAL_ALPN};
 use super::{dial_webrtc, serve_signal, wait_online};
-use crate::lookup::{add_peer_addr, build_endpoint};
+use crate::lookup::build_endpoint;
 use crate::protocol::swarm::{LookupOpts, LookupSet, resolve_transfer_lookups};
 
 /// Mount data path chosen by the bench producer (carried in the ticket kind).
@@ -342,7 +343,7 @@ async fn connect_forced(
             // ordinary mount would take.
             let endpoint =
                 build_endpoint(&ticket.lookups, Some(key), None, Vec::new(), None, false).await?;
-            add_peer_addr(&endpoint, ticket.addr.clone())?;
+            add_peer_addr(&address_book(&endpoint), ticket.addr.clone());
             let conn = dial_with_retry(&endpoint, ticket.addr.clone()).await?;
             Ok((endpoint, conn, "quic"))
         }
@@ -368,7 +369,7 @@ async fn connect_forced(
                 false,
             )
             .await?;
-            add_peer_addr(&signal_endpoint, ticket.addr.clone())?;
+            add_peer_addr(&address_book(&signal_endpoint), ticket.addr.clone());
 
             let mut mount_lookups = ticket.lookups.clone();
             mount_lookups.relay = crate::protocol::swarm::RelayChoice::Disabled;

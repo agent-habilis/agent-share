@@ -1,7 +1,7 @@
 //! The mount ticket — the whole capability to read a share, in one string.
 
 use anyhow::{Context, Result, bail};
-use fofoca_protocol::iroh_base::EndpointAddr;
+use habilis_network_protocol::iroh_base::EndpointAddr;
 
 use crate::framing::SECRET_LEN;
 use crate::lookup::LookupOpts;
@@ -90,17 +90,17 @@ pub struct MountTicket {
     /// Bit set of [`TICKET_FLAG_PASSWORD`] and whatever follows it. Zero for an
     /// ordinary share, and zero is not written to the wire.
     pub flags: u8,
-    /// The share mesh's fofoca id, carried **only** on a password-protected
+    /// The share mesh's habilis-network id, carried **only** on a password-protected
     /// share and `None` otherwise.
     ///
     /// An ordinary share needs no such field: every peer derives the same mesh
     /// from the ticket secret with no coordination, which is what
     /// [`crate::mesh_key::share_mesh_key`] is for. A protected share cannot,
     /// because the id a producer mints carries the **password verifier** that
-    /// `fofoca`'s `Mesh::set_password` baked into it — sixteen bytes a joiner
+    /// `habilis-network`'s `Mesh::set_password` baked into it — sixteen bytes a joiner
     /// has no way to derive and must be given.
     ///
-    /// Handing that id to `fofoca`'s `JoinParams` is what moves the
+    /// Handing that id to `habilis-network`'s `JoinParams` is what moves the
     /// wrong-password check off the network: `resolve` decodes the id, stretches
     /// the password, compares it against the verifier, and fails locally. A
     /// producer that is switched off does not weaken the check, which matters
@@ -263,7 +263,7 @@ impl MountTicket {
 
 #[cfg(test)]
 mod tests {
-    use fofoca_protocol::iroh_base::{EndpointAddr, SecretKey};
+    use habilis_network_protocol::iroh_base::{EndpointAddr, SecretKey};
 
     use super::{
         MountTicket, SECRET_LEN, TICKET_FLAG_PASSWORD, TICKET_KIND_BENCH_QUIC,
@@ -319,9 +319,12 @@ mod tests {
     fn the_mesh_id_round_trips_on_a_protected_ticket() {
         let mut ticket = sample();
         ticket.flags = TICKET_FLAG_PASSWORD;
-        ticket.mesh_id = Some("some-fofoca-mesh-id".to_owned());
+        ticket.mesh_id = Some("some-habilis-network-mesh-id".to_owned());
         let decoded = MountTicket::decode(&ticket.encode()).expect("decode");
-        assert_eq!(decoded.mesh_id.as_deref(), Some("some-fofoca-mesh-id"));
+        assert_eq!(
+            decoded.mesh_id.as_deref(),
+            Some("some-habilis-network-mesh-id")
+        );
     }
 
     /// A protected ticket minted before the mesh id existed must still decode.
@@ -453,7 +456,7 @@ mod tests {
 
 #[cfg(test)]
 mod author_tests {
-    use fofoca_protocol::iroh_base::{EndpointAddr, SecretKey};
+    use habilis_network_protocol::iroh_base::{EndpointAddr, SecretKey};
 
     use super::{
         MountTicket, SECRET_LEN, TICKET_FLAG_PASSWORD, TICKET_FLAG_SIGNED, TICKET_KIND_SHARE,

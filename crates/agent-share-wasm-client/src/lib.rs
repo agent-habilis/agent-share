@@ -1,7 +1,7 @@
 //! The browser client: read a share over a WebRTC data channel.
 //!
-//! No web-specific protocol. This speaks the same `agent-share/mount/1` ALPN
-//! the CLI does, over the same `fofoca-iroh-webrtc-transport`, using the same
+//! No web-specific protocol. This speaks the same `agent-share/mount/2` ALPN
+//! the CLI does, over the same `habilis-network-iroh-webrtc-transport`, using the same
 //! `agent-share-proto` wire types — the browser is a peer, not a special case.
 //!
 //! # Transport modes
@@ -21,7 +21,7 @@
 //!
 //! 1. Dial `agent-share/webrtc-signal/1` over the relay and swap one JSEP
 //!    envelope each way.
-//! 2. Open a **fresh** connection to `agent-share/mount/1` against an address
+//! 2. Open a **fresh** connection to `agent-share/mount/2` against an address
 //!    carrying only the `WebRTC` custom addr.
 //!
 //! When host/mDNS and NAT hairpin both fail there is no ICE path left: TURN is
@@ -47,13 +47,16 @@ use agent_share_proto::lookup::{LookupOpts, RelayChoice};
 use agent_share_proto::manifest::MountManifest;
 use agent_share_proto::mesh_key::share_mesh_key;
 use agent_share_proto::ticket::{MountTicket, TICKET_KIND_BENCH_WEBRTC};
-use fofoca::iroh::endpoint::{Connection, presets};
-use fofoca::iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr, Watcher as _};
-use fofoca_chunks::{
+use habilis_network::iroh::endpoint::{Connection, presets};
+use habilis_network::iroh::{
+    Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr, Watcher as _,
+};
+use habilis_network_chunks::{
     ChunkHash, ChunkMap, ChunkSource as _, ChunkStore as _, Coverage, FileId, IdbStore, Root,
     chunk_hash,
 };
-use fofoca_iroh_webrtc_transport::{
+use habilis_network_iroh_transport_util::ProtocolSet;
+use habilis_network_iroh_webrtc_transport::{
     BrowserHubTransport, BrowserSession, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope,
     WebRtcHandle, browser_offer, custom_addr, log_signal_sdps,
 };
@@ -79,8 +82,9 @@ mod transport_mode;
 /// so the mesh builds its own endpoint as before — one identity is the goal, but
 /// a relay-only viewer has no WebRTC sessions to miscount anyway.
 struct MeshEndpoint {
-    endpoint: Endpoint,
-    webrtc: WebRtcHandle,
+    /// Bound by the engine with the admission hook the mesh enforces its
+    /// direct-peer cap on; the endpoint and its handle are read back from it.
+    shared: habilis_network::runtime::InjectedEndpoint,
 }
 
 /// Cached ICE remote candidate for one peer endpoint id.
@@ -347,7 +351,9 @@ fn new_share_client(
         link_cache: RefCell::new(HashMap::new()),
         _hub: hub,
         _session: session,
-        signal_endpoint: mesh_endpoint.as_ref().map(|shared| shared.endpoint.clone()),
+        signal_endpoint: mesh_endpoint
+            .as_ref()
+            .map(|mesh| mesh.shared.endpoint().clone()),
         mesh_endpoint,
         _endpoint: endpoint,
         mesh: Rc::new(RefCell::new(MeshSlot::Pending)),
@@ -577,7 +583,7 @@ impl ShareClient {
         // per request. `password_required` lets the page know to collect a
         // password before paying it.
         let auth = redeem_auth(&ticket, password.as_deref())?;
-        // Kept for the mesh join below: fofoca checks the password against the
+        // Kept for the mesh join below: habilis-network checks the password against the
         // verifier the ticket's mesh id carries, which is what names a wrong
         // password without a producer.
         let mesh_id = ticket.mesh_id.clone();
@@ -587,7 +593,7 @@ impl ShareClient {
         let author = ticket.author;
         let mesh_password = password.clone();
         // Resolved *before* the dial. On a protected share whose ticket carries
-        // a mesh id, this is the check: fofoca decodes the id, stretches the
+        // a mesh id, this is the check: habilis-network decodes the id, stretches the
         // password, and compares it against the verifier. It fails here — with
         // no socket and no producer — which is the whole point, because a share
         // outlives its producer and a check that needs one usually cannot run.
@@ -707,10 +713,7 @@ impl ShareClient {
         // so it must never turn a working share into a failed connect — and,
         // since it is additive, it runs in the background instead of holding
         // the connect (its relay work cost real time on the critical path).
-        let shared = client
-            .mesh_endpoint
-            .take()
-            .map(|shared| (shared.endpoint, shared.webrtc));
+        let shared = client.mesh_endpoint.take().map(|mesh| mesh.shared);
         // Parsed eagerly so a malformed card from JS still fails the connect.
         // The transport label is already final: every mount settles its path
         // before `connect` resolves.
@@ -730,19 +733,15 @@ impl ShareClient {
         // the first sync fills it; the signal handler (WebRTC path only —
         // the relay path has no hub) lets another peer negotiate a data
         // channel to *us* the way we negotiate one to the producer.
-        let mut protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> =
-            vec![(
-                MOUNT_ALPN.to_vec(),
-                Box::new(produce::MountHandler::new(client.seeder.clone(), auth)),
-            )];
-        if let Some((endpoint, webrtc)) = shared.as_ref() {
-            protocols.push((
+        let mut protocols = ProtocolSet::default().protocol(
+            MOUNT_ALPN.to_vec(),
+            produce::MountHandler::new(client.seeder.clone(), auth),
+        );
+        if let Some(shared) = shared.as_ref() {
+            protocols = protocols.protocol(
                 WEBRTC_SIGNAL_ALPN.to_vec(),
-                Box::new(produce::SignalHandler::new(
-                    endpoint.id(),
-                    webrtc.transport(),
-                )),
-            ));
+                produce::SignalHandler::new(shared.endpoint().id(), shared.webrtc().transport()),
+            );
         }
         let mesh_slot = Rc::clone(&client.mesh);
         let last_tree = Rc::clone(&client.last_tree);
@@ -1794,7 +1793,8 @@ impl ShareClient {
             &own[..8.min(own.len())]
         )));
         for endpoint in candidates {
-            let Ok(id) = endpoint.parse::<fofoca::protocol::iroh_base::EndpointId>() else {
+            let Ok(id) = endpoint.parse::<habilis_network::protocol::iroh_base::EndpointId>()
+            else {
                 continue;
             };
             // Take the channel before offering one. Two tabs on one mesh
@@ -2239,7 +2239,7 @@ impl ShareClient {
         // The root is recomputed from the row rather than taken on trust, so a
         // peer whose row and root disagree is caught here instead of at every
         // later verification.
-        let row = ChunkMap::from_leaves(leaves, size)
+        let row = ChunkMap::build_tree(leaves, size)
             .map_err(|error| JsValue::from_str(&format!("{error}")))?;
         if row.root().as_bytes() != &root {
             return Err(JsValue::from_str(
@@ -3000,7 +3000,7 @@ async fn fetch_have_on(
     if claimed as usize != chunks {
         return None;
     }
-    Coverage::from_bits(&bitmap, chunks).ok()
+    Coverage::decode_bits(&bitmap, chunks).ok()
 }
 
 /// One `OP_MANIFEST_SINCE` round on `conn`.
@@ -3277,7 +3277,7 @@ trait ProbeChunkSource {
 }
 
 struct StreamChunks {
-    recv: fofoca::iroh::endpoint::RecvStream,
+    recv: habilis_network::iroh::endpoint::RecvStream,
     buf: Vec<u8>,
 }
 
@@ -3332,7 +3332,7 @@ where
 /// only decides how often control returns to the caller (which wants to retry
 /// the *origin* too). Cards keep accumulating on the persistent membership
 /// while the App backs off, so a short attempt loses nothing; it just hands
-/// the origin its turn sooner. Sized past fofoca's fast recovery lanes (the
+/// the origin its turn sooner. Sized past habilis-network's fast recovery lanes (the
 /// 6 s beacon-reclaim window, the 10 s empty-mesh claim grace) while leaving
 /// the slow island-merge cadence (~30–60 s) to the *next* attempt.
 const SEEDER_CARDS_DEADLINE_MS: f64 = 12_000.0;
@@ -3634,7 +3634,7 @@ async fn load_persisted_manifest(
     let raw = storage.get_item(&manifest_locator_key(token)).ok()??;
     let locator: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let tree = locator.get("tree")?.as_str()?;
-    let root = Root::from_hex(locator.get("root")?.as_str()?).ok()?;
+    let root = Root::try_from(locator.get("root")?.as_str()?).ok()?;
     // Adopt-only: a tab reaching this path has a locator, which only a sync in
     // this origin could have written — so the database exists, and creating one
     // here would leave storage behind for somebody who merely browsed.
@@ -3940,7 +3940,7 @@ fn collect_duplicate_now(marked_duplicate: bool, peer_refs: usize) -> bool {
 thread_local! {
     /// Memberships owned by no client yet, keyed by the share's mesh key.
     ///
-    /// The whole point of a dead-origin share is *waiting*: fofoca's own
+    /// The whole point of a dead-origin share is *waiting*: habilis-network's own
     /// healing — a lone joiner's beacon claim, island merges, rendezvous
     /// failover — runs on cadences up to minutes, and a membership dropped
     /// after one bounded attempt loses every race and mints a ghost identity
@@ -4163,14 +4163,9 @@ async fn connect_via_seeder(
             let local = key.public();
             let mesh_hub = BrowserHubTransport::new(local);
             let mesh_handle = WebRtcHandle::new(Arc::clone(&mesh_hub));
-            let endpoint = Endpoint::builder(presets::Minimal)
-                .secret_key(key)
-                .relay_mode(relay_mode(&ticket.lookups.relay))
-                .add_custom_transport(mesh_handle.transport())
-                .path_selector(mesh_handle.path_selector())
-                .bind()
-                .await
-                .map_err(|error| err("bind the waiting mesh endpoint", &error))?;
+            let mesh_shared =
+                mesh::bind_shared(&ticket.lookups, key, mesh_handle, Vec::new()).await?;
+            let endpoint = mesh_shared.endpoint().clone();
             let mount_key = SecretKey::generate();
             let mount_local = mount_key.public();
             let mount_hub = BrowserHubTransport::new(mount_local);
@@ -4193,16 +4188,15 @@ async fn connect_via_seeder(
                 .bind()
                 .await
                 .map_err(|error| err("bind the seeder-mount endpoint", &error))?;
-            let protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)> = vec![
-                (
+            let protocols = ProtocolSet::default()
+                .protocol(
                     MOUNT_ALPN.to_vec(),
-                    Box::new(produce::MountHandler::new(seeder.clone(), auth)),
-                ),
-                (
+                    produce::MountHandler::new(seeder.clone(), auth),
+                )
+                .protocol(
                     WEBRTC_SIGNAL_ALPN.to_vec(),
-                    Box::new(produce::SignalHandler::new(local, Arc::clone(&mesh_hub))),
-                ),
-            ];
+                    produce::SignalHandler::new(local, Arc::clone(&mesh_hub)),
+                );
             let card_parts = match card.as_ref() {
                 Some(value) => {
                     mesh::parse_card_parts(value, "webrtc", Some("consumer".to_owned()))?
@@ -4215,21 +4209,17 @@ async fn connect_via_seeder(
                 lookups: &lookups,
                 password,
             })?;
-            let peer = mesh::MeshPeer::join_share(
-                resolved,
-                Some((endpoint.clone(), mesh_handle)),
-                protocols,
-                card_parts,
-            )
-            .await
-            .map_err(|mesh_error| {
-                JsValue::from_str(&format!(
-                    "the origin is unreachable ({}) and the share's mesh could not be \
+            let peer =
+                mesh::MeshPeer::join_share(resolved, Some(mesh_shared), protocols, card_parts)
+                    .await
+                    .map_err(|mesh_error| {
+                        JsValue::from_str(&format!(
+                            "the origin is unreachable ({}) and the share's mesh could not be \
                      joined ({})",
-                    describe(origin_error),
-                    describe(&mesh_error),
-                ))
-            })?;
+                            describe(origin_error),
+                            describe(&mesh_error),
+                        ))
+                    })?;
             let entry = WaitingMesh {
                 peer: Rc::new(peer),
                 seeder,
@@ -4418,7 +4408,7 @@ async fn connect_via_seeder(
     for (slot, candidate) in candidates.iter().take(SEEDER_RACE_WIDTH).enumerate() {
         let Ok(id) = candidate
             .endpoint
-            .parse::<fofoca::protocol::iroh_base::EndpointId>()
+            .parse::<habilis_network::protocol::iroh_base::EndpointId>()
         else {
             continue;
         };
@@ -4545,7 +4535,7 @@ async fn redial_known_seeders(
     for entry in entries.iter().filter(|entry| entry.endpoint != own) {
         let Ok(id) = entry
             .endpoint
-            .parse::<fofoca::protocol::iroh_base::EndpointId>()
+            .parse::<habilis_network::protocol::iroh_base::EndpointId>()
         else {
             continue;
         };
@@ -4759,10 +4749,10 @@ async fn adopt_vetted(
 /// connection cannot settle anywhere but the channel.
 /// How long to wait for a data channel to `seeder` before conceding relay.
 ///
-/// Two lanes race to build one: our own JSEP round below, and fofoca's mesh
+/// Two lanes race to build one: our own JSEP round below, and habilis-network's mesh
 /// negotiation, which retries on its own schedule. A session was once
 /// *measured* landing a minute after two freshly-reloaded tabs meet, but
-/// that predates fofoca's beacon-failover fixes; conceding to the relay at
+/// that predates habilis-network's beacon-failover fixes; conceding to the relay at
 /// 15 s keeps the attempt moving, and the App's retry redials webrtc. Do
 /// not cut further without drill data: a demotion to relay is permanent for
 /// the connection, so a too-sharp wait converts webrtc wins into relay
@@ -4776,7 +4766,7 @@ const _: () = assert!(
 
 /// What channel formation was *measured* needing, rather than hoped to need.
 ///
-/// fofoca's mesh negotiation was measured landing a session a minute after
+/// habilis-network's mesh negotiation was measured landing a session a minute after
 /// two freshly-reloaded tabs meet, and this repo's own drill records the
 /// both-tabs-reloaded byte lane at ~96 s. 30 s is the value that lane ran on
 /// before it was halved on the theory that beacon-failover fixes had covered
@@ -4824,7 +4814,7 @@ impl WaitingMesh {
 
 async fn seeder_webrtc_dial(
     waiting: DialLanes<'_>,
-    seeder: fofoca::protocol::iroh_base::EndpointId,
+    seeder: habilis_network::protocol::iroh_base::EndpointId,
     relays: &[TransportAddr],
     wait: f64,
 ) -> Result<Connection, JsValue> {
@@ -4971,7 +4961,7 @@ struct VetTerms<'a> {
 async fn vet_seeder_candidate(
     waiting: &WaitingMesh,
     endpoint: String,
-    id: fofoca::protocol::iroh_base::EndpointId,
+    id: habilis_network::protocol::iroh_base::EndpointId,
     relays: &[TransportAddr],
     terms: &VetTerms<'_>,
 ) -> Result<VettedSeeder, Refusal> {
@@ -5102,7 +5092,7 @@ where
 /// Every peer of a share homes on the ladder the ticket names — the same
 /// rungs the mesh rendezvous uses — so the ladder, not any one URL, is the
 /// address half of "dial by endpoint id".
-fn seeder_relays(ticket: &MountTicket) -> Vec<fofoca::iroh::RelayUrl> {
+fn seeder_relays(ticket: &MountTicket) -> Vec<habilis_network::iroh::RelayUrl> {
     use agent_share_proto::lookup::RelayChoice;
     match &ticket.lookups.relay {
         RelayChoice::Disabled => Vec::new(),
@@ -5268,11 +5258,7 @@ fn wanted(only: &[String], rel_path: &str) -> bool {
 /// because they are what the *origin* says this version is. That is the
 /// comparison the store's version gate makes on every read.
 pub(crate) fn file_id(entry: &agent_share_proto::manifest::FileEntry) -> FileId {
-    FileId {
-        key: entry.rel_path.clone(),
-        size: entry.size,
-        mtime: entry.mtime,
-    }
+    FileId::new(entry.rel_path.clone(), entry.size, entry.mtime)
 }
 
 async fn wait_ms(millis: i32) {
@@ -5332,16 +5318,7 @@ async fn connect_webrtc(
     // `peers_direct` unions the two so the count stays honest.
     let mesh_hub = BrowserHubTransport::new(local);
     let mesh_handle = WebRtcHandle::new(Arc::clone(&mesh_hub));
-    let signal_bind = async {
-        Endpoint::builder(presets::Minimal)
-            .secret_key(key.clone())
-            .relay_mode(relay_mode(&ticket.lookups.relay))
-            .add_custom_transport(mesh_handle.transport())
-            .path_selector(mesh_handle.path_selector())
-            .bind()
-            .await
-            .map_err(|error| err("bind signal endpoint", &error))
-    };
+    let signal_bind = mesh::bind_shared(&ticket.lookups, key.clone(), mesh_handle, Vec::new());
 
     let hub = BrowserHubTransport::new(local);
     let handle = WebRtcHandle::new(Arc::clone(&hub));
@@ -5358,7 +5335,8 @@ async fn connect_webrtc(
             .map_err(|error| err("bind mount endpoint", &error))
     };
     // Nothing links the two binds but the shared key, so they run together.
-    let (signal_endpoint, endpoint) = futures::future::try_join(signal_bind, mount_bind).await?;
+    let (mesh_shared, endpoint) = futures::future::try_join(signal_bind, mount_bind).await?;
+    let signal_endpoint = mesh_shared.endpoint().clone();
 
     // JSEP on the signal endpoint, attached into the *mount* endpoint's hub.
     // Decoupling those two is the point: the producer keys the session by the
@@ -5412,12 +5390,11 @@ async fn connect_webrtc(
                 author,
                 data_path,
                 Some(hub),
-                Some(session),
+                session,
                 // The mesh rides the *signal* endpoint, the one with a relay to
                 // gossip over, with its own hub.
                 Some(MeshEndpoint {
-                    endpoint: signal_endpoint,
-                    webrtc: mesh_handle,
+                    shared: mesh_shared,
                 }),
                 endpoint,
             );
@@ -5427,6 +5404,9 @@ async fn connect_webrtc(
         Err(error) => {
             endpoint.close().await;
             signal_endpoint.close().await;
+            if agent_share_mount::refused_protocol(&error) {
+                return Err(JsValue::from_str(agent_share_mount::OTHER_VERSION));
+            }
             Err(err("dial the mount ALPN over WebRTC", &error))
         }
     }
@@ -5448,12 +5428,15 @@ fn ensure_reachable_addr(addr: &EndpointAddr) -> Result<(), JsValue> {
 }
 
 /// Swap one JSEP envelope each way over the signal ALPN, then attach into `hub`.
+///
+/// `None` when `hub` already holds a session for the producer: there is nothing
+/// new to hold, and the engine no longer lets a caller mint a `BrowserSession`.
 async fn negotiate(
     endpoint: &Endpoint,
     producer: EndpointAddr,
-    local: fofoca::protocol::iroh_base::EndpointId,
+    local: habilis_network::protocol::iroh_base::EndpointId,
     hub: &BrowserHubTransport,
-) -> Result<BrowserSession, JsValue> {
+) -> Result<Option<BrowserSession>, JsValue> {
     let producer_id = producer.id;
     // Today the hub is built a few lines above this call and is provably empty,
     // so this cannot fire. It is here because the invariant is "the hub is
@@ -5461,14 +5444,12 @@ async fn negotiate(
     // natural next refactor — a second negotiation for a peer we already reach
     // would burn a full ICE budget and then be refused at attach.
     if hub.has_session(&producer_id) {
-        return Ok(BrowserSession {
-            remote: producer_id,
-        });
+        return Ok(None);
     }
     // The relay dial and the offer are independent — the offer needs only
     // `local` and `ice` — so the dial's latency hides inside ICE gathering.
     // If the dial loses the race with an error, dropping the offer future
-    // closes its in-flight RTCPeerConnection (fofoca's pending offer arms a
+    // closes its in-flight RTCPeerConnection (habilis-network's pending offer arms a
     // close-on-drop guard), so nothing leaks.
     let dial = async {
         let conn = endpoint
@@ -5515,9 +5496,7 @@ async fn negotiate(
     // stage called "build offer" — true but useless.
     if let SignalEnvelope::Error { reason, .. } = &answer {
         if hub.has_session(&producer_id) {
-            return Ok(BrowserSession {
-                remote: producer_id,
-            });
+            return Ok(None);
         }
         return Err(JsValue::from_str(&format!(
             "producer refused WebRTC signalling: {reason}"
@@ -5540,7 +5519,7 @@ async fn negotiate(
     }
 
     conn.close(0u32.into(), b"jsep done");
-    Ok(session)
+    Ok(Some(session))
 }
 
 fn js_stage(context: &str, error: JsValue) -> JsValue {
@@ -5554,7 +5533,10 @@ fn js_stage(context: &str, error: JsValue) -> JsValue {
 /// a non-`Ok` status there is "I cannot answer for that", which is ordinary
 /// traffic rather than a protocol failure, and folding the two together would
 /// turn every polite refusal into an error.
-async fn read_len(recv: &mut fofoca::iroh::endpoint::RecvStream, cap: u32) -> Result<u32, JsValue> {
+async fn read_len(
+    recv: &mut habilis_network::iroh::endpoint::RecvStream,
+    cap: u32,
+) -> Result<u32, JsValue> {
     let mut raw = [0u8; 4];
     recv.read_exact(&mut raw)
         .await
@@ -5569,7 +5551,7 @@ async fn read_len(recv: &mut fofoca::iroh::endpoint::RecvStream, cap: u32) -> Re
 }
 
 async fn read_header(
-    recv: &mut fofoca::iroh::endpoint::RecvStream,
+    recv: &mut habilis_network::iroh::endpoint::RecvStream,
     cap: u32,
 ) -> Result<u32, JsValue> {
     let mut prefix = [0u8; 5];
@@ -5633,7 +5615,7 @@ fn unauthorized(detail: &str) -> JsValue {
 fn unauthorized_close(conn: &Connection) -> bool {
     matches!(
         conn.close_reason(),
-        Some(fofoca::iroh::endpoint::ConnectionError::ApplicationClosed(close))
+        Some(habilis_network::iroh::endpoint::ConnectionError::ApplicationClosed(close))
             if u64::from(close.error_code) == u64::from(framing::CLOSE_UNAUTHORIZED)
     )
 }
@@ -5667,8 +5649,14 @@ fn redeem_auth(ticket: &MountTicket, password: Option<&str>) -> Result<ShareAuth
 /// QUIC's keep-alive interval, so the connection goes quiet and expires. The
 /// message says so, because "timed out" alone sends the reader looking at the
 /// network.
-fn stream_open_failed(what: &str, error: &fofoca::iroh::endpoint::ConnectionError) -> JsValue {
-    if matches!(error, fofoca::iroh::endpoint::ConnectionError::TimedOut) {
+fn stream_open_failed(
+    what: &str,
+    error: &habilis_network::iroh::endpoint::ConnectionError,
+) -> JsValue {
+    if matches!(
+        error,
+        habilis_network::iroh::endpoint::ConnectionError::TimedOut
+    ) {
         return JsValue::from_str(&format!(
             "{what}: the connection to the producer expired while idle. \
              A backgrounded tab throttles timers below the keep-alive interval, \
@@ -5688,8 +5676,8 @@ fn serde_wasm<T: serde::Serialize>(value: &T) -> Result<JsValue, JsValue> {
 /// The engine parses the list, not us: `relay_ladder` is `LazyLock`-cached and
 /// its `RelayUrl`s are `Arc`-backed, so this costs a clone rather than five URL
 /// parses per endpoint. The CLI reaches the same list through the same call.
-fn pinned_ladder() -> Vec<fofoca::iroh::RelayUrl> {
-    fofoca::net::relay_ladder(&fofoca::protocol::RelayChoice::Pinned)
+fn pinned_ladder() -> Vec<habilis_network::iroh::RelayUrl> {
+    habilis_network::net::relay_ladder(&habilis_network::protocol::RelayChoice::Pinned).collect()
 }
 
 #[cfg(test)]
@@ -5734,7 +5722,7 @@ mod tests {
     fn a_disabled_choice_names_no_relay() {
         let offered = relay_mode(&agent_share_proto::lookup::RelayChoice::Disabled)
             .relay_map()
-            .urls::<Vec<fofoca::iroh::RelayUrl>>();
+            .urls::<Vec<habilis_network::iroh::RelayUrl>>();
         assert!(offered.is_empty());
     }
 

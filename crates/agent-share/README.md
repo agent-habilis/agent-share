@@ -36,12 +36,12 @@ a peer with no IP path reach it. The pieces it shares with the browser live else
 | | |
 |---|---|
 | `agent-share-proto` | the wire format — ticket, manifest, framing |
-| `fofoca-iroh-webrtc-transport` | the iroh custom transport (`host` feature here) |
+| `habilis-network-iroh-webrtc-transport` | the iroh custom transport (`host` feature here) |
 | `agent-share-wasm-client` | the same protocol, compiled to wasm for the browser app and `agent-share-node` |
 
 See the repository README for the web client and the overall layout.
 
 ## Not published
 
-`publish = false`. The ticket format and the `agent-share/mount/1` ALPN are pinned
+`publish = false`. The ticket format and the `agent-share/mount/2` ALPN are pinned
 by golden tests; both ends of a mount must run the same build.

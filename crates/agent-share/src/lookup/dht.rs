@@ -6,8 +6,8 @@
 //! in AGENTS.md).
 
 use anyhow::{Context, Result};
-use fofoca::iroh::Endpoint;
-use fofoca::iroh_mainline_address_lookup::DhtAddressLookup;
+use habilis_network::iroh::Endpoint;
+use habilis_network::iroh_mainline_address_lookup::DhtAddressLookup;
 
 /// Wire the mainline-DHT address-lookup onto a bound endpoint. In iroh 1.0 the
 /// provider is a companion crate added to the endpoint's address-lookup

@@ -18,7 +18,7 @@
 //! Everything here degrades to "no peer counts" rather than to a broken share.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use agent_share_proto::PeerCard;
@@ -26,16 +26,18 @@ use agent_share_proto::framing::SECRET_LEN;
 use agent_share_proto::mesh_key::share_mesh_key;
 use agent_share_proto::roster::{Roster, entries_from_meta};
 use anyhow::{Context, Result};
-use fofoca::embed::{
+use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SelfWriteGate,
     SilentSink,
 };
-use fofoca::net::TransportOpts;
-use fofoca::ops::{StateMergeParams, broadcast_state_merge};
-use fofoca::protocol::{Channel, Message, Nickname, Password};
-use fofoca::runtime::{
-    InjectedEndpoint, JoinParams, Node, Resolved, SetupParams, derive_topic_mesh_with,
+use habilis_network::net::{TransportHandles, TransportOpts};
+use habilis_network::ops::{MergeCtx, StateMergeParams, broadcast_state_merge};
+use habilis_network::protocol::{AuthorKey, Authored, Channel, Nickname, Password, UnlockError};
+use habilis_network::runtime::{
+    InjectedEndpoint, JoinParams, LiveCount, Node, Resolved, SetupError, SetupParams,
+    SignalHandling, derive_topic_mesh_with,
 };
+use habilis_network_iroh_transport_util::ProtocolSet;
 
 /// A share's lookups, as the engine spells them.
 ///
@@ -46,18 +48,16 @@ use fofoca::runtime::{
 /// function. The browser peer carries the same ten lines for the same reason.
 pub(crate) fn mesh_lookups(
     share: &agent_share_proto::lookup::LookupOpts,
-) -> fofoca::protocol::LookupOpts {
+) -> habilis_network::protocol::LookupOpts {
     use agent_share_proto::lookup::RelayChoice as ShareRelay;
-    use fofoca::protocol::RelayChoice as MeshRelay;
-    fofoca::protocol::LookupOpts {
-        mdns: share.mdns,
-        dht: share.dht,
-        relay_lookup: match &share.relay {
-            ShareRelay::Disabled => MeshRelay::Disabled,
-            ShareRelay::Pinned => MeshRelay::Pinned,
-            ShareRelay::Custom(urls) => MeshRelay::Custom(urls.clone()),
-        },
-    }
+    use habilis_network::protocol::RelayChoice as MeshRelay;
+    habilis_network::protocol::LookupOpts::new(match &share.relay {
+        ShareRelay::Disabled => MeshRelay::Disabled,
+        ShareRelay::Pinned => MeshRelay::Pinned,
+        ShareRelay::Custom(urls) => MeshRelay::Custom(urls.clone()),
+    })
+    .mdns(share.mdns)
+    .dht(share.dht)
 }
 
 /// How many peers this node negotiates direct sessions with.
@@ -66,7 +66,60 @@ pub(crate) fn mesh_lookups(
 /// here, another in the browser peer, and the real one in the engine — so the
 /// number a UI rendered and the number the engine enforced could drift apart,
 /// and did.
-use fofoca::net::MAX_DIRECT_PEERS;
+use habilis_network::iroh::SecretKey;
+use habilis_network::net::MAX_DIRECT_PEERS;
+use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+
+/// Bind the endpoint a peer shares with its share's mesh.
+///
+/// The engine binds it, not [`crate::lookup`]: since habilis-network#24 an
+/// [`InjectedEndpoint`] has one constructor, which installs the transports and
+/// the admission hook the mesh enforces its direct-peer cap on. The caller
+/// reads the endpoint back with [`InjectedEndpoint::endpoint`] to speak the
+/// mount protocol on it before the mesh is set up.
+///
+/// `key` is minted by the caller and pinned, so the `WebRTC` transport
+/// advertises the identity the endpoint binds. `webrtc_only` clears the IP
+/// transports, as `--transport webrtc` asks; the mesh must then be joined with
+/// the same [`TransportOpts`], or it would advertise paths that do not exist.
+/// No `multihop` handle: this node relays no multi-hop traffic.
+///
+/// # Errors
+/// The endpoint does not bind.
+pub(crate) async fn bind_shared(
+    lookups: &agent_share_proto::lookup::LookupOpts,
+    key: SecretKey,
+    alpns: Vec<Vec<u8>>,
+    webrtc_only: bool,
+) -> Result<InjectedEndpoint> {
+    let mut handles = TransportHandles::default();
+    handles.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(key.public())));
+    handles.options = share_transports(webrtc_only);
+    let shared = InjectedEndpoint::bind(
+        &mesh_lookups(lookups),
+        key,
+        alpns,
+        handles,
+        MAX_DIRECT_PEERS,
+    )
+    .await
+    .context("binding the share endpoint")?;
+    tracing::info!(
+        network = lookups.network_label(),
+        endpoint_id = %shared.endpoint().id(),
+        "endpoint bound"
+    );
+    Ok(shared)
+}
+
+/// The paths a share peer takes: all of them, or the `WebRTC` lane alone.
+pub(crate) fn share_transports(webrtc_only: bool) -> TransportOpts {
+    if webrtc_only {
+        TransportOpts::webrtc_only()
+    } else {
+        TransportOpts::default()
+    }
+}
 
 /// Which side of the share a peer is on, as its meta card spells it.
 ///
@@ -91,12 +144,10 @@ impl Role {
     }
 }
 
-/// Meta per-peer gate: only `<nick>` may write `/peers/<nick>/card`.
+/// Meta per-peer gate: only the key `<key>` may write `/peers/<key>/card`,
+/// `<key>` being the lowercase hex of its author key.
 fn share_card_gate() -> SelfWriteGate {
-    SelfWriteGate {
-        map: "peers".to_owned(),
-        field: "card".to_owned(),
-    }
+    SelfWriteGate::new("peers".to_owned(), "card")
 }
 
 /// Every peer's published card, plus the roster saying which of them are here.
@@ -146,25 +197,26 @@ pub(crate) enum ShareRequest {
     RepublishCard,
 }
 
-/// The nicknames the engine currently counts as present, ours included.
+/// The author keys (lowercase hex) the engine currently counts as present,
+/// ours included.
 ///
 /// `roster_snapshot()` reports active peers *and* the quiet ones it evicted
 /// for silence; only the active half is present, which is exactly the set
 /// behind the peer count (`tick_sweep` drops a quiet peer from `peers` and
 /// rewrites that count in the same breath).
 ///
-/// Our own nickname is added because we are never on our own roster and are
+/// Our own key is added because we are never on our own roster and are
 /// unquestionably here. Leaving it out would hide our own card.
-fn present_nicknames(state: &EventLoopState, own: &Nickname) -> BTreeSet<String> {
-    let mut names: BTreeSet<String> = state
+fn present_keys(state: &EventLoopState, own: &AuthorKey) -> BTreeSet<String> {
+    let mut keys: BTreeSet<String> = state
         .roster_snapshot()
         .peers
         .into_iter()
         .filter(|entry| !entry.quiet)
-        .map(|entry| entry.nickname.as_str().to_owned())
+        .map(|entry| entry.key.to_string())
         .collect();
-    names.insert(own.as_str().to_owned());
-    names
+    keys.insert(own.to_string());
+    keys
 }
 
 /// Snapshot the present peers out of a shared book.
@@ -251,7 +303,7 @@ impl ShareDriver {
     fn refresh_book(&self, state: &EventLoopState, ctx: &HandlerCtx<'_>) {
         let next = Roster::new(
             entries_from_meta(&state.doc(Channel::Meta).to_json()),
-            present_nicknames(state, ctx.author),
+            present_keys(state, &ctx.our_pubkey),
         );
         if let Ok(mut book) = self.book.lock() {
             *book = next;
@@ -281,22 +333,14 @@ impl ShareDriver {
         );
         let merge = serde_json::json!({
             "peers": {
-                ctx.author.as_str(): {
+                ctx.our_pubkey.to_string(): {
                     "card": card.to_card_value()
                 }
             }
         });
         if let Err(error) = broadcast_state_merge(
             state,
-            StateMergeParams {
-                mesh: ctx.mesh,
-                author: ctx.author,
-                merge,
-                sender: ctx.sender,
-                sink: ctx.sink,
-                channel: Channel::Meta,
-                surface: false,
-            },
+            StateMergeParams::new(MergeCtx::from(ctx), Channel::Meta, merge).surface(false),
         )
         .await
         {
@@ -308,16 +352,10 @@ impl ShareDriver {
     }
 }
 
-#[fofoca::async_trait]
+#[habilis_network::async_trait]
 impl NodeApp for ShareDriver {
-    fn classify(&self, _message: &Message) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+    fn classify(&self, _message: &Authored) -> AppClass {
+        AppClass::BEAT | AppClass::VALID
     }
 
     async fn on_app_frame(
@@ -332,7 +370,7 @@ impl NodeApp for ShareDriver {
     /// Someone's meta card changed — including ours, echoed back.
     fn on_meta_applied(
         &mut self,
-        _author: &Nickname,
+        _author: &AuthorKey,
         state: &mut EventLoopState,
         ctx: &HandlerCtx<'_>,
     ) {
@@ -348,6 +386,7 @@ impl NodeApp for ShareDriver {
     /// that left would stay on the roster until the process ended.
     async fn on_peer_left(
         &mut self,
+        _key: &AuthorKey,
         _nickname: &Nickname,
         state: &mut EventLoopState,
         ctx: &HandlerCtx<'_>,
@@ -356,7 +395,7 @@ impl NodeApp for ShareDriver {
     }
 }
 
-#[fofoca::async_trait]
+#[habilis_network::async_trait]
 impl NodeDriver for ShareDriver {
     type Session = ShareRequest;
     type Http = ();
@@ -400,9 +439,9 @@ pub(crate) struct ShareMesh {
     mesh_id: String,
     /// Held, not used: dropping every clone aborts the accept task, and this
     /// Router is now the only thing accepting the share's own ALPNs.
-    _router: fofoca::iroh::protocol::Router,
-    live: Arc<AtomicUsize>,
-    webrtc: fofoca_iroh_webrtc_transport::WebRtcHandle,
+    _router: habilis_network::iroh::protocol::Router,
+    live: LiveCount,
+    webrtc: WebRtcHandle,
     node: Option<Node<ShareDriver>>,
     book: CardBook,
     tree: SharedTree,
@@ -515,7 +554,7 @@ impl ShareMesh {
     /// or "it did not". Run long-lived serves with `RUST_LOG=info` and stderr
     /// captured, or the line has nowhere to land.
     pub(crate) fn spawn_report(&self, json: bool) {
-        let live = Arc::clone(&self.live);
+        let live = self.live.clone();
         let webrtc = self.webrtc.clone();
         let book = Arc::clone(&self.book);
         let local = self.local_endpoint.clone();
@@ -609,7 +648,7 @@ pub(crate) struct JoinOpts {
     /// ALPNs to serve on the mesh's Router. The producer's two ride here
     /// because iroh permits one accept loop per endpoint; a consumer serves
     /// none and passes an empty vec.
-    pub(crate) protocols: Vec<(Vec<u8>, Box<dyn fofoca::iroh::protocol::DynProtocolHandler>)>,
+    pub(crate) protocols: ProtocolSet,
     pub(crate) role: Role,
     /// Fingerprint of the manifest this peer is on, when it knows one.
     ///
@@ -669,9 +708,9 @@ impl std::fmt::Debug for ShareMeshTarget {
 /// The topic string a share's mesh is derived from.
 ///
 /// Off the **secret**, not the token. The password is applied on top by
-/// `fofoca`, which switches every derivation onto the stretched key
+/// `habilis-network`, which switches every derivation onto the stretched key
 /// (`Mesh::effective_seed`) — so the mesh is still unreachable without the
-/// password, but `fofoca` owns that gating rather than this crate re-deriving
+/// password, but `habilis-network` owns that gating rather than this crate re-deriving
 /// around it. Hashed first because the engine carries the topic string into its
 /// state file and user-facing lines.
 fn topic_string(secret: &[u8; SECRET_LEN]) -> String {
@@ -695,7 +734,7 @@ pub(crate) fn mint(
         // Bakes the verifier into the id and switches the derivations onto the
         // stretched key. The id is then what a joiner checks its password
         // against, with no network and no producer.
-        mesh.set_password(&Password::new(password.to_owned()));
+        mesh.set_password(Password::new(password.to_owned()));
     }
     resolve_id(mesh.to_string(), password)
 }
@@ -722,39 +761,37 @@ pub(crate) fn resolve(
     }
 }
 
-/// Hand `mesh_id` to `fofoca` and let it rule on the password.
+/// Hand `mesh_id` to `habilis-network` and let it rule on the password.
 ///
 /// This is the check. `JoinParams::resolve` decodes the id, stretches the
 /// password with Argon2id, and compares the result against the verifier the id
 /// carries — locally, before any socket exists.
 fn resolve_id(mesh_id: String, password: Option<&str>) -> Result<ShareMeshTarget> {
-    let resolved = JoinParams {
-        target: mesh_id.parse().context("parsing the share mesh id")?,
-        nickname: Some(Nickname::random()),
-        password: password.map(|password| Password::new(password.to_owned())),
-    }
+    let resolved = JoinParams::new(
+        mesh_id.parse().context("parsing the share mesh id")?,
+        Some(Nickname::random()),
+        password.map(|password| Password::new(password.to_owned())),
+    )
     .resolve()
     .map_err(explain_password_error)?;
     Ok(ShareMeshTarget { resolved, mesh_id })
 }
 
-/// Rewrite `fofoca`'s password errors into this tool's vocabulary.
+/// Rewrite `habilis-network`'s password errors into this tool's vocabulary.
 ///
-/// Matched on the message because `fofoca` does not export a type for these
-/// yet: `apply_password` fails with a bare `bail!("wrong password")` and its
-/// `PasswordRequired` is `pub(crate)`, despite its own doc calling it "typed for
-/// the frontends". Worth fixing there — until then a reword upstream silently
-/// turns this back into a generic failure, which is why the fallback keeps the
-/// original error rather than guessing.
-fn explain_password_error(error: anyhow::Error) -> anyhow::Error {
-    let rendered = format!("{error:#}").to_ascii_lowercase();
-    if rendered.contains("wrong password") {
-        return error.context(super::consume::WRONG_PASSWORD);
+/// Matched on the type: [`SetupError`] names each way a password can be
+/// refused. Only a wrong password gets our wording, because it is the one a
+/// user fixes by retyping; the others already say what is missing.
+fn explain_password_error(error: SetupError) -> anyhow::Error {
+    // `if` rather than `match`: `SetupError` is `#[non_exhaustive]`, so a match
+    // needs a catch-all arm, and the workspace denies those on enums.
+    if matches!(error, SetupError::Unlock(UnlockError::WrongPassword)) {
+        return anyhow::Error::from(error).context(super::consume::WRONG_PASSWORD);
     }
-    if rendered.contains("password") {
-        return error;
+    if matches!(error, SetupError::PasswordRequired | SetupError::Unlock(_)) {
+        return anyhow::Error::from(error);
     }
-    error.context("resolving the share mesh join")
+    anyhow::Error::from(error).context("resolving the share mesh join")
 }
 
 /// Join the mesh this share's ticket names, and return a handle to it.
@@ -775,33 +812,26 @@ pub(crate) async fn join(opts: JoinOpts) -> Result<ShareMesh> {
     let Resolved { kind, author, .. } = target.resolved;
 
     // Read before `shared` is moved into the setup params below.
-    let local_endpoint = shared.endpoint.id().to_string();
-    let live = Arc::new(AtomicUsize::new(0));
-    let config = fofoca::runtime::setup_mesh(
-        kind,
-        SetupParams {
-            author,
-            max_peers: MAX_DIRECT_PEERS,
-            // No state file and no control socket: this membership belongs to
-            // one `serve` process, not to a daemon something else drives.
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::new(SilentSink),
-            // One endpoint for the share and the mesh, so this process has a
-            // single identity. Two identities meant a viewer counted this
-            // machine twice — once for the mount session, once for the mesh.
-            endpoint: Some(shared),
-            // The Router owns accept() now; the share's ALPNs ride along.
-            protocols,
-            transports,
-            multihop: false,
-            per_peer_gate: Some(share_card_gate()),
-            cohost: None,
-            live_count: Some(Arc::clone(&live)),
-        },
-    )
-    .await
-    .context("setting up the share mesh")?;
+    let local_endpoint = shared.endpoint().id().to_string();
+    let live = LiveCount::default();
+    // No state file, no control socket and no key file: this membership
+    // belongs to one `serve` process, not to a daemon something else drives,
+    // and its member key is as ephemeral as the process.
+    let params = SetupParams::new(author, SilentSink::default())
+        .max_peers(MAX_DIRECT_PEERS)
+        .max_direct(MAX_DIRECT_PEERS)
+        // One endpoint for the share and the mesh, so this process has a
+        // single identity. Two identities meant a viewer counted this
+        // machine twice — once for the mount session, once for the mesh.
+        .endpoint(shared)
+        // The Router owns accept() now; the share's ALPNs ride along.
+        .with_protocols(protocols)
+        .transports(transports)
+        .per_peer_gate(share_card_gate())
+        .live_count(live.clone());
+    let config = habilis_network::runtime::setup_mesh(kind, params)
+        .await
+        .context("setting up the share mesh")?;
 
     let mesh_id = config.mesh_id().as_str().to_owned();
     let webrtc = config.webrtc_handle();
@@ -825,11 +855,11 @@ pub(crate) async fn join(opts: JoinOpts) -> Result<ShareMesh> {
         Arc::clone(&serving),
         Arc::clone(&book),
     );
-    // `handle_signals: false` is load-bearing, not a default. Registering
+    // `SignalHandling::Leave` is load-bearing, not a default. Registering
     // tokio's signal handlers suppresses the OS default-terminate for the
     // *whole process, permanently* — `serve` owns its own ctrl-c, and a mesh
     // membership must not take that away from it.
-    let node = Node::spawn(config, driver, None, false);
+    let node = Node::spawn(config, driver, None, SignalHandling::Leave);
     Ok(ShareMesh {
         mesh_id,
         _router: router,
@@ -1067,32 +1097,22 @@ mod tests {
         role: Role,
         tree: Option<String>,
     ) -> super::ShareMesh {
-        use fofoca::runtime::InjectedEndpoint;
-        use fofoca_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
         use rand::RngCore;
 
         let mut key_bytes = [0u8; 32];
         rand::rng().fill_bytes(&mut key_bytes);
-        let key = fofoca::iroh::SecretKey::from_bytes(&key_bytes);
-        let webrtc = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-        let endpoint = crate::lookup::build_endpoint(
-            lookups,
-            Some(key),
-            None,
-            Vec::new(),
-            Some(webrtc.clone()),
-            false,
-        )
-        .await
-        .expect("bind endpoint");
+        let key = habilis_network::iroh::SecretKey::from_bytes(&key_bytes);
+        let shared = super::bind_shared(lookups, key, Vec::new(), false)
+            .await
+            .expect("bind endpoint");
         super::join(super::JoinOpts {
             target: super::mint(token, lookups, None).expect("mint the share mesh"),
-            shared: InjectedEndpoint { endpoint, webrtc },
-            protocols: Vec::new(),
+            shared,
+            protocols: habilis_network_iroh_transport_util::ProtocolSet::default(),
             role,
             tree,
             serving: None,
-            transports: fofoca::net::TransportOpts::default(),
+            transports: habilis_network::net::TransportOpts::default(),
         })
         .await
         .expect("join the share mesh")

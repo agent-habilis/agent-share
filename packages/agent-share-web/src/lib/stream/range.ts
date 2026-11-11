@@ -17,7 +17,7 @@
 const CHUNK = 256 * 1024
 
 /**
- * The chunk store's addressing unit, mirroring `fofoca_chunks::CHUNK_BYTES`.
+ * The chunk store's addressing unit, mirroring `habilis_network_chunks::CHUNK_BYTES`.
  *
  * A range module has no business knowing a storage constant, except that it
  * decides the offsets somebody else has to store. The page keeps whatever this

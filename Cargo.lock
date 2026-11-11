@@ -71,9 +71,10 @@ dependencies = [
  "bs58",
  "chrono",
  "clap",
- "fofoca",
- "fofoca-chunks",
- "fofoca-iroh-webrtc-transport",
+ "habilis-network",
+ "habilis-network-chunks",
+ "habilis-network-iroh-transport-util",
+ "habilis-network-iroh-webrtc-transport",
  "nfsserve",
  "notify",
  "rand 0.9.4",
@@ -92,9 +93,9 @@ version = "0.1.0"
 dependencies = [
  "agent-share-proto",
  "anyhow",
- "fofoca",
- "fofoca-chunks",
  "futures",
+ "habilis-network",
+ "habilis-network-chunks",
 ]
 
 [[package]]
@@ -103,7 +104,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bs58",
- "fofoca-protocol",
+ "habilis-network-protocol",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -224,13 +225,13 @@ dependencies = [
 
 [[package]]
 name = "argon2"
-version = "0.5.3"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+checksum = "134c52ddac6d63c576bef8168db10c83c49c26444ecbc68060fef078925a901c"
 dependencies = [
  "base64ct",
  "blake2",
- "cpufeatures 0.2.17",
+ "cpufeatures 0.3.0",
  "password-hash",
 ]
 
@@ -492,11 +493,11 @@ checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "blake2"
-version = "0.10.6"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+checksum = "5b5d4d889834ee8ecfc0f8426ad30faf7cdcb10f741a8e6d7224d95325479f6f"
 dependencies = [
- "digest 0.10.7",
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -1006,6 +1007,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1028,30 +1030,15 @@ dependencies = [
 
 [[package]]
 name = "curve25519-dalek"
-version = "4.1.3"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "curve25519-dalek-derive",
- "fiat-crypto 0.2.9",
- "rustc_version",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "curve25519-dalek"
-version = "5.0.0-rc.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f359e08ca85e7bd759e1fd933ff2bccd81864c60a8fba0e259c7f822b0924bf"
+checksum = "b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "curve25519-dalek-derive",
  "digest 0.11.3",
- "fiat-crypto 0.3.0",
+ "fiat-crypto",
  "rand_core 0.10.1",
  "rustc_version",
  "serde",
@@ -1268,7 +1255,6 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
  "crypto-common 0.1.7",
- "subtle",
 ]
 
 [[package]]
@@ -1280,6 +1266,7 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
+ "ctutils",
 ]
 
 [[package]]
@@ -1397,7 +1384,7 @@ version = "3.0.0-rc.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b011170fe4f04665565b4110afef66774fe9ffff278f3eb5b81cc73d26e27d60"
 dependencies = [
- "curve25519-dalek 5.0.0-rc.0",
+ "curve25519-dalek",
  "ed25519",
  "rand_core 0.10.1",
  "serde",
@@ -1469,12 +1456,6 @@ dependencies = [
 
 [[package]]
 name = "fiat-crypto"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
-
-[[package]]
-name = "fiat-crypto"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
@@ -1522,177 +1503,6 @@ name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
-
-[[package]]
-name = "fofoca"
-version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=1c844051c95e83773e6d41a8436206c28df070dc#1c844051c95e83773e6d41a8436206c28df070dc"
-dependencies = [
- "anyhow",
- "argon2",
- "async-trait",
- "bs58",
- "bytes",
- "chacha20poly1305",
- "fofoca-doc",
- "fofoca-iroh-multihop-transport",
- "fofoca-iroh-webrtc-transport",
- "fofoca-logging",
- "fofoca-protocol",
- "fofoca-util",
- "futures-util",
- "interprocess",
- "iroh",
- "iroh-gossip",
- "iroh-mainline-address-lookup",
- "iroh-mdns-address-lookup",
- "iroh-relay",
- "libc",
- "n0-future",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tracing",
- "uuid",
- "web-time",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "fofoca-chunks"
-version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=1c844051c95e83773e6d41a8436206c28df070dc#1c844051c95e83773e6d41a8436206c28df070dc"
-dependencies = [
- "anyhow",
- "blake3",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "fofoca-doc"
-version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=1c844051c95e83773e6d41a8436206c28df070dc#1c844051c95e83773e6d41a8436206c28df070dc"
-dependencies = [
- "anyhow",
- "automerge",
- "bs58",
- "chacha20poly1305",
- "fofoca-protocol",
- "fofoca-util",
- "serde",
- "serde_json",
- "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "fofoca-iroh-multihop-transport"
-version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=1c844051c95e83773e6d41a8436206c28df070dc#1c844051c95e83773e6d41a8436206c28df070dc"
-dependencies = [
- "anyhow",
- "bytes",
- "fofoca-iroh-transport-util",
- "iroh",
- "iroh-base",
- "n0-future",
- "n0-watcher",
- "noq-udp",
- "postcard",
- "serde",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "fofoca-iroh-transport-util"
-version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=1c844051c95e83773e6d41a8436206c28df070dc#1c844051c95e83773e6d41a8436206c28df070dc"
-dependencies = [
- "iroh",
-]
-
-[[package]]
-name = "fofoca-iroh-webrtc-transport"
-version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=1c844051c95e83773e6d41a8436206c28df070dc#1c844051c95e83773e6d41a8436206c28df070dc"
-dependencies = [
- "anyhow",
- "bytes",
- "fofoca-iroh-transport-util",
- "futures",
- "if-addrs",
- "iroh",
- "iroh-base",
- "js-sys",
- "n0-watcher",
- "noq-udp",
- "rand 0.9.4",
- "serde",
- "str0m",
- "str0m-aws-lc-rs",
- "tokio",
- "tracing",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "fofoca-logging"
-version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=1c844051c95e83773e6d41a8436206c28df070dc#1c844051c95e83773e6d41a8436206c28df070dc"
-dependencies = [
- "anyhow",
- "fofoca-protocol",
- "fofoca-util",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "fofoca-protocol"
-version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=1c844051c95e83773e6d41a8436206c28df070dc#1c844051c95e83773e6d41a8436206c28df070dc"
-dependencies = [
- "anyhow",
- "argon2",
- "bs58",
- "bytes",
- "chacha20poly1305",
- "fofoca-util",
- "getrandom 0.2.17",
- "getrandom 0.3.4",
- "getrandom 0.4.3",
- "iroh-base",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tracing",
- "uuid",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "fofoca-util"
-version = "0.6.0"
-source = "git+https://github.com/fofoca-network/fofoca?rev=1c844051c95e83773e6d41a8436206c28df070dc#1c844051c95e83773e6d41a8436206c28df070dc"
-dependencies = [
- "libc",
- "tokio",
- "tracing",
- "vergen-gitcl",
- "web-time",
-]
 
 [[package]]
 name = "foldhash"
@@ -1976,6 +1786,203 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "habilis-network"
+version = "0.6.0"
+source = "git+https://github.com/agent-habilis/habilis-network?rev=db51d4ba27916ef9119ee816a02b6ae699d1dea6#db51d4ba27916ef9119ee816a02b6ae699d1dea6"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "base64",
+ "bs58",
+ "bytes",
+ "chacha20poly1305",
+ "futures-util",
+ "habilis-network-doc",
+ "habilis-network-iroh-gossip-transport",
+ "habilis-network-iroh-multihop-transport",
+ "habilis-network-iroh-transport-util",
+ "habilis-network-iroh-webrtc-transport",
+ "habilis-network-logging",
+ "habilis-network-protocol",
+ "habilis-network-util",
+ "interprocess",
+ "iroh",
+ "iroh-gossip",
+ "iroh-mainline-address-lookup",
+ "iroh-mdns-address-lookup",
+ "iroh-relay",
+ "memchr",
+ "n0-future",
+ "parking_lot",
+ "rand 0.9.4",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tracing",
+ "uuid",
+ "web-time",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "habilis-network-chunks"
+version = "0.6.0"
+source = "git+https://github.com/agent-habilis/habilis-network?rev=db51d4ba27916ef9119ee816a02b6ae699d1dea6#db51d4ba27916ef9119ee816a02b6ae699d1dea6"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "js-sys",
+ "num-traits",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "habilis-network-doc"
+version = "0.6.0"
+source = "git+https://github.com/agent-habilis/habilis-network?rev=db51d4ba27916ef9119ee816a02b6ae699d1dea6#db51d4ba27916ef9119ee816a02b6ae699d1dea6"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "bs58",
+ "chacha20poly1305",
+ "habilis-network-protocol",
+ "habilis-network-util",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "habilis-network-iroh-gossip-transport"
+version = "0.6.0"
+source = "git+https://github.com/agent-habilis/habilis-network?rev=db51d4ba27916ef9119ee816a02b6ae699d1dea6#db51d4ba27916ef9119ee816a02b6ae699d1dea6"
+dependencies = [
+ "bytes",
+ "habilis-network-iroh-transport-util",
+ "iroh",
+ "iroh-base",
+ "iroh-gossip",
+ "n0-future",
+ "n0-watcher",
+ "noq-udp",
+ "num-traits",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "habilis-network-iroh-multihop-transport"
+version = "0.6.0"
+source = "git+https://github.com/agent-habilis/habilis-network?rev=db51d4ba27916ef9119ee816a02b6ae699d1dea6#db51d4ba27916ef9119ee816a02b6ae699d1dea6"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "bytes",
+ "habilis-network-iroh-transport-util",
+ "iroh",
+ "iroh-base",
+ "n0-future",
+ "n0-watcher",
+ "noq-udp",
+ "postcard",
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "habilis-network-iroh-transport-util"
+version = "0.6.0"
+source = "git+https://github.com/agent-habilis/habilis-network?rev=db51d4ba27916ef9119ee816a02b6ae699d1dea6#db51d4ba27916ef9119ee816a02b6ae699d1dea6"
+dependencies = [
+ "iroh",
+]
+
+[[package]]
+name = "habilis-network-iroh-webrtc-transport"
+version = "0.6.0"
+source = "git+https://github.com/agent-habilis/habilis-network?rev=db51d4ba27916ef9119ee816a02b6ae699d1dea6#db51d4ba27916ef9119ee816a02b6ae699d1dea6"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "habilis-network-iroh-transport-util",
+ "if-addrs",
+ "iroh",
+ "iroh-base",
+ "js-sys",
+ "n0-future",
+ "n0-watcher",
+ "noq-udp",
+ "rand 0.9.4",
+ "serde",
+ "str0m",
+ "str0m-aws-lc-rs",
+ "tokio",
+ "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "habilis-network-logging"
+version = "0.6.0"
+source = "git+https://github.com/agent-habilis/habilis-network?rev=db51d4ba27916ef9119ee816a02b6ae699d1dea6#db51d4ba27916ef9119ee816a02b6ae699d1dea6"
+dependencies = [
+ "anyhow",
+ "habilis-network-protocol",
+ "habilis-network-util",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "habilis-network-protocol"
+version = "0.6.0"
+source = "git+https://github.com/agent-habilis/habilis-network?rev=db51d4ba27916ef9119ee816a02b6ae699d1dea6#db51d4ba27916ef9119ee816a02b6ae699d1dea6"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "bs58",
+ "bytes",
+ "chacha20poly1305",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "habilis-network-util",
+ "iroh-base",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tracing",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "habilis-network-util"
+version = "0.6.0"
+source = "git+https://github.com/agent-habilis/habilis-network?rev=db51d4ba27916ef9119ee816a02b6ae699d1dea6#db51d4ba27916ef9119ee816a02b6ae699d1dea6"
+dependencies = [
+ "libc",
+ "rustix",
+ "tokio",
+ "tracing",
+ "vergen-gitcl",
+ "web-time",
 ]
 
 [[package]]
@@ -2479,7 +2486,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
+source = "git+https://github.com/agent-habilis/iroh?rev=e970dd25148386850feaffbac044bba64765fe73#e970dd25148386850feaffbac044bba64765fe73"
 dependencies = [
  "axum",
  "backon",
@@ -2530,9 +2537,9 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
+source = "git+https://github.com/agent-habilis/iroh?rev=e970dd25148386850feaffbac044bba64765fe73#e970dd25148386850feaffbac044bba64765fe73"
 dependencies = [
- "curve25519-dalek 5.0.0-rc.0",
+ "curve25519-dalek",
  "data-encoding",
  "data-encoding-macro",
  "derive_more",
@@ -2548,7 +2555,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
+source = "git+https://github.com/agent-habilis/iroh?rev=e970dd25148386850feaffbac044bba64765fe73#e970dd25148386850feaffbac044bba64765fe73"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2570,8 +2577,8 @@ dependencies = [
 
 [[package]]
 name = "iroh-gossip"
-version = "0.101.0"
-source = "git+https://github.com/fofoca-network/iroh-gossip?rev=e66061b298a350141938046e3a84b29628ebb899#e66061b298a350141938046e3a84b29628ebb899"
+version = "0.102.0"
+source = "git+https://github.com/agent-habilis/iroh-gossip?rev=810fc0fdd5541e7bd337fc6212a61cb6e18ac264#810fc0fdd5541e7bd337fc6212a61cb6e18ac264"
 dependencies = [
  "blake3",
  "bytes",
@@ -2597,7 +2604,7 @@ dependencies = [
 [[package]]
 name = "iroh-mainline-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=556f5027c6a0abf228267305e5dd89d0c2a6f23d#556f5027c6a0abf228267305e5dd89d0c2a6f23d"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=a40fd1371cfdb627428b7050268cc9016310aa82#a40fd1371cfdb627428b7050268cc9016310aa82"
 dependencies = [
  "derive_more",
  "iroh",
@@ -2614,7 +2621,7 @@ dependencies = [
 [[package]]
 name = "iroh-mdns-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=556f5027c6a0abf228267305e5dd89d0c2a6f23d#556f5027c6a0abf228267305e5dd89d0c2a6f23d"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=a40fd1371cfdb627428b7050268cc9016310aa82#a40fd1371cfdb627428b7050268cc9016310aa82"
 dependencies = [
  "data-encoding",
  "derive_more",
@@ -2668,7 +2675,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
+source = "git+https://github.com/agent-habilis/iroh?rev=e970dd25148386850feaffbac044bba64765fe73#e970dd25148386850feaffbac044bba64765fe73"
 dependencies = [
  "blake3",
  "bytes",
@@ -3218,7 +3225,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.1"
-source = "git+https://github.com/fofoca-network/net-tools?rev=e02960255ef2f5b2ba4aa3d4cf195e0b8673f370#e02960255ef2f5b2ba4aa3d4cf195e0b8673f370"
+source = "git+https://github.com/agent-habilis/net-tools?rev=e02960255ef2f5b2ba4aa3d4cf195e0b8673f370#e02960255ef2f5b2ba4aa3d4cf195e0b8673f370"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3289,8 +3296,7 @@ dependencies = [
 [[package]]
 name = "noq"
 version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11803df44ac03a30988d61585ea50885d5428e42da944fe1e498799da7886a2"
+source = "git+https://github.com/agent-habilis/noq?rev=2b2252ce483cd9a5f88296fa7989bc54324a0bdf#2b2252ce483cd9a5f88296fa7989bc54324a0bdf"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -3310,9 +3316,8 @@ dependencies = [
 
 [[package]]
 name = "noq-proto"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa7b5ccd819a9c68a0d955e67a881032d09b1a17219b1f90b0997a0888e1a15"
+version = "1.1.0"
+source = "git+https://github.com/agent-habilis/noq?rev=2b2252ce483cd9a5f88296fa7989bc54324a0bdf#2b2252ce483cd9a5f88296fa7989bc54324a0bdf"
 dependencies = [
  "aes-gcm",
  "bytes",
@@ -3635,13 +3640,11 @@ dependencies = [
 
 [[package]]
 name = "password-hash"
-version = "0.5.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+checksum = "aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b"
 dependencies = [
- "base64ct",
- "rand_core 0.6.4",
- "subtle",
+ "phc",
 ]
 
 [[package]]
@@ -3698,6 +3701,16 @@ checksum = "e9567389417feee6ce15dd6527a8a1ecac205ef62c2932bcf3d9f6fc5b78b414"
 dependencies = [
  "futures",
  "rustc_version",
+]
+
+[[package]]
+name = "phc"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44dc769b75f93afdddd8c7fa12d685292ddeff1e66f7f0f3a234cf1818afe892"
+dependencies = [
+ "base64ct",
+ "ctutils",
 ]
 
 [[package]]
@@ -3806,7 +3819,7 @@ dependencies = [
 [[package]]
 name = "portmapper"
 version = "0.19.1"
-source = "git+https://github.com/fofoca-network/net-tools?rev=e02960255ef2f5b2ba4aa3d4cf195e0b8673f370#e02960255ef2f5b2ba4aa3d4cf195e0b8673f370"
+source = "git+https://github.com/agent-habilis/net-tools?rev=e02960255ef2f5b2ba4aa3d4cf195e0b8673f370#e02960255ef2f5b2ba4aa3d4cf195e0b8673f370"
 dependencies = [
  "base64",
  "bytes",
@@ -4830,7 +4843,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "swarm-discovery"
 version = "0.6.3"
-source = "git+https://github.com/rkuhn/swarm-discovery?rev=b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce#b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce"
+source = "git+https://github.com/agent-habilis/swarm-discovery?rev=b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce#b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce"
 dependencies = [
  "acto",
  "hickory-proto",
@@ -5429,32 +5442,21 @@ dependencies = [
  "anyhow",
  "derive_builder",
  "rustversion",
- "vergen-lib 9.1.0",
+ "vergen-lib",
 ]
 
 [[package]]
 name = "vergen-gitcl"
-version = "1.0.8"
+version = "9.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9dfc1de6eb2e08a4ddf152f1b179529638bedc0ea95e6d667c014506377aefe"
+checksum = "77ff3b5300a085d6bcd8fc96a507f706a28ae3814693236c9b409db71a1d15b9"
 dependencies = [
  "anyhow",
  "derive_builder",
  "rustversion",
  "time",
  "vergen",
- "vergen-lib 0.1.6",
-]
-
-[[package]]
-name = "vergen-lib"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b07e6010c0f3e59fcb164e0163834597da68d1f864e2b8ca49f74de01e9c166"
-dependencies = [
- "anyhow",
- "derive_builder",
- "rustversion",
+ "vergen-lib",
 ]
 
 [[package]]
@@ -6069,13 +6071,12 @@ dependencies = [
 
 [[package]]
 name = "x25519-dalek"
-version = "2.0.1"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+checksum = "e7e8131a03190127fb2263afc72b322ecadae46b6ff8c6f399ff5d02f5559af6"
 dependencies = [
- "curve25519-dalek 4.1.3",
- "rand_core 0.6.4",
- "serde",
+ "curve25519-dalek",
+ "rand_core 0.10.1",
  "zeroize",
 ]
 

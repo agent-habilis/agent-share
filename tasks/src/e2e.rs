@@ -1153,7 +1153,7 @@ fn cell_password_native_spurious(ctx: &Ctx<'_>) -> Res<()> {
 
 /// A mirror of a protected share, re-served without the password.
 ///
-/// The documented degradation: `fofoca` gates every mesh derivation behind the
+/// The documented degradation: `habilis-network` gates every mesh derivation behind the
 /// stretched password key, so such a copy cannot join the share's mesh. It must
 /// still *serve* — the token in its sidecar opens the mount protocol — because
 /// serving nothing would be the worse trade. Asserted from the outside: a fresh

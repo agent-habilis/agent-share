@@ -15,7 +15,7 @@
 //!
 //! # Nothing is copied
 //!
-//! The cache wraps a [`FsOrigin`], which records where each address lives and
+//! The cache wraps a [`DiskOrigin`], which records where each address lives and
 //! reads through to the user's own file. A share of a terabyte costs a table of
 //! 32-byte addresses, not a second terabyte — and that table is ~0.05 % of the
 //! content, half what the bao outboard it replaces cost.
@@ -30,7 +30,9 @@
 //! it is the same one that already re-checks on every read.
 
 use anyhow::Result;
-use fofoca_chunks::{ChunkHash, ChunkMap, ChunkSource as _, Coverage, FileId, FsOrigin, Root};
+use habilis_network_chunks::{
+    ChunkHash, ChunkMap, ChunkSource as _, Coverage, DiskOrigin, FileId, Root,
+};
 
 use super::live::LiveTree;
 
@@ -42,7 +44,7 @@ use super::live::LiveTree;
 /// the docs — the same trade `LiveTree` beside it makes.
 #[derive(Debug, Default)]
 pub struct ChunkCache {
-    origin: FsOrigin,
+    origin: DiskOrigin,
 }
 
 impl ChunkCache {
@@ -62,15 +64,14 @@ impl ChunkCache {
     pub async fn map_of_index(&self, tree: &LiveTree, index: u32) -> Option<ChunkMap> {
         let path = tree.path_of(index)?;
         let meta = tokio::fs::metadata(&path).await.ok()?;
-        let file = FileId {
-            key: path.to_string_lossy().into_owned(),
-            size: meta.len(),
-            mtime: meta
-                .modified()
+        let file = FileId::new(
+            path.to_string_lossy().into_owned(),
+            meta.len(),
+            meta.modified()
                 .ok()
                 .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |since| since.as_secs().cast_signed()),
-        };
+        );
 
         // Already addressed, and the file has not moved underneath. The version
         // gate lives in the store, so a file edited since it was read is
@@ -107,7 +108,7 @@ impl ChunkCache {
     /// # Errors
     /// The underlying source could not answer.
     pub async fn have(&self, root: Root) -> Result<Coverage> {
-        self.origin.coverage(root).await
+        Ok(self.origin.coverage(root).await?)
     }
 }
 
@@ -115,7 +116,7 @@ impl ChunkCache {
 mod tests {
     use std::sync::Arc;
 
-    use fofoca_chunks::{CHUNK_BYTES_USIZE, chunk_hash};
+    use habilis_network_chunks::{CHUNK_BYTES_USIZE, chunk_hash};
 
     use super::ChunkCache;
     use crate::mount::live::LiveTree;

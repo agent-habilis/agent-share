@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use agent_share_proto::framing::{MOUNT_ALPN, SECRET_LEN, WEBRTC_SIGNAL_ALPN};
 use agent_share_proto::manifest::MountManifest;
-use fofoca::iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr, endpoint::presets};
-use fofoca_iroh_webrtc_transport::{
+use habilis_network::iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr, endpoint::presets};
+use habilis_network_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, WebRtcTransport, answer_with,
     custom_addr, offer_with,
 };
@@ -49,7 +49,7 @@ async fn endpoint_with_webrtc(alpns: Vec<Vec<u8>>) -> (Endpoint, WebRtcHandle) {
     let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(key)
-        .relay_mode(fofoca::iroh::RelayMode::Disabled)
+        .relay_mode(habilis_network::iroh::RelayMode::Disabled)
         .clear_address_lookup()
         .alpns(alpns)
         .add_custom_transport(handle.transport())
@@ -181,7 +181,7 @@ async fn a_share_is_readable_over_a_webrtc_data_channel() {
 /// have a *warm* non-`WebRTC` path in the address book when the mount is
 /// dialled.
 async fn endpoint_on_relay(
-    relay: fofoca::iroh::RelayMap,
+    relay: habilis_network::iroh::RelayMap,
     alpns: Vec<Vec<u8>>,
     with_selector: bool,
     clear_ip: bool,
@@ -192,12 +192,12 @@ async fn endpoint_on_relay(
     let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
     let mut builder = Endpoint::builder(presets::Minimal)
         .secret_key(key)
-        .relay_mode(fofoca::iroh::RelayMode::Custom(relay))
+        .relay_mode(habilis_network::iroh::RelayMode::Custom(relay))
         // `run_relay_server` serves self-signed certs, so an endpoint that
         // verifies them never completes the relay handshake and simply reports
         // no relay URL at all — which reads as "the relay is fine, the address
         // is just empty". iroh's own tests do exactly this.
-        .ca_tls_config(fofoca::iroh::tls::CaTlsConfig::insecure_skip_verify())
+        .ca_tls_config(habilis_network::iroh::tls::CaTlsConfig::insecure_skip_verify())
         .clear_address_lookup()
         .alpns(alpns)
         .add_custom_transport(handle.transport());
@@ -235,9 +235,10 @@ async fn endpoint_on_relay(
 /// that is what proves the selector is doing the work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_mount_selects_webrtc_over_a_warm_relay_path() {
-    let (relay_map, relay_url, _relay_guard) = fofoca::iroh::test_utils::run_relay_server()
-        .await
-        .expect("spawn a local relay");
+    let (relay_map, relay_url, _relay_guard) =
+        habilis_network::iroh::test_utils::run_relay_server()
+            .await
+            .expect("spawn a local relay");
 
     let (producer, producer_webrtc) = endpoint_on_relay(
         relay_map.clone(),
@@ -303,8 +304,8 @@ async fn the_mount_selects_webrtc_over_a_warm_relay_path() {
     // endpoint owns, which is all that matters.
     let consumer = Endpoint::builder(presets::Minimal)
         .secret_key(consumer_key.clone())
-        .relay_mode(fofoca::iroh::RelayMode::Custom(relay_map.clone()))
-        .ca_tls_config(fofoca::iroh::tls::CaTlsConfig::insecure_skip_verify())
+        .relay_mode(habilis_network::iroh::RelayMode::Custom(relay_map.clone()))
+        .ca_tls_config(habilis_network::iroh::tls::CaTlsConfig::insecure_skip_verify())
         .clear_address_lookup()
         .clear_ip_transports()
         .bind()
@@ -316,7 +317,7 @@ async fn the_mount_selects_webrtc_over_a_warm_relay_path() {
         // registering with the same relay fight over the registration and ICE
         // never completes (measured — the data channel times out). Only the
         // signal endpoint may hold the relay.
-        .relay_mode(fofoca::iroh::RelayMode::Disabled)
+        .relay_mode(habilis_network::iroh::RelayMode::Disabled)
         .clear_address_lookup()
         .clear_ip_transports()
         .clear_relay_transports()
@@ -389,7 +390,7 @@ async fn the_mount_selects_webrtc_over_a_warm_relay_path() {
 /// rather than a single read: selection settles a moment after the connection
 /// opens, and reading once raced it.
 async fn wait_for_selected_webrtc(
-    mount: &fofoca::iroh::endpoint::Connection,
+    mount: &habilis_network::iroh::endpoint::Connection,
 ) -> (bool, Vec<String>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -401,7 +402,8 @@ async fn wait_for_selected_webrtc(
                     TransportAddr::Relay(..) => "relay",
                     TransportAddr::Ip(_) => "ip",
                     TransportAddr::Custom(addr)
-                        if addr.id() == fofoca_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID =>
+                        if addr.id()
+                            == habilis_network_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID =>
                     {
                         "webrtc"
                     }
@@ -425,7 +427,7 @@ async fn wait_for_selected_webrtc(
 }
 
 async fn fetch_manifest(
-    conn: &fofoca::iroh::endpoint::Connection,
+    conn: &habilis_network::iroh::endpoint::Connection,
     secret: &[u8; SECRET_LEN],
 ) -> MountManifest {
     let (mut send, mut recv) = conn.open_bi().await.expect("open manifest stream");
@@ -450,7 +452,7 @@ async fn fetch_manifest(
 }
 
 async fn read_range(
-    conn: &fofoca::iroh::endpoint::Connection,
+    conn: &habilis_network::iroh::endpoint::Connection,
     secret: &[u8; SECRET_LEN],
     index: u32,
     offset: u64,
@@ -482,9 +484,9 @@ async fn read_range(
 /// Attach a real session for the pair, out of band — standing in for whatever
 /// the mesh lane would have done.
 async fn attach_pair(
-    offerer_id: fofoca::iroh::EndpointId,
+    offerer_id: habilis_network::iroh::EndpointId,
     offerer: &WebRtcHandle,
-    answerer_id: fofoca::iroh::EndpointId,
+    answerer_id: habilis_network::iroh::EndpointId,
     answerer: &WebRtcHandle,
 ) {
     let (pending_offer, offer) = offer_with(offerer_id, &ice()).await.expect("build offer");

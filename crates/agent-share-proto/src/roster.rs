@@ -2,19 +2,20 @@
 //! roster together.
 //!
 //! Two sources have to meet here, and they are keyed differently on purpose.
-//! The meta CRDT document is keyed by **nickname**, because the engine's
-//! per-peer write gate only lets a peer write under its own author name. The
-//! roster of who is actually present is keyed by nickname too. But a *card*
-//! identifies its peer by **endpoint id**, which is what a mount session can
-//! be addressed by, and which survives the rejoin that mints a fresh nickname.
+//! The meta CRDT document is keyed by the **author key** (lowercase hex),
+//! because the engine's per-peer write gate only lets a key write under its
+//! own slot. A nickname is a label that two keys can share, so it no longer
+//! names a slot. The roster of who is actually present is keyed by author key
+//! too. But a *card* identifies its peer by **endpoint id**, which is what a
+//! mount session can be addressed by.
 //!
-//! So: join on the nickname, key the result by the endpoint. An earlier
-//! attempt at this filtered an endpoint-keyed book against a nickname-keyed
+//! So: join on the author key, key the result by the endpoint. An earlier
+//! attempt at this filtered an endpoint-keyed book against a name-keyed
 //! roster — a comparison that is empty by construction, which read as "every
-//! peer has left" and hid live ones. The nickname is *evidence*; the endpoint
-//! is *identity*; neither substitutes for the other.
+//! peer has left" and hid live ones. The author key is *evidence* of presence;
+//! the endpoint is *identity* for the mount; neither substitutes for the other.
 //!
-//! Deliberately free of the engine: this takes plain nicknames and cards, so
+//! Deliberately free of the engine: this takes plain hex keys and cards, so
 //! it is testable without standing a node up, and it carries no clock, which
 //! is what keeps it usable from `wasm32-unknown-unknown` (`Instant::now`
 //! panics there).
@@ -23,17 +24,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::client::PeerCard;
 
-/// One `/peers/<nick>/card` entry, with the name it was published under.
+/// One `/peers/<key>/card` entry, with the author key it was published under.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MetaEntry {
-    /// The author nickname the document keys this card by. Random per join
-    /// and not unique, so it is only ever used to look the peer up in the
-    /// roster — never as identity.
-    pub nickname: String,
+    /// The author key (lowercase hex) the document keys this card by. New per
+    /// join, so it is only ever used to look the peer up in the roster — never
+    /// as the identity a mount addresses.
+    pub key: String,
     pub card: PeerCard,
 }
 
-/// Read every `/peers/<nick>/card` out of a meta document.
+/// Read every `/peers/<key>/card` out of a meta document.
 ///
 /// Tolerant on purpose, and each tolerance costs exactly one peer rather than
 /// the roster: an entry with no card yet (a peer that joined but has not
@@ -47,10 +48,10 @@ pub fn entries_from_meta(doc: &serde_json::Value) -> Vec<MetaEntry> {
     };
     peers
         .iter()
-        .filter_map(|(nickname, peer)| {
+        .filter_map(|(key, peer)| {
             let card = PeerCard::from_card_value(peer.get("card")?)?;
             Some(MetaEntry {
-                nickname: nickname.clone(),
+                key: key.clone(),
                 card,
             })
         })
@@ -59,20 +60,20 @@ pub fn entries_from_meta(doc: &serde_json::Value) -> Vec<MetaEntry> {
 
 /// The cards of peers the engine currently counts as present.
 ///
-/// `live` is the set of nicknames on the roster with the idle ones already
+/// `live` is the set of author keys on the roster with the idle ones already
 /// removed — the same set the engine's own peer count is taken from, which is
 /// what makes a list built here agree with that count instead of merely
 /// resembling it.
 ///
-/// A card whose nickname is not on the roster is dropped. That covers a peer
+/// A card whose author key is not on the roster is dropped. That covers a peer
 /// that left, one evicted for silence, and the historical entries anti-entropy
 /// hands a fresh joiner — all without a timer of our own, because the engine
 /// has already made that judgement and we are reading it rather than repeating
-/// it. The converse, a roster nickname that has published no card, yields
+/// it. The converse, a roster key that has published no card, yields
 /// nothing here; a peer we cannot describe is not a row.
 ///
-/// One peer occupying two nicknames collapses to one entry, which is the
-/// desired reading: it is one peer. The survivor is chosen by nickname order
+/// One endpoint published under two keys collapses to one entry, which is the
+/// desired reading: it is one peer. The survivor is chosen by key order
 /// so that two callers, or one caller twice, agree — a plain map insert over
 /// an unordered document picks an arbitrary winner that changes between
 /// rebuilds.
@@ -80,17 +81,17 @@ pub fn entries_from_meta(doc: &serde_json::Value) -> Vec<MetaEntry> {
 pub fn live_cards(entries: &[MetaEntry], live: &BTreeSet<String>) -> Vec<PeerCard> {
     let mut by_endpoint: BTreeMap<&str, (&str, &PeerCard)> = BTreeMap::new();
     for entry in entries {
-        if !live.contains(entry.nickname.as_str()) {
+        if !live.contains(entry.key.as_str()) {
             continue;
         }
         by_endpoint
             .entry(entry.card.endpoint.as_str())
             .and_modify(|held| {
-                if entry.nickname.as_str() < held.0 {
-                    *held = (entry.nickname.as_str(), &entry.card);
+                if entry.key.as_str() < held.0 {
+                    *held = (entry.key.as_str(), &entry.card);
                 }
             })
-            .or_insert((entry.nickname.as_str(), &entry.card));
+            .or_insert((entry.key.as_str(), &entry.card));
     }
     by_endpoint
         .into_values()
@@ -112,10 +113,10 @@ pub fn live_cards(entries: &[MetaEntry], live: &BTreeSet<String>) -> Vec<PeerCar
 /// else reads.
 #[derive(Default, Debug)]
 pub struct Roster {
-    /// Every `/peers/<nick>/card` in the meta document, departed peers
+    /// Every `/peers/<key>/card` in the meta document, departed peers
     /// included. Nothing deletes an entry, so this only grows.
     entries: Vec<MetaEntry>,
-    /// Nicknames the engine counts as present, with the idle ones already
+    /// Author keys the engine counts as present, with the idle ones already
     /// dropped — the same set its peer count is taken from, which is what
     /// makes a list built here agree with that count.
     present: BTreeSet<String>,
@@ -160,9 +161,9 @@ mod tests {
         )
     }
 
-    fn entry(nickname: &str, endpoint: &str) -> MetaEntry {
+    fn entry(key: &str, endpoint: &str) -> MetaEntry {
         MetaEntry {
-            nickname: nickname.to_owned(),
+            key: key.to_owned(),
             card: card(endpoint),
         }
     }
@@ -174,14 +175,14 @@ mod tests {
     fn meta(entries: &[(&str, serde_json::Value)]) -> serde_json::Value {
         let peers: serde_json::Map<String, serde_json::Value> = entries
             .iter()
-            .map(|(nick, body)| ((*nick).to_owned(), body.clone()))
+            .map(|(key, body)| ((*key).to_owned(), body.clone()))
             .collect();
         serde_json::json!({ "peers": peers })
     }
 
-    /// The nickname is the join key, so it has to survive the parse. The
+    /// The author key is the join key, so it has to survive the parse. The
     /// previous readers threw it away and re-keyed by endpoint, which left
-    /// nothing to compare a nickname-keyed roster against.
+    /// nothing to compare a key-keyed roster against.
     #[test]
     fn the_parse_keeps_the_name_a_card_was_published_under() {
         let doc = meta(&[(
@@ -190,7 +191,7 @@ mod tests {
         )]);
         let entries = entries_from_meta(&doc);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].nickname, "alice");
+        assert_eq!(entries[0].key, "alice");
         assert_eq!(entries[0].card.endpoint, "ep-a");
     }
 
@@ -213,10 +214,7 @@ mod tests {
             ),
         ]);
         let entries = entries_from_meta(&doc);
-        let names: Vec<&str> = entries
-            .iter()
-            .map(|entry| entry.nickname.as_str())
-            .collect();
+        let names: Vec<&str> = entries.iter().map(|entry| entry.key.as_str()).collect();
         assert_eq!(names, vec!["alice"]);
     }
 
@@ -245,11 +243,11 @@ mod tests {
         assert!(live_cards(&[], &live(&["alice"])).is_empty());
     }
 
-    /// Two nicknames, one machine. It is one peer, and both readings of the
+    /// Two author keys, one machine. It is one peer, and both readings of the
     /// document must agree on which card describes it — an unordered insert
     /// picks a winner that changes between rebuilds.
     #[test]
-    fn one_peer_under_two_nicknames_collapses_the_same_way_every_time() {
+    fn one_peer_under_two_keys_collapses_the_same_way_every_time() {
         let forwards = [entry("alpha", "ep-a"), entry("omega", "ep-a")];
         let backwards = [entry("omega", "ep-a"), entry("alpha", "ep-a")];
         let names = live(&["alpha", "omega"]);
