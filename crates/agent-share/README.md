@@ -43,5 +43,5 @@ See the repository README for the web client and the overall layout.
 
 ## Not published
 
-`publish = false`. The ticket format and the `agent-share/mount/1` ALPN are pinned
+`publish = false`. The ticket format and the `agent-share/mount/2` ALPN are pinned
 by golden tests; both ends of a mount must run the same build.

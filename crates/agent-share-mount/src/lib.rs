@@ -40,6 +40,8 @@
 
 pub use self::seed::{Feed, Seeder, WeakSeeder};
 pub use self::serve::{ServeSource, Watcher, serve_stream};
+pub use self::version::{OTHER_VERSION, refused_protocol};
 
 mod seed;
 mod serve;
+mod version;

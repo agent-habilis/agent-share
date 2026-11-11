@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use agent_share_mount::{OTHER_VERSION, refused_protocol};
 use agent_share_proto::PeerCard;
 use agent_share_proto::auth::ShareAuth;
 use agent_share_proto::authorship::SignedManifest;
@@ -865,10 +866,12 @@ impl RemoteClient {
             &IceConfig::default(),
         ))
         .await?;
-        self.endpoint
-            .connect(addr, MOUNT_ALPN)
-            .await
-            .context("dial the mount ALPN over the WebRTC data channel")
+        match self.endpoint.connect(addr, MOUNT_ALPN).await {
+            Ok(conn) => Ok(conn),
+            Err(error) if refused_protocol(&error) => Err(anyhow::anyhow!(OTHER_VERSION)),
+            Err(error) => Err(anyhow::Error::from(error))
+                .context("dial the mount ALPN over the WebRTC data channel"),
+        }
     }
 
     #[cfg(test)]
@@ -918,6 +921,9 @@ impl RemoteClient {
                 .await
             {
                 Ok(conn) => break conn,
+                Err(error) if refused_protocol(&error) => {
+                    return Err(anyhow::anyhow!(OTHER_VERSION));
+                }
                 Err(error) if start.elapsed() < discovery_deadline() => {
                     tracing::warn!(%error, "connect failed; retrying");
                     tokio::time::sleep(RETRY_DELAY).await;

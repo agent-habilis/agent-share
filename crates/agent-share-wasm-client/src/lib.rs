@@ -1,6 +1,6 @@
 //! The browser client: read a share over a WebRTC data channel.
 //!
-//! No web-specific protocol. This speaks the same `agent-share/mount/1` ALPN
+//! No web-specific protocol. This speaks the same `agent-share/mount/2` ALPN
 //! the CLI does, over the same `habilis-network-iroh-webrtc-transport`, using the same
 //! `agent-share-proto` wire types — the browser is a peer, not a special case.
 //!
@@ -21,7 +21,7 @@
 //!
 //! 1. Dial `agent-share/webrtc-signal/1` over the relay and swap one JSEP
 //!    envelope each way.
-//! 2. Open a **fresh** connection to `agent-share/mount/1` against an address
+//! 2. Open a **fresh** connection to `agent-share/mount/2` against an address
 //!    carrying only the `WebRTC` custom addr.
 //!
 //! When host/mDNS and NAT hairpin both fail there is no ICE path left: TURN is
@@ -5404,6 +5404,9 @@ async fn connect_webrtc(
         Err(error) => {
             endpoint.close().await;
             signal_endpoint.close().await;
+            if agent_share_mount::refused_protocol(&error) {
+                return Err(JsValue::from_str(agent_share_mount::OTHER_VERSION));
+            }
             Err(err("dial the mount ALPN over WebRTC", &error))
         }
     }

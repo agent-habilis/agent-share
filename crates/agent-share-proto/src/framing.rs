@@ -19,7 +19,16 @@ use crate::manifest::ReadStatus;
 /// tool took the `agent-share` name. QUIC refuses a handshake on ALPN
 /// mismatch, so `ahsw mount` and `agent-share` no longer connect to each
 /// other — deliberate, not drift.
-pub const MOUNT_ALPN: &[u8] = b"agent-share/mount/1";
+///
+/// `/2` since the move from fofoca to habilis-network. The engine rename
+/// changed the hash domain of a chunk root (`fofoca-chunks/root/v1` became
+/// `habilis-network-chunks/root/v1`), and roots ride this protocol
+/// (`OP_CHUNK_MAP`, `OP_HAVE`). A `/1` peer and a `/2` peer compute different
+/// roots for the same bytes, so between them every read failed late, as "a
+/// peer sent a chunk map whose root does not match its own addresses". The
+/// version bump makes the two refuse each other at the handshake instead,
+/// where the consumer can say what is wrong.
+pub const MOUNT_ALPN: &[u8] = b"agent-share/mount/2";
 
 /// ALPN for the `WebRTC` signaling exchange: one bi-stream, one JSEP envelope
 /// each way, `finish` as the frame boundary.
@@ -737,7 +746,7 @@ mod tests {
         // accident silently breaks a producer on `main` against a consumer on
         // a branch. The op codes and secret length are still bit-identical to
         // agent-habilis/swarm's `ahsw mount`; only the ALPN was forked.
-        assert_eq!(MOUNT_ALPN, b"agent-share/mount/1");
+        assert_eq!(MOUNT_ALPN, b"agent-share/mount/2");
         assert_eq!(WEBRTC_SIGNAL_ALPN, b"agent-share/webrtc-signal/1");
         assert_eq!(OP_MANIFEST, 1);
         assert_eq!(OP_READ, 2);
